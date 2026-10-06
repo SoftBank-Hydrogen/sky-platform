@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.analysis import AISettings
+from sky_platform.planning.analysis import AISettings
 from smoke_aws_live_ai import main, preflight, verify_job
 
 

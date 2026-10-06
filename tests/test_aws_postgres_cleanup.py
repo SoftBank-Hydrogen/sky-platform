@@ -2,8 +2,8 @@
 import unittest
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError
-from sky_platform.runtime.postgres import PostgresRequest
+from sky_platform.deployment.aws import AwsConfigurationError
+from sky_platform.database.postgres import PostgresRequest
 from tests.smoke_aws_postgres_cleanup import _db_users, plan
 
 

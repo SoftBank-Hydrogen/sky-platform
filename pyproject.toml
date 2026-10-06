@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"sky_platform.runtime" = ["static/*", "infra/*"]
+"sky_platform.assets" = ["static/*", "infra/*"]
 
 [tool.pytest.ini_options]
 # "tests"는 드릴 스크립트를 최상위 모듈로 불러오는 기존 테스트에 필요하다.
@@ -33,4 +33,4 @@ norecursedirs = ["tests/live", "fixtures"]
 line-length = 110
 target-version = "py312"
 # 가져온 런타임과 회귀 테스트는 단계적으로 포맷 규칙을 적용한다.
-extend-exclude = ["src/sky_platform/runtime", "tests/*.py", "tests/fixtures"]
+extend-exclude = ["src/sky_platform/api", "src/sky_platform/planning", "src/sky_platform/deployment", "src/sky_platform/database", "tests/*.py", "tests/fixtures"]

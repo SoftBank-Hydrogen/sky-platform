@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.migrations import collect_sql_migrations
-from sky_platform.runtime.postgres_restore_task import (plan_restore_verifier_task,
+from sky_platform.deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from sky_platform.database.migrations import collect_sql_migrations
+from sky_platform.database.postgres_restore_task import (plan_restore_verifier_task,
     RestoreVerifierRunner, verifier_run_request, verifier_task_definition)
 
 
@@ -58,15 +58,15 @@ class RestoreTaskTests(unittest.TestCase):
                 return json.dumps(route_response)
             return json.dumps({'logGroups': [{'logGroupName': database['migration_log_group'],
                                               'retentionInDays': 14}]})
-        with patch('sky_platform.runtime.postgres_restore_task.plan_restore_credentials',
+        with patch('sky_platform.database.postgres_restore_task.plan_restore_credentials',
                    return_value=credentials), \
-                patch('sky_platform.runtime.postgres_restore_task.RestoreInstance.inspect_for_probe',
+                patch('sky_platform.database.postgres_restore_task.RestoreInstance.inspect_for_probe',
                       return_value=restored), \
-                patch('sky_platform.runtime.postgres_restore_task.discover_existing_postgres',
+                patch('sky_platform.database.postgres_restore_task.discover_existing_postgres',
                       return_value=source), \
-                patch('sky_platform.runtime.postgres_restore_task.AwsPostgresProvisioner.inspect_current',
+                patch('sky_platform.database.postgres_restore_task.AwsPostgresProvisioner.inspect_current',
                       return_value=database), \
-                patch('sky_platform.runtime.postgres_restore_task.AwsExpressAdapter.aws',
+                patch('sky_platform.database.postgres_restore_task.AwsExpressAdapter.aws',
                       autospec=True, side_effect=aws):
             result = plan_restore_verifier_task(APP, SNAPSHOT, TARGET, self.settings,
                                                 VPC, DB_GROUP, PROBE_GROUP, self.project)

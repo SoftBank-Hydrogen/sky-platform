@@ -9,9 +9,9 @@ import secrets
 import tempfile
 from pathlib import Path
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.aws_migrations import cleanup_interrupted_migration, inspect_migration_task
-from sky_platform.runtime.postgres import PostgresRequest
+from sky_platform.deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from sky_platform.deployment.aws_migrations import cleanup_interrupted_migration, inspect_migration_task
+from sky_platform.database.postgres import PostgresRequest
 
 
 def save(path: Path, record: dict) -> None:

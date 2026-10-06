@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
-from sky_platform.runtime.aws import AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.core import analyze
-from sky_platform.runtime.rehearsal import rehearse_image
+from sky_platform.deployment.aws import AwsExpressAdapter, AwsSettings
+from sky_platform.deployment.core import analyze
+from sky_platform.deployment.rehearsal import rehearse_image
 
 
 ATTEMPT = 'a' * 16 + '-a1'
@@ -34,7 +34,7 @@ class RehearsalTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
         opener = Mock()
         opener.open.return_value = response
-        with patch('sky_platform.runtime.rehearsal.urllib.request.build_opener', return_value=opener):
+        with patch('sky_platform.deployment.rehearsal.urllib.request.build_opener', return_value=opener):
             result = rehearse_image(command, lambda *_: None, IMAGE, self.plan, ATTEMPT,
                                     {'APP_SECRET': 'synthetic-private-value'})
         self.assertEqual(result['status'], 'passed')
@@ -52,8 +52,8 @@ class RehearsalTests(unittest.TestCase):
         with patch.object(adapter, 'prepare_infrastructure', return_value=(
                 '123456789012', '123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/sky-managed',
                 'execution', 'infrastructure')) as prepare, \
-                patch('sky_platform.runtime.aws.ImageBuilder.build'), \
-                patch('sky_platform.runtime.aws.rehearse_image', side_effect=RuntimeError('HTTP failed')), \
+                patch('sky_platform.deployment.aws.ImageBuilder.build'), \
+                patch('sky_platform.deployment.aws.rehearse_image', side_effect=RuntimeError('HTTP failed')), \
                 patch.object(adapter, 'aws') as aws:
             with self.assertRaisesRegex(RuntimeError, 'HTTP failed'):
                 adapter.deploy(self.project, self.plan, ATTEMPT)
@@ -117,8 +117,8 @@ class RehearsalTests(unittest.TestCase):
                                     AwsSettings(region, expected_account=account), rehearsal=True)
         with patch.object(adapter, 'prepare_infrastructure', return_value=(
                 account, repository, 'execution', 'infrastructure')), \
-                patch('sky_platform.runtime.aws.ImageBuilder.build') as build, \
-                patch('sky_platform.runtime.aws.rehearse_image', return_value={
+                patch('sky_platform.deployment.aws.ImageBuilder.build') as build, \
+                patch('sky_platform.deployment.aws.rehearse_image', return_value={
                     'status': 'passed', 'image_id': IMAGE_ID,
                     'platform': 'linux/amd64', 'health_path': self.plan.health_path}) as rehearse, \
                 patch.object(adapter, 'command', side_effect=command), \

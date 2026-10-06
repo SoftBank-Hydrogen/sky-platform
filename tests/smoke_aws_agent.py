@@ -14,9 +14,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from agent_fixture import call
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsExpressAdapter, AwsSettings
+from sky_platform.api.server import App, handler_for
 
 
 class AwsRepairFixture:

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const {applyMigrations} = require('../src/sky_platform/runtime/infra/postgres-migrator.js');
+const {applyMigrations} = require('../src/sky_platform/assets/infra/postgres-migrator.js');
 
 test('applies a migration once and rejects checksum drift', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sky-migration-'));

@@ -17,14 +17,14 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-import sky_platform.runtime.postgres as postgres
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsConfigurationError, AwsSettings
-from sky_platform.runtime.aws_network import (AwsServiceNetworkProvisioner,
+import sky_platform.database.postgres as postgres
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
+from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from sky_platform.runtime.postgres import AwsPostgresProvisioner, PostgresRequest
-from sky_platform.runtime.postgres_operations import PostgresOperations
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
+from sky_platform.database.postgres_operations import PostgresOperations
+from sky_platform.api.server import App, handler_for
 from tests.smoke_aws_network import retire_probe
 from tests.smoke_aws_restore_marker_source import save, save_new
 

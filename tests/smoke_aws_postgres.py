@@ -15,10 +15,10 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from sky_platform.runtime.aws import AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.core import analyze
-from sky_platform.runtime.migrations import collect_sql_migrations
-from sky_platform.runtime.postgres import AwsPostgresProvisioner, PostgresRequest
+from sky_platform.deployment.aws import AwsExpressAdapter, AwsSettings
+from sky_platform.deployment.core import analyze
+from sky_platform.database.migrations import collect_sql_migrations
+from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
 
 
 def probe(url: str, key: str, record_id: str, method: str) -> dict:

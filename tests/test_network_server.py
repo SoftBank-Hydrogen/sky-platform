@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.api.server import App, handler_for
 
 
 class NetworkServerTests(unittest.TestCase):
@@ -34,10 +34,10 @@ class NetworkServerTests(unittest.TestCase):
         preview = {'application_id': 'demo-app', 'account': '123456789012',
                    'region': 'ap-northeast-2', 'vpc_id': 'vpc-12345678',
                    'stack_name': 'sky-network-demo-app', 'initial_ingress': []}
-        with patch('sky_platform.runtime.network_operations.AwsServiceNetworkProvisioner.preflight',
+        with patch('sky_platform.deployment.network_operations.AwsServiceNetworkProvisioner.preflight',
                    return_value=preview), \
-                patch('sky_platform.runtime.network_operations.threading.Thread.start') as start, \
-                patch('sky_platform.runtime.network_operations.AwsServiceNetworkProvisioner.create') as create:
+                patch('sky_platform.deployment.network_operations.threading.Thread.start') as start, \
+                patch('sky_platform.deployment.network_operations.AwsServiceNetworkProvisioner.create') as create:
             status, _ = self.request('plan', {'vpc_id': 'vpc-12345678'}, token=False)
             self.assertEqual(status, 403)
             status, plan = self.request('plan', {'vpc_id': 'vpc-12345678'})
@@ -58,14 +58,14 @@ class NetworkServerTests(unittest.TestCase):
         handler.path = '/api/aws/default-network'
         handler.headers = {}
         handler.json_response = Mock()
-        with patch('sky_platform.runtime.server.discover_default_network') as discover:
+        with patch('sky_platform.api.server.discover_default_network') as discover:
             handler.do_GET()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
         discover.assert_not_called()
         handler.headers = {'X-Sky-Token': self.app.token}
         expected = {'account': '123456789012', 'region': 'ap-northeast-2',
                     'vpc_id': 'vpc-12345678', 'subnet_ids': ['subnet-11111111', 'subnet-22222222']}
-        with patch('sky_platform.runtime.server.discover_default_network', return_value=expected) as discover:
+        with patch('sky_platform.api.server.discover_default_network', return_value=expected) as discover:
             handler.do_GET()
         self.assertEqual(handler.json_response.call_args.args, (200, expected))
         discover.assert_called_once_with(self.settings)

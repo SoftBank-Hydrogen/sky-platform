@@ -5,8 +5,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import Mock
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.api.server import App, handler_for
 
 
 def archive(files):

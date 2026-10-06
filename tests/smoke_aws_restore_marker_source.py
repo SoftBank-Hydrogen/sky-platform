@@ -12,11 +12,11 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.core import analyze
-from sky_platform.runtime.migrations import collect_sql_migrations
-from sky_platform.runtime.postgres import AwsPostgresProvisioner, PostgresRequest
-from sky_platform.runtime.postgres_snapshot import create_snapshot, inspect_snapshot, plan_snapshot
+from sky_platform.deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from sky_platform.deployment.core import analyze
+from sky_platform.database.migrations import collect_sql_migrations
+from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
+from sky_platform.database.postgres_snapshot import create_snapshot, inspect_snapshot, plan_snapshot
 from tests.smoke_aws_postgres import probe
 
 

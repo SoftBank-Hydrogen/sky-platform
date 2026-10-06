@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.runtime.cloud import CloudRunAdapter, CloudRunSettings
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.deployment.cloud import CloudRunAdapter, CloudRunSettings
+from sky_platform.api.server import App, handler_for
 
 
 JOB_ID = 'e' * 16
@@ -107,14 +107,14 @@ class CloudRetireTests(unittest.TestCase):
             handler.path = f'/api/jobs/{JOB_ID}/retire'
             handler.headers = {'X-Sky-Token': app.token, 'Content-Length': '0'}
             handler.json_response = Mock()
-            with patch('sky_platform.runtime.server.threading.Thread') as thread:
+            with patch('sky_platform.api.server.threading.Thread') as thread:
                 handler.do_POST()
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'deleting')
             self.assertEqual(thread.call_args.kwargs['target'], app.retire_cloud)
-            with patch('sky_platform.runtime.server.CloudRunAdapter.retire', side_effect=RuntimeError('gcloud failed')):
+            with patch('sky_platform.api.server.CloudRunAdapter.retire', side_effect=RuntimeError('gcloud failed')):
                 app.retire_cloud(JOB_ID)
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'delete_failed')
-            with patch('sky_platform.runtime.server.CloudRunAdapter.retire'):
+            with patch('sky_platform.api.server.CloudRunAdapter.retire'):
                 app.retire_cloud(JOB_ID)
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'deleted')
 

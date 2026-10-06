@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
-const html = readFileSync(new URL('../src/sky_platform/runtime/static/index.html', import.meta.url), 'utf8');
+const html = readFileSync(new URL('../src/sky_platform/assets/static/index.html', import.meta.url), 'utf8');
 const cancelStart = html.indexOf('function canCancel(job)');
 const cancelEnd = html.indexOf('function show(job)', cancelStart);
 assert.ok(cancelStart >= 0 && cancelEnd > cancelStart);

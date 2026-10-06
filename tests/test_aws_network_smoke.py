@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsSettings
-from sky_platform.runtime.aws_network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
+from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
+from sky_platform.deployment.aws_network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
 from tests.smoke_aws_network import main, retire_probe
 
 

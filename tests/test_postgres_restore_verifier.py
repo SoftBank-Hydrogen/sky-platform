@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sky_platform.runtime.migrations import collect_sql_migrations
-from sky_platform.runtime.postgres_restore_verifier import stage_restore_verifier_context
+from sky_platform.database.migrations import collect_sql_migrations
+from sky_platform.database.postgres_restore_verifier import stage_restore_verifier_context
 
 
 class RestoreVerifierContextTests(unittest.TestCase):

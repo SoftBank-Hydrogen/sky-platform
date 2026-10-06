@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.postgres_retirement_operations import PostgresRetirementOperations
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.database.postgres_retirement_operations import PostgresRetirementOperations
 
 
 class RetirementOperationTests(unittest.TestCase):
@@ -24,16 +24,16 @@ class RetirementOperationTests(unittest.TestCase):
             'stack_id': 'arn:aws:cloudformation:ap-northeast-2:123456789012:stack/sky-db-demo-app/id',
             'active_db_users': 0, 'deletion_protection': True,
             'final_snapshot_required': True, 'retained_resources': ['all manual snapshots (including final)', 'app service network']}
-        patches = [patch('sky_platform.runtime.postgres_retirement_operations.discover_existing_postgres',
+        patches = [patch('sky_platform.database.postgres_retirement_operations.discover_existing_postgres',
                          return_value=self.database),
-                   patch('sky_platform.runtime.postgres_retirement_operations.plan',
+                   patch('sky_platform.database.postgres_retirement_operations.plan',
                          return_value=self.expected)]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
 
     def test_accepted_request_is_durable_and_restart_never_retries(self):
-        with patch('sky_platform.runtime.postgres_retirement_operations.threading.Thread.start') as start:
+        with patch('sky_platform.database.postgres_retirement_operations.threading.Thread.start') as start:
             quote = self.manager.plan('demo-app')
             result = self.manager.start('demo-app', quote['plan_id'], 'sky-demo-app')
         self.assertEqual(result['status'], 'running')
@@ -53,7 +53,7 @@ class RetirementOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '정확히'):
             self.manager.start('demo-app', quote['plan_id'], 'other-db')
         self.assertFalse((self.root / 'demo-app.json').exists())
-        with patch('sky_platform.runtime.postgres_retirement_operations.plan', return_value={**self.expected,
+        with patch('sky_platform.database.postgres_retirement_operations.plan', return_value={**self.expected,
                    'active_db_users': 1}):
             with self.assertRaisesRegex(ValueError, '바뀌'):
                 self.manager.start('demo-app', quote['plan_id'], 'sky-demo-app')

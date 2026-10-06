@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.certificate import deployment_certificate
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.api.certificate import deployment_certificate
+from sky_platform.api.server import App, handler_for
 
 
 class CertificateTests(unittest.TestCase):

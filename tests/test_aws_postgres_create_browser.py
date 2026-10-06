@@ -3,8 +3,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.postgres import PostgresRequest
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.database.postgres import PostgresRequest
 from tests.smoke_aws_postgres_create_browser import (
     deployment_cleanup_blocker, main, retire_final_snapshot)
 

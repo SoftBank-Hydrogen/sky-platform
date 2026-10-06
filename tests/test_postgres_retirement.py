@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError
-from sky_platform.runtime.postgres import PostgresRequest
-from sky_platform.runtime.postgres_retirement import apply, plan
+from sky_platform.deployment.aws import AwsConfigurationError
+from sky_platform.database.postgres import PostgresRequest
+from sky_platform.database.postgres_retirement import apply, plan
 
 
 class FakeAdapter:
@@ -73,12 +73,12 @@ class RetirementTests(unittest.TestCase):
         self.path = Path(self.temp.name) / 'retirement.json'
         self.request = PostgresRequest('demo-app', '123456789012', 'ap-northeast-2',
             'vpc-12345678', ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
-        guard = patch('sky_platform.runtime.postgres_retirement.AwsPostgresProvisioner', FakeProvisioner)
+        guard = patch('sky_platform.database.postgres_retirement.AwsPostgresProvisioner', FakeProvisioner)
         guard.start()
         self.addCleanup(guard.stop)
 
     def test_plan_rejects_active_workload_without_mutation(self):
-        with patch('sky_platform.runtime.postgres_retirement.active_database_users', return_value=['service']):
+        with patch('sky_platform.database.postgres_retirement.active_database_users', return_value=['service']):
             with self.assertRaisesRegex(AwsConfigurationError, '남아'):
                 plan(self.request)
         self.assertFalse(self.path.exists())
@@ -91,8 +91,8 @@ class RetirementTests(unittest.TestCase):
         self.assertFalse(FakeProvisioner.instances)
 
     def test_snapshot_failure_leaves_protection_and_database_intact(self):
-        with patch('sky_platform.runtime.postgres_retirement.active_database_users', return_value=[]), \
-             patch('sky_platform.runtime.postgres_retirement.create_snapshot',
+        with patch('sky_platform.database.postgres_retirement.active_database_users', return_value=[]), \
+             patch('sky_platform.database.postgres_retirement.create_snapshot',
                    side_effect=AwsConfigurationError('snapshot failed')):
             with self.assertRaisesRegex(AwsConfigurationError, 'snapshot failed'):
                 apply(self.request, self.path, confirm_database_id='sky-demo-app')
@@ -110,9 +110,9 @@ class RetirementTests(unittest.TestCase):
         def inspect(_app, snapshot_id, _settings):
             events.append('inspect')
             return {'snapshot_id': snapshot_id, 'status': 'available', 'encrypted': True}
-        with patch('sky_platform.runtime.postgres_retirement.active_database_users', return_value=[]), \
-             patch('sky_platform.runtime.postgres_retirement.create_snapshot', side_effect=snapshot), \
-             patch('sky_platform.runtime.postgres_retirement.inspect_snapshot', side_effect=inspect):
+        with patch('sky_platform.database.postgres_retirement.active_database_users', return_value=[]), \
+             patch('sky_platform.database.postgres_retirement.create_snapshot', side_effect=snapshot), \
+             patch('sky_platform.database.postgres_retirement.inspect_snapshot', side_effect=inspect):
             result = apply(self.request, self.path, confirm_database_id='sky-demo-app')
             with self.assertRaises(FileExistsError):
                 apply(self.request, self.path, confirm_database_id='sky-demo-app')
@@ -123,10 +123,10 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_unavailable_final_snapshot_never_disables_protection(self):
-        with patch('sky_platform.runtime.postgres_retirement.active_database_users', return_value=[]), \
-             patch('sky_platform.runtime.postgres_retirement.create_snapshot',
+        with patch('sky_platform.database.postgres_retirement.active_database_users', return_value=[]), \
+             patch('sky_platform.database.postgres_retirement.create_snapshot',
                    side_effect=lambda _app, snapshot_id, _settings: {'snapshot_id': snapshot_id}), \
-             patch('sky_platform.runtime.postgres_retirement.inspect_snapshot',
+             patch('sky_platform.database.postgres_retirement.inspect_snapshot',
                    return_value={'status': 'failed', 'encrypted': True}):
             with self.assertRaisesRegex(AwsConfigurationError, '사용 가능'):
                 apply(self.request, self.path, confirm_database_id='sky-demo-app')
@@ -135,11 +135,11 @@ class RetirementTests(unittest.TestCase):
 
     def test_post_protection_workload_check_stops_before_delete(self):
         users = [[], [], ['new-service']]
-        with patch('sky_platform.runtime.postgres_retirement.active_database_users',
+        with patch('sky_platform.database.postgres_retirement.active_database_users',
                    side_effect=users), \
-             patch('sky_platform.runtime.postgres_retirement.create_snapshot',
+             patch('sky_platform.database.postgres_retirement.create_snapshot',
                    side_effect=lambda _app, snapshot_id, _settings: {'snapshot_id': snapshot_id}), \
-             patch('sky_platform.runtime.postgres_retirement.inspect_snapshot',
+             patch('sky_platform.database.postgres_retirement.inspect_snapshot',
                    return_value={'status': 'available', 'encrypted': True}):
             with self.assertRaisesRegex(AwsConfigurationError, '다시'):
                 apply(self.request, self.path, confirm_database_id='sky-demo-app')

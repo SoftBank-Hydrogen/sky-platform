@@ -6,10 +6,10 @@ import json
 import re
 import secrets
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsSettings
-from sky_platform.runtime.aws_network import (AwsServiceNetworkProvisioner,
+from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
+from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from sky_platform.runtime.postgres import postgres_settings_for_application
+from sky_platform.database.postgres import postgres_settings_for_application
 
 
 def retire_probe(provisioner: AwsServiceNetworkProvisioner, expected_stack: str,

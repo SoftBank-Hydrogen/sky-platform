@@ -12,10 +12,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.postgres import PostgresRequest
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.database.postgres import PostgresRequest
+from sky_platform.api.server import App, handler_for
 from tests.smoke_aws_postgres_api import archive
 
 
@@ -55,18 +55,18 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
         raise AssertionError('Unexpected AWS command in local drill: ' + repr(args))
 
     with tempfile.TemporaryDirectory(prefix='sky-one-action-browser-') as directory, \
-            patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+            patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                   side_effect=reject_aws), \
-            patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+            patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                   side_effect=[quote, changed_quote] if reject_plan else None,
                   return_value=quote) as preflight, \
-            patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
-            patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.create',
+            patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
+            patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.create',
                   side_effect=ValueError('simulated RDS creation failure') if fail_create else None,
                   return_value=database) as create, \
-            patch('sky_platform.runtime.server.AwsPostgresProvisioner.inspect_current',
+            patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
                   return_value=database) as inspect, \
-            patch('sky_platform.runtime.server.discover_default_network',
+            patch('sky_platform.api.server.discover_default_network',
                   return_value=network), \
             patch.object(AwsSettings, 'unavailable_reason', return_value=None):
         root = Path(directory)

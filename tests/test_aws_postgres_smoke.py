@@ -5,7 +5,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.core import source_digest
+from sky_platform.deployment.core import source_digest
 from tests.smoke_aws_postgres import main
 
 

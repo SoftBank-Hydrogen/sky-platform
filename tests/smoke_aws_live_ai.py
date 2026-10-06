@@ -15,9 +15,9 @@ import zipfile
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsExpressAdapter, AwsSettings
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsExpressAdapter, AwsSettings
+from sky_platform.api.server import App, handler_for
 
 
 SAMPLE = Path(__file__).resolve().parents[1] / 'tests' / 'fixtures' / 'apps' / 'unready-node'

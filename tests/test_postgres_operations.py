@@ -7,9 +7,9 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsSettings
-from sky_platform.runtime.postgres import PostgresRequest
-from sky_platform.runtime.postgres_operations import PostgresOperations
+from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
+from sky_platform.database.postgres import PostgresRequest
+from sky_platform.database.postgres_operations import PostgresOperations
 
 
 class PostgresOperationsTests(unittest.TestCase):
@@ -24,14 +24,14 @@ class PostgresOperationsTests(unittest.TestCase):
                                        'sg-33333333')
         self.manager = PostgresOperations(self.root, self.settings)
         self.quote = {'account': '123456789012', 'pricing': {'baseline_730h_usd': '20.87'}}
-        guard = patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.assert_stack_available')
+        guard = patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available')
         guard.start()
         self.addCleanup(guard.stop)
 
     def test_accepted_create_is_journaled_before_worker_and_not_repeated_after_restart(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start') as start:
+                patch('sky_platform.database.postgres_operations.threading.Thread.start') as start:
             plan = self.manager.plan(self.request)
             operation = self.manager.start('demo-app', plan['plan_id'])
         self.assertEqual(operation['status'], 'running')
@@ -49,9 +49,9 @@ class PostgresOperationsTests(unittest.TestCase):
     def test_app_network_group_operation_restores_without_global_group(self):
         settings = AwsSettings('ap-northeast-2', expected_account='123456789012')
         manager = PostgresOperations(self.root, settings)
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = manager.plan(self.request)
             manager.start('demo-app', plan['plan_id'])
         restored = PostgresOperations(self.root, settings)
@@ -59,10 +59,10 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertEqual(restored.get('demo-app')['status'], 'needs_attention')
 
     def test_changed_quote_rejects_before_creation_record(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    side_effect=[self.quote, {'account': '123456789012',
                        'pricing': {'baseline_730h_usd': '22.00'}}]), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start') as start:
+                patch('sky_platform.database.postgres_operations.threading.Thread.start') as start:
             plan = self.manager.plan(self.request)
             with self.assertRaisesRegex(ValueError, '변경'):
                 self.manager.start('demo-app', plan['plan_id'])
@@ -71,9 +71,9 @@ class PostgresOperationsTests(unittest.TestCase):
 
     def test_rds_baseline_cap_rejects_expensive_plan_before_creation(self):
         manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.00')
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.create') as create:
+                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.create') as create:
             with self.assertRaisesRegex(ValueError, '서버 상한'):
                 manager.plan(self.request)
         self.assertFalse(manager.plans)
@@ -82,9 +82,9 @@ class PostgresOperationsTests(unittest.TestCase):
 
     def test_rds_cap_is_rechecked_before_journal_and_worker(self):
         manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.87')
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start') as worker:
+                patch('sky_platform.database.postgres_operations.threading.Thread.start') as worker:
             plan = manager.plan(self.request)
             manager.max_baseline_730h_usd = Decimal('20.00')
             with self.assertRaisesRegex(ValueError, '서버 상한'):
@@ -99,14 +99,14 @@ class PostgresOperationsTests(unittest.TestCase):
 
     def test_rds_cap_fails_closed_when_quote_is_missing(self):
         manager = PostgresOperations(self.root, self.settings, max_baseline_730h_usd='20.00')
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value={'account': '123456789012'}):
             with self.assertRaisesRegex(ValueError, '견적을 확인하지 못해'):
                 manager.plan(self.request)
         self.assertFalse(manager.plans)
 
     def test_only_current_reviewed_creation_plan_can_join_an_upload(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote):
             plan = self.manager.plan(self.request)
         self.assertEqual(self.manager.reviewed_request('demo-app', plan['plan_id']), self.request)
@@ -120,7 +120,7 @@ class PostgresOperationsTests(unittest.TestCase):
         (self.root / 'demo-app.json').write_text('{not-json')
         restored = PostgresOperations(self.root, self.settings)
         self.assertTrue(restored.recovery_warnings)
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
             with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
                 restored.plan(self.request)
         preflight.assert_not_called()
@@ -129,7 +129,7 @@ class PostgresOperationsTests(unittest.TestCase):
         archive = self.root / 'cleaned-attempts'
         (archive / 'demo-app-0123456789abcdef.json').write_text('{not-json')
         restored = PostgresOperations(self.root, self.settings)
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
             with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
                 restored.plan(self.request)
         preflight.assert_not_called()
@@ -137,7 +137,7 @@ class PostgresOperationsTests(unittest.TestCase):
     def test_unidentified_journal_blocks_all_new_rds_creation(self):
         (self.root / '.postgres-unknown.json').write_text('{not-json')
         restored = PostgresOperations(self.root, self.settings)
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight') as preflight:
             with self.assertRaisesRegex(AwsConfigurationError, '로컬 PostgreSQL'):
                 restored.plan(self.request)
         preflight.assert_not_called()
@@ -157,21 +157,21 @@ class PostgresOperationsTests(unittest.TestCase):
             restored.plan(self.request)
 
     def test_existing_stack_blocks_plan_before_any_creation_record(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.assert_stack_available',
+                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available',
                       side_effect=AwsConfigurationError('스택 기록이 이미 있습니다.')):
             with self.assertRaisesRegex(AwsConfigurationError, '이미'):
                 self.manager.plan(self.request)
         self.assertFalse((self.root / 'demo-app.json').exists())
 
     def test_successful_worker_records_database_without_secret(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.plan(self.request)
             self.manager.start('demo-app', plan['plan_id'])
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.create',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.create',
                    return_value={'database_id': 'sky-demo-app',
                                  'secret_arn': 'secret'}) as create:
             self.manager._run('demo-app')
@@ -182,12 +182,12 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertEqual(operation['database_id'], 'sky-demo-app')
 
     def test_create_is_not_visible_as_succeeded_until_journal_is_saved(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.plan(self.request)
             self.manager.start('demo-app', plan['plan_id'])
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.create',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.create',
                    return_value={'database_id': 'sky-demo-app'}), \
                 patch.object(self.manager, '_save', side_effect=OSError('disk full')):
             with self.assertRaisesRegex(OSError, 'disk full'):
@@ -196,9 +196,9 @@ class PostgresOperationsTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'demo-app.json').read_text())['status'], 'running')
 
     def test_reconcile_checks_owned_stack_and_completed_database(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.plan(self.request)
             self.manager.start('demo-app', plan['plan_id'])
         self.manager.operations['demo-app']['status'] = 'needs_attention'
@@ -211,36 +211,36 @@ class PostgresOperationsTests(unittest.TestCase):
                 'StackStatus': 'CREATE_COMPLETE', 'Tags': [
                     {'Key': 'sky-managed', 'Value': 'true'},
                     {'Key': 'sky-app', 'Value': 'demo-app'}]}]})
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.inspect_current',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}) as inspect, \
-                patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+                patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                       side_effect=lambda _self, args, **kwargs: aws(args, **kwargs)):
             result = self.manager.reconcile('demo-app')
         inspect.assert_called_once_with()
         self.assertEqual(result['status'], 'succeeded')
 
     def test_reconcile_refuses_unowned_stack(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.plan(self.request)
             self.manager.start('demo-app', plan['plan_id'])
         self.manager.operations['demo-app']['status'] = 'needs_attention'
         wrong = {'Stacks': [{'StackId': ('arn:aws:cloudformation:ap-northeast-2:'
             '123456789012:stack/sky-db-demo-app/stack-id'),
             'StackStatus': 'CREATE_COMPLETE', 'Tags': []}]}
-        with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                    side_effect=lambda _self, args, **_kwargs: json.dumps(
                        {'Account': '123456789012'} if args[0] == 'sts' else wrong)), \
-                patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.inspect_current') as inspect:
+                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.inspect_current') as inspect:
             result = self.manager.reconcile('demo-app')
         self.assertEqual(result['status'], 'needs_attention')
         inspect.assert_not_called()
 
     def test_reconcile_reports_owned_rollback_without_treating_it_as_database(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             planned = self.manager.plan(self.request)
             self.manager.start('demo-app', planned['plan_id'])
         self.manager.operations['demo-app']['status'] = 'needs_attention'
@@ -253,9 +253,9 @@ class PostgresOperationsTests(unittest.TestCase):
                 'StackStatus': 'ROLLBACK_COMPLETE', 'Tags': [
                     {'Key': 'sky-managed', 'Value': 'true'},
                     {'Key': 'sky-app', 'Value': 'demo-app'}]}]})
-        with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                    side_effect=aws), \
-                patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.inspect_current') as inspect:
+                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.inspect_current') as inspect:
             result = self.manager.reconcile('demo-app')
         self.assertEqual(result['status'], 'needs_attention')
         self.assertIn('ROLLBACK_COMPLETE', result['message'])
@@ -263,9 +263,9 @@ class PostgresOperationsTests(unittest.TestCase):
         inspect.assert_not_called()
 
     def _failed_operation(self):
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             planned = self.manager.plan(self.request)
             self.manager.start('demo-app', planned['plan_id'])
         self.manager.operations['demo-app']['status'] = 'needs_attention'
@@ -301,9 +301,9 @@ class PostgresOperationsTests(unittest.TestCase):
     def test_failed_create_cleanup_preserves_attempt_and_allows_same_id_retry(self):
         self._failed_operation()
         stack_id, state, aws = self._rollback_aws()
-        with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                    side_effect=aws), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.cleanup_plan('demo-app')
             with self.assertRaisesRegex(ValueError, '확인 값'):
                 self.manager.cleanup_start('demo-app', plan['plan_id'], stack_id + '-wrong')
@@ -314,9 +314,9 @@ class PostgresOperationsTests(unittest.TestCase):
             self.assertTrue(list((self.root / 'cleaned-attempts').glob('demo-app-*.json')))
             self.assertFalse((self.root / 'demo-app.json').exists())
             self.assertEqual(state['status'], 'DELETE_COMPLETE')
-            with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+            with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                        return_value=self.quote), \
-                    patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.assert_stack_available') as guard:
+                    patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available') as guard:
                 self.manager.plan(self.request)
             guard.assert_called_once_with(allow_deleted=True)
             restored = PostgresOperations(self.root, self.settings)
@@ -326,7 +326,7 @@ class PostgresOperationsTests(unittest.TestCase):
         self._failed_operation()
         for residue, database in [(True, False), (False, True)]:
             _, state, aws = self._rollback_aws(residue=residue, database=database)
-            with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+            with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                        side_effect=aws):
                 with self.assertRaises(AwsConfigurationError):
                     self.manager.cleanup_plan('demo-app')
@@ -336,9 +336,9 @@ class PostgresOperationsTests(unittest.TestCase):
     def test_interrupted_cleanup_requires_fresh_explicit_plan(self):
         self._failed_operation()
         stack_id, state, aws = self._rollback_aws()
-        with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                    side_effect=aws), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.cleanup_plan('demo-app')
             self.manager.cleanup_start('demo-app', plan['plan_id'], stack_id)
         restored = PostgresOperations(self.root, self.settings)
@@ -352,9 +352,9 @@ class PostgresOperationsTests(unittest.TestCase):
     def test_interrupted_after_stack_deletion_finalizes_without_repeating_delete(self):
         self._failed_operation()
         stack_id, state, aws = self._rollback_aws()
-        with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                    side_effect=aws), \
-                patch('sky_platform.runtime.postgres_operations.threading.Thread.start'):
+                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
             plan = self.manager.cleanup_plan('demo-app')
             self.manager.cleanup_start('demo-app', plan['plan_id'], stack_id)
             state['status'] = 'DELETE_COMPLETE'
@@ -374,20 +374,20 @@ class PostgresOperationsTests(unittest.TestCase):
         self.manager.cleaned.add('demo-app')
         _, _, safe_aws = self._rollback_aws()
         _, _, orphan_aws = self._rollback_aws(database=True)
-        with patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=self.quote), \
-                patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.assert_stack_available') as guard:
-            with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available') as guard:
+            with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                        side_effect=orphan_aws):
                 with self.assertRaisesRegex(AwsConfigurationError, 'DB가 없음을'):
                     self.manager.plan(self.request)
             guard.assert_not_called()
-            with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+            with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                        side_effect=safe_aws):
                 plan = self.manager.plan(self.request)
-            with patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True,
+            with patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True,
                        side_effect=orphan_aws), \
-                    patch('sky_platform.runtime.postgres_operations.threading.Thread.start') as worker:
+                    patch('sky_platform.database.postgres_operations.threading.Thread.start') as worker:
                 with self.assertRaisesRegex(AwsConfigurationError, 'DB가 없음을'):
                     self.manager.start('demo-app', plan['plan_id'])
             worker.assert_not_called()

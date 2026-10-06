@@ -15,13 +15,13 @@ import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.aws_network import (AwsServiceNetworkProvisioner,
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from sky_platform.runtime.postgres import AwsPostgresProvisioner, PostgresRequest
-from sky_platform.runtime.postgres_snapshot import inspect_snapshot
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
+from sky_platform.database.postgres_snapshot import inspect_snapshot
+from sky_platform.api.server import App, handler_for
 from tests.smoke_aws_network import retire_probe
 from tests.smoke_aws_postgres import probe
 from tests.smoke_aws_postgres_api import PostgresFixture, archive

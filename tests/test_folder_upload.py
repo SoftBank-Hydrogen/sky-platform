@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.core import extract_project, folder_upload_to_zip
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.core import extract_project, folder_upload_to_zip
+from sky_platform.api.server import App, handler_for
 
 
 BOUNDARY = 'sky-test-boundary'
@@ -61,7 +61,7 @@ class FolderUploadTests(unittest.TestCase):
                                'Content-Length': str(len(body)), 'X-Application-Id': 'my-app'}
             handler.rfile = io.BytesIO(body)
             handler.json_response = Mock()
-            with patch('sky_platform.runtime.server.threading.Thread'):
+            with patch('sky_platform.api.server.threading.Thread'):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 202)
             job_id = handler.json_response.call_args.args[1]['id']

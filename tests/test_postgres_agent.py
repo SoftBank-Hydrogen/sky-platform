@@ -5,8 +5,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from sky_platform.runtime.agent import AgentError, DeploymentAgent, DeploymentTools
-from sky_platform.runtime.postgres import PostgresRequest
+from sky_platform.planning.agent import AgentError, DeploymentAgent, DeploymentTools
+from sky_platform.database.postgres import PostgresRequest
 from tests.smoke_aws_postgres_api import PostgresFixture, archive
 
 

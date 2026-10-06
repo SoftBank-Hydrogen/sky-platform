@@ -12,10 +12,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.postgres import PostgresRequest
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.database.postgres import PostgresRequest
+from sky_platform.api.server import App, handler_for
 
 
 CHROME = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
@@ -72,8 +72,8 @@ def run() -> dict:
         raise AssertionError('Unexpected AWS command in local drill: ' + repr(args))
 
     with tempfile.TemporaryDirectory(prefix='sky-recovery-browser-') as directory, \
-            patch('sky_platform.runtime.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
-            patch('sky_platform.runtime.postgres_operations.AwsPostgresProvisioner.preflight',
+            patch('sky_platform.database.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
+            patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
                   return_value=quote):
         root = Path(directory)
         app = App(root / 'app', AISettings('fixture-only', 'scripted'),

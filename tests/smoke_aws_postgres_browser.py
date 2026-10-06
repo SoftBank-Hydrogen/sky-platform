@@ -17,11 +17,11 @@ from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from sky_platform.runtime.analysis import AISettings
-from sky_platform.runtime.aws import AwsSettings
-from sky_platform.runtime.postgres import discover_existing_postgres
-from sky_platform.runtime.postgres_snapshot import inspect_snapshot, plan_snapshot
-from sky_platform.runtime.server import App, handler_for
+from sky_platform.planning.analysis import AISettings
+from sky_platform.deployment.aws import AwsSettings
+from sky_platform.database.postgres import discover_existing_postgres
+from sky_platform.database.postgres_snapshot import inspect_snapshot, plan_snapshot
+from sky_platform.api.server import App, handler_for
 from tests.smoke_aws_postgres_api import PostgresFixture, archive
 from tests.smoke_aws_postgres import probe, probe_version
 

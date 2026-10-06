@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.runtime.aws import AwsConfigurationError, AwsSettings
-from sky_platform.runtime.aws_network import (AwsServiceNetworkProvisioner,
+from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
+from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, TEMPLATE, discover_default_network, main)
 
 ACCOUNT = '123456789012'
@@ -87,9 +87,9 @@ class AwsNetworkTests(unittest.TestCase):
     def test_default_cli_mode_never_creates_group(self):
         args = ['--application', 'demo-app', '--account', ACCOUNT,
                 '--region', REGION, '--vpc-id', VPC]
-        with patch('sky_platform.runtime.aws_network.AwsServiceNetworkProvisioner.preflight',
+        with patch('sky_platform.deployment.aws_network.AwsServiceNetworkProvisioner.preflight',
                    return_value={'account': ACCOUNT}) as preflight, \
-                patch('sky_platform.runtime.aws_network.AwsServiceNetworkProvisioner.create') as create:
+                patch('sky_platform.deployment.aws_network.AwsServiceNetworkProvisioner.create') as create:
             main(args)
         preflight.assert_called_once_with()
         create.assert_not_called()
@@ -110,7 +110,7 @@ class AwsNetworkTests(unittest.TestCase):
                 {'SubnetId': 'subnet-33333333', 'VpcId': VPC, 'State': 'available',
                  'DefaultForAz': False, 'AvailabilityZone': 'ap-northeast-2d'}]})
         settings = AwsSettings(REGION, expected_account=ACCOUNT)
-        with patch('sky_platform.runtime.aws_network.AwsExpressAdapter.aws', autospec=True,
+        with patch('sky_platform.deployment.aws_network.AwsExpressAdapter.aws', autospec=True,
                    side_effect=aws):
             result = discover_default_network(settings)
         self.assertEqual(result['vpc_id'], VPC)
@@ -120,7 +120,7 @@ class AwsNetworkTests(unittest.TestCase):
 
     def test_default_network_discovery_checks_account_before_ec2(self):
         settings = AwsSettings(REGION, expected_account=ACCOUNT)
-        with patch('sky_platform.runtime.aws_network.AwsExpressAdapter.aws',
+        with patch('sky_platform.deployment.aws_network.AwsExpressAdapter.aws',
                    return_value=json.dumps({'Account': '999999999999'})) as aws:
             with self.assertRaisesRegex(AwsConfigurationError, '계정'):
                 discover_default_network(settings)
@@ -128,7 +128,7 @@ class AwsNetworkTests(unittest.TestCase):
 
     def test_default_network_discovery_requires_two_available_zones(self):
         settings = AwsSettings(REGION, expected_account=ACCOUNT)
-        with patch('sky_platform.runtime.aws_network.AwsExpressAdapter.aws', side_effect=[
+        with patch('sky_platform.deployment.aws_network.AwsExpressAdapter.aws', side_effect=[
                 json.dumps({'Account': ACCOUNT}),
                 json.dumps({'Vpcs': [{'VpcId': VPC, 'IsDefault': True}]}),
                 json.dumps({'Subnets': [{'SubnetId': 'subnet-11111111', 'VpcId': VPC,
