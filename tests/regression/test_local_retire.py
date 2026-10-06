@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from application.deployment_core import LocalDockerAdapter
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 

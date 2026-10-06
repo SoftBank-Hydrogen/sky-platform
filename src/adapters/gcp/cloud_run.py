@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from application.analysis import redact
-from application.deployment_core import ImageBuilder, validate_environment
+from application.deployment_core import validate_environment
+from adapters.build.image import ImageBuilder
 
 
 class CloudConfigurationError(RuntimeError):

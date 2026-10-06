@@ -32,6 +32,7 @@ jobs:
               'sky_platform.py', 'interfaces/http/server.py', 'application/agent.py',
               'domain/models.py', 'engine/compatibility.py', 'ports/target.py',
               'adapters/aws/ecs.py', 'adapters/gcp/cloud_run.py',
+              'adapters/build/image.py', 'adapters/local/docker.py',
               'assets/static/index.html', 'assets/infra/postgres-migrator.js',
           }
           assert required <= files, sorted(required - files)

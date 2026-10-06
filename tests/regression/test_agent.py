@@ -12,7 +12,7 @@ from unittest.mock import patch
 from tests.support.agent_fixture import RepairFixture, call
 from application.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES, COMPACT_AGENT_REQUEST_BYTES
 from application.analysis import AISettings
-from application.deployment_core import LocalDockerAdapter
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App
 
 
@@ -25,7 +25,7 @@ class AgentTests(unittest.TestCase):
         shutil.copytree('tests/fixtures/apps/unready-node', self.original)
         self.events, self.updates = [], []
         self.tools = DeploymentTools(self.original, self.root / 'work', 'a' * 16, {},
-            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u))
+            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u), adapter_factory=LocalDockerAdapter)
 
     def test_patches_working_copy_only_and_invalidates_plan(self):
         self.tools.read_project_files(['package.json'])
@@ -173,7 +173,7 @@ class AgentTests(unittest.TestCase):
         original_file = self.original / 'Dockerfile'
         original_file.write_text('FROM node:22-alpine\nCMD ["npm", "start"]\n')
         custom = DeploymentTools(self.original, self.root / 'custom-work', 'b' * 16, {},
-            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u))
+            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u), adapter_factory=LocalDockerAdapter)
         self.assertIn('Dockerfile', custom.read_project_files(['Dockerfile'])['files'])
         custom.apply_project_patch('Dockerfile', 'FROM node:22-alpine', 'FROM node:22-bookworm-slim')
         custom.configure_deployment('dockerfile', None, 3000, '/', [])
@@ -187,7 +187,7 @@ class AgentTests(unittest.TestCase):
         (original / 'Dockerfile').write_text('FROM python:3.13-alpine\nCOPY . /app\nCMD ["python", "/app/server.py"]\n')
         (original / 'server.py').write_text('host = "127.0.0.1"\n')
         custom = DeploymentTools(original, self.root / 'python-work', 'c' * 16, {},
-            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u))
+            lambda s, m: self.events.append((s, m)), lambda **u: self.updates.append(u), adapter_factory=LocalDockerAdapter)
         custom.read_project_files(['Dockerfile', 'server.py'])
         custom.apply_project_patch('server.py', '127.0.0.1', '0.0.0.0')
         custom.configure_deployment('dockerfile', None, 3000, '/', [])

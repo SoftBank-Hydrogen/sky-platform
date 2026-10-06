@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from application.analysis import AISettings, redact
-from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, LocalDockerAdapter, make_plan, source_digest, validate_environment
+from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from adapters.database.migrations import collect_sql_migrations
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
@@ -167,7 +167,7 @@ class OpenAIDeployAgent:
 
 class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
-                 attempts=0, adapter_factory=LocalDockerAdapter, target="local-docker",
+                 *, adapter_factory, attempts=0, target="local-docker",
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id

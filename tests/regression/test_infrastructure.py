@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from application.agent import DeploymentTools
+from adapters.local.docker import LocalDockerAdapter
 from application.analysis import AISettings
 from adapters.aws.ecs import AwsSettings
 from application.infrastructure import (InfrastructureProfile, deployment_access_mode,
@@ -123,7 +124,7 @@ class InfrastructureTests(unittest.TestCase):
             (project / 'Dockerfile').write_text('FROM node:22\nCMD ["node", "server.js"]\n')
             (project / 'server.js').write_text('console.log("ready")')
             tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None,
-                                    lambda **_: None, target='aws-ecs-express')
+                                    lambda **_: None, target='aws-ecs-express', adapter_factory=LocalDockerAdapter)
             before = tools.read_project_files(['Dockerfile'])['files']['Dockerfile']
             tools.apply_project_patch('Dockerfile', before,
                                       before.replace('FROM node:22',
@@ -526,7 +527,7 @@ class InfrastructureTests(unittest.TestCase):
             project.mkdir()
             (project / 'package.json').write_text('{"scripts":{"start":"node server.js"}}')
             (project / 'server.js').write_text('console.log("ready")')
-            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None, lambda **_: None)
+            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             tools.configure_deployment('start', None, 3000, '/', [])
             (tools.work / 'server.js').write_text('const sqlite = require("node:sqlite");')
             with self.assertRaisesRegex(ValueError, 'SQLite'):
@@ -540,7 +541,7 @@ class InfrastructureTests(unittest.TestCase):
             project.mkdir()
             (project / 'package.json').write_text('{"scripts":{"start":"node server.js"}}')
             (project / 'server.js').write_text('console.log("ready")')
-            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None, lambda **_: None)
+            tools = DeploymentTools(project, root / 'work', 'a' * 16, {}, lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             tools.configure_deployment('start', None, 3000, '/', [])
             (tools.work / 'server.js').write_text('const db = require("pg");')
             with self.assertRaisesRegex(ValueError, '데이터베이스'):

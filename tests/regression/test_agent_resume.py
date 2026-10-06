@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 from tests.support.agent_fixture import call
 from application.analysis import AISettings
-from application.deployment_core import LocalDockerAdapter, source_digest
+from application.deployment_core import source_digest
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 

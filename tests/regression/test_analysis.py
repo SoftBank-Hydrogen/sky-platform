@@ -11,7 +11,8 @@ from application.analysis import (
     AISettings, DEFAULT_AI_MODEL, AnalysisError, OpenAIAnalyzer, analyze_project, parse_response,
     redact, source_context, validate_proposal,
 )
-from application.deployment_core import LocalDockerAdapter, analyze, make_plan
+from application.deployment_core import analyze, make_plan
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App
 
 

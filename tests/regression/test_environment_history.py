@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from application.analysis import AISettings
-from application.deployment_core import LocalDockerAdapter, analyze, source_digest, validate_environment
+from application.deployment_core import analyze, source_digest, validate_environment
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, StateDirectoryLock, handler_for
 
 

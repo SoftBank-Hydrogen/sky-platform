@@ -24,7 +24,8 @@ from adapters.aws.network import ServiceNetworkRequest, discover_default_network
 from application.certificate import deployment_certificate
 from application.diagnosis import deployment_diagnosis
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
-from application.deployment_core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
+from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
+from adapters.local.docker import LocalDockerAdapter
 from application.health import check_deployment
 from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       deployment_access_mode, explicit_infrastructure_plan,

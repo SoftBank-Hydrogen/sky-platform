@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from tests.support.openai_wire_fixture import ResponsesWireFixture
 from application.agent import DeploymentAgent, DeploymentTools, OpenAIDeployAgent
 from application.analysis import AISettings, DEFAULT_AI_MODEL
-from application.deployment_core import LocalDockerAdapter
+from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 
@@ -21,7 +21,7 @@ class OpenAIWireTests(unittest.TestCase):
             original = Path('tests/fixtures/apps/unready-node')
             changes = []
             tools = DeploymentTools(original, state / 'work', 'a' * 16, {},
-                lambda *_: None, lambda **update: changes.append(update))
+                lambda *_: None, lambda **update: changes.append(update), adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, compact_after_first=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
                     patch.object(LocalDockerAdapter, 'deploy', return_value={
@@ -41,7 +41,7 @@ class OpenAIWireTests(unittest.TestCase):
             state = Path(directory)
             original = Path('tests/fixtures/apps/unready-python')
             tools = DeploymentTools(original, state / 'work', 'b' * 16, {},
-                lambda *_: None, lambda **_: None)
+                lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, python_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
                     patch.object(LocalDockerAdapter, 'deploy', return_value={
@@ -60,7 +60,7 @@ class OpenAIWireTests(unittest.TestCase):
             state = Path(directory)
             original = Path('tests/fixtures/apps/fastapi-asgi')
             tools = DeploymentTools(original, state / 'work', 'c' * 16, {},
-                lambda *_: None, lambda **_: None)
+                lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, asgi_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
                     patch.object(LocalDockerAdapter, 'deploy', return_value={
@@ -81,7 +81,7 @@ class OpenAIWireTests(unittest.TestCase):
             state = Path(directory)
             original = Path('tests/fixtures/apps/flask-wsgi')
             tools = DeploymentTools(original, state / 'work', 'd' * 16, {},
-                lambda *_: None, lambda **_: None)
+                lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, wsgi_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
                     patch.object(LocalDockerAdapter, 'deploy', return_value={

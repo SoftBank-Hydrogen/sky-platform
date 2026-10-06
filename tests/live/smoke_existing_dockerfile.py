@@ -5,7 +5,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from application.deployment_core import LocalDockerAdapter, analyze, extract_project
+from application.deployment_core import analyze, extract_project
+from adapters.local.docker import LocalDockerAdapter
 
 
 def main():

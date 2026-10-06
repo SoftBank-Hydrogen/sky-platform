@@ -21,7 +21,8 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from application.analysis import redact
-from application.deployment_core import ImageBuilder, RDS_CA_CONTAINER_PATH, validate_environment
+from application.deployment_core import validate_environment
+from adapters.build.image import ImageBuilder, RDS_CA_CONTAINER_PATH
 from adapters.local.rehearsal import inspect_image_id, rehearse_image
 
 

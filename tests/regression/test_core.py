@@ -6,7 +6,9 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from application.deployment_core import ImageBuilder, LocalDockerAdapter, analyze, extract_project, make_plan, read_package, source_digest
+from application.deployment_core import analyze, extract_project, make_plan, read_package, source_digest
+from adapters.build.image import ImageBuilder
+from adapters.local.docker import LocalDockerAdapter
 from adapters.database.migrations import trusted_rds_ca_bundle
 
 
@@ -376,7 +378,7 @@ class CoreTests(unittest.TestCase):
             root = Path(tmp)
             (root / "package.json").write_text('{"scripts":{"start":"node x.js"}}')
             adapter = LocalDockerAdapter(lambda *_: None)
-            with patch.object(adapter, "command") as command, patch('application.deployment_core.time.sleep'), patch('application.deployment_core.urllib.request.build_opener') as opener:
+            with patch.object(adapter, "command") as command, patch('adapters.local.docker.time.sleep'), patch('adapters.local.docker.urllib.request.build_opener') as opener:
                 command.side_effect = ["", "container", "127.0.0.1:12345", "logs", ""]
                 opener.return_value.open.side_effect = OSError("not ready")
                 with self.assertRaisesRegex(RuntimeError, "HTTP 200"):

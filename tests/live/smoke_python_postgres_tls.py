@@ -14,7 +14,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from application.deployment_core import ImageBuilder, make_plan
+from application.deployment_core import make_plan
+from adapters.build.image import ImageBuilder
 from adapters.database.migrations import collect_sql_migrations
 
 
