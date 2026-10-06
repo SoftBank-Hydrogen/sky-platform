@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -114,7 +115,8 @@ class PostgresServerTests(unittest.TestCase):
                 self.app.ensure_application_available('demo-app', 'aws-ecs-express')
 
     def upload(self, content, *, postgres=True, target='aws-ecs-express', public=True,
-               network_headers=True, partial_network=False, create_plan_id=None):
+               network_headers=True, partial_network=False, create_plan_id=None,
+               sqlite_convert=False):
         handler_class = handler_for(self.app)
         handler = handler_class.__new__(handler_class)
         handler.path = '/api/deployments'
@@ -130,6 +132,8 @@ class PostgresServerTests(unittest.TestCase):
                     handler.headers['X-Postgres-Subnet-Ids'] = 'subnet-11111111,subnet-22222222'
         if create_plan_id is not None:
             handler.headers['X-Postgres-Create-Plan'] = create_plan_id
+        if sqlite_convert:
+            handler.headers['X-Sqlite-Convert'] = 'true'
         handler.rfile = io.BytesIO(content)
         handler.json_response = Mock()
         with patch.object(AwsSettings, 'unavailable_reason', return_value=None), \
@@ -388,6 +392,34 @@ class PostgresServerTests(unittest.TestCase):
         job = self.app.jobs[payload['id']]
         self.assertEqual(job['infrastructure_plan']['database'],
                          {'binding': 'create', 'database_id': 'sky-demo-app'})
+
+    def test_sqlite_upload_requires_explicit_conversion_and_preflight_before_rds_start(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / 'app.db'
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT)')
+                connection.execute('INSERT INTO posts (title) VALUES (?)', ('hello',))
+            content = io.BytesIO()
+            with zipfile.ZipFile(content, 'w') as bundle:
+                bundle.writestr('package.json', json.dumps({'scripts': {'start': 'node server.js'},
+                    'dependencies': {'better-sqlite3': '11.0.0'}}))
+                bundle.writestr('server.js', 'const db = require("better-sqlite3")("app.db");')
+                bundle.writestr('app.db', database.read_bytes())
+        token = self.reviewed_create_plan()
+        with patch.object(self.app.postgres_operations, 'start') as start:
+            status, response = self.upload(content.getvalue(), postgres=False, create_plan_id=token)
+            self.assertEqual(status, 400)
+            self.assertIn('SQLite', response['error'])
+            start.assert_not_called()
+        with patch.object(self.app.postgres_operations, 'start',
+                          return_value={'status': 'running', 'creation_id': 'a' * 16}) as start:
+            status, response = self.upload(content.getvalue(), postgres=False, create_plan_id=token,
+                                           sqlite_convert=True)
+            self.assertEqual(status, 202)
+            start.assert_called_once()
+        job = self.app.jobs[response['id']]
+        self.assertEqual(job['sqlite_conversion']['row_counts'], {'posts': 1})
+        self.assertEqual(job['infrastructure_plan']['conversion_pending'], 'sqlite-to-postgresql')
         self.assertEqual(job['status'], 'provisioning')
         self.assertEqual(job['postgres_creation_id'], 'a' * 16)
         with self.assertRaisesRegex(ValueError, '이미 진행 중'):

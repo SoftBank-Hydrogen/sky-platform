@@ -9,6 +9,7 @@ from pathlib import Path
 
 from application.analysis import AISettings, AnalysisError, parse_response, redact, source_context
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
+from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 
 
 from engine.compatibility import (
@@ -151,6 +152,27 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
         database_engines.add('unknown')
     return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)),
                                  tuple(sorted(database_engines)), final_image_platform)
+
+
+def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -> tuple[dict, InfrastructureProfile]:
+    """Review a single SQLite file before opt-in RDS provisioning; code conversion stays pending."""
+    if 'sqlite' not in profile.requirements:
+        raise ValueError('SQLite 변환 대상이 감지되지 않았습니다.')
+    if (project / 'migrations').exists():
+        raise ValueError('SQLite 자동 이전은 기존 migrations/와 함께 사용할 수 없습니다.')
+    files = sorted(path for path in project.rglob('*') if path.suffix.lower() in SQLITE_FILES)
+    if len(files) != 1 or files[0].is_symlink():
+        raise ValueError('SQLite 자동 이전은 데이터베이스 파일 1개만 지원합니다.')
+    snapshot = compile_sqlite_snapshot(files[0])
+    if profile.database_engines and any(engine not in {'sqlite', 'unknown'}
+                                        for engine in profile.database_engines):
+        raise ValueError('SQLite 외에 다른 데이터베이스 엔진이 함께 감지됐습니다.')
+    projected = InfrastructureProfile('database', profile.evidence, profile.scanned_files,
+                                      tuple(sorted((set(profile.requirements) - {'sqlite'}) | {'database'})),
+                                      ('postgresql',), profile.final_image_platform)
+    return ({'path': files[0].relative_to(project).as_posix(),
+             'source_sha256': snapshot.source_sha256, 'row_counts': snapshot.row_counts,
+             'schema': snapshot.schema}, projected)
 
 
 class OpenAIInfrastructurePlanner:

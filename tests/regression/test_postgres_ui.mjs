@@ -10,6 +10,19 @@ assert.ok(cancelStart >= 0 && cancelEnd > cancelStart);
 const cancelContext = {};
 runInNewContext(html.slice(cancelStart, cancelEnd), cancelContext);
 
+test('SQLite conversion header is sent only with an explicit RDS choice', () => {
+  const start = html.indexOf('function postgresUploadHeaders(application)');
+  const end = html.indexOf('function selectedUploadBody()', start);
+  assert.ok(start >= 0 && end > start);
+  const elements = {postgresExisting: {checked: true}, sqliteConvert: {checked: true},
+    target: {value: 'aws-ecs-express'}, public: {checked: true}};
+  const context = {el: id => elements[id], Error};
+  runInNewContext(html.slice(start, end), context);
+  assert.equal(context.postgresUploadHeaders('demo-app')['X-Sqlite-Convert'], 'true');
+  elements.postgresExisting.checked = false;
+  assert.throws(() => context.postgresUploadHeaders('demo-app'), /SQLite 이전에는 기존 RDS/);
+});
+
 test('deployment certificate separates recorded checks from unverified checks', async () => {
   const start = html.indexOf('const certificateLabels=');
   const end = html.indexOf("el('certificateSection').ontoggle", start);

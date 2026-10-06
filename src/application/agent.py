@@ -19,6 +19,7 @@ from application.analysis import AISettings, redact
 from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from adapters.database.migrations import collect_sql_migrations
+from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.aws.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 
@@ -38,6 +39,7 @@ TOOLS = [
          {"paths": {"type": "array", "items": STRING}}),
     tool("apply_project_patch", "Apply one exact replacement in a previously read working-copy file. Use old_text='' only to create a new file. Preserve app behavior; fix deployment problems only.",
          {"path": STRING, "old_text": STRING, "new_text": STRING}),
+    tool("prepare_sqlite_migration", "For an explicitly approved SQLite-to-PostgreSQL job, turn the uploaded database snapshot into a PostgreSQL migration in the working copy. Call before editing database code. The original is preserved.", {}),
     tool("configure_deployment", "Prepare the container. Use start_script='dockerfile' for an existing Dockerfile, an existing server.py/app.py/main.py for executable Python, 'asgi:<file>.py' for a root ASGI app with uvicorn, 'wsgi:<file>.py' for a root WSGI app with gunicorn, or an existing npm script. Python server dependencies must be explicit in requirements.txt. Use build_script=null except for Node. Call again after any file edit.",
          {"start_script": STRING, "build_script": {"type": ["string", "null"]},
           "port": {"type": "integer"}, "health_path": STRING,
@@ -58,6 +60,11 @@ Read the entry point and its existing Dockerfile, package.json, or Python source
 For an existing Dockerfile, use its runtime and startup instructions. Without one, select Node.js by package.json or Python by an existing root server.py/app.py/main.py. Add an npm start script if a Node app needs one.
 Fix loopback-only binding to 0.0.0.0 and make the app use the configured PORT environment variable.
 Keep application behavior intact. Do not replace the application with a sample or fake health endpoint.
+If sqlite_conversion is present, first call prepare_sqlite_migration. Then replace SQLite connections,
+queries, placeholders and dependencies with PostgreSQL equivalents in the working copy. Use the managed
+PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE environment. Do not remove database behavior or claim that
+the conversion succeeded until the real migration, deployment and HTTP probe succeed. Report a blocker
+if the source is too complex to convert safely.
 Use an existing meaningful HTTP path returning 200. Do not delete tests or disable app security to pass checks.
 If an existing Dockerfile is present, read it and preserve its build and startup behavior. Use start_script='dockerfile' and build_script=null. You may patch that existing Dockerfile to fix deployment issues. Without a Dockerfile, configure_deployment generates one for Node 22/npm or Python. For executable Python use the existing server.py/app.py/main.py as start_script. For a root ASGI app object named app, use 'asgi:main.py', 'asgi:app.py', or 'asgi:server.py' and ensure requirements.txt explicitly includes uvicorn. For a root WSGI app object named app, use the analogous 'wsgi:<file>.py' form and ensure requirements.txt explicitly includes gunicorn. Use build_script=null; preserve the app's HTTP behavior.
 Deploy directly; no user approval of a plan is required. Ask only for missing environment values.
@@ -169,6 +176,7 @@ class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  *, adapter_factory, attempts=0, target="local-docker",
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
+                 sqlite_conversion: dict | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -185,6 +193,7 @@ class DeploymentTools:
             if MANAGED_POSTGRES_ENV.intersection(self.environment) or 'DATABASE_URL' in self.environment:
                 raise ValueError('PostgreSQL 연결값은 사용자가 직접 덮어쓸 수 없습니다.')
         self.postgres_request = postgres_request
+        self.sqlite_conversion = sqlite_conversion
         self.infrastructure_plan = infrastructure_plan
         self.plan = None
         self.result = None
@@ -198,6 +207,49 @@ class DeploymentTools:
             raise AgentError('입력 대기 이후 작업용 소스가 변경됐습니다. 새 배포를 시작하세요.')
         if not work.exists():
             shutil.copytree(original, work)
+
+    def prepare_sqlite_migration(self):
+        conversion = self.sqlite_conversion
+        if conversion is None or self.postgres_request is None:
+            raise ValueError('검토된 SQLite → PostgreSQL 배포에서만 사용할 수 있습니다.')
+        relative = PurePosixPath(conversion['path'])
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('SQLite 경로가 올바르지 않습니다.')
+        source = self.work.joinpath(*relative.parts)
+        migration_dir = self.work / 'migrations'
+        migration = migration_dir / '0000_sky_sqlite_import.sql'
+        if migration.is_file() and not source.exists():
+            original_snapshot = compile_sqlite_snapshot(self.original.joinpath(*relative.parts))
+            if (original_snapshot.source_sha256 != conversion['source_sha256']
+                    or original_snapshot.schema != conversion['schema']
+                    or migration.read_text(encoding='utf-8') != original_snapshot.sql):
+                raise ValueError('SQLite 이전 SQL이 준비 후 변경됐습니다.')
+            collect_sql_migrations(self.work)
+            return {'prepared': True, 'row_counts': conversion['row_counts']}
+        if migration_dir.exists() or not source.is_file() or source.is_symlink():
+            raise ValueError('작업용 SQLite 파일 또는 마이그레이션 경로가 예상과 다릅니다.')
+        snapshot = compile_sqlite_snapshot(source)
+        if (snapshot.source_sha256 != conversion['source_sha256']
+                or snapshot.row_counts != conversion['row_counts']
+                or snapshot.schema != conversion['schema']):
+            raise ValueError('SQLite 스냅샷이 업로드 사전 검사 후 변경됐습니다.')
+        migration_dir.mkdir(mode=0o700)
+        try:
+            with migration.open('x', encoding='utf-8') as output:
+                output.write(snapshot.sql)
+            collect_sql_migrations(self.work)
+            source.unlink()
+        except Exception:
+            migration.unlink(missing_ok=True)
+            migration_dir.rmdir()
+            raise
+        self.plan = None
+        self.event('editing', 'SQLite 스냅샷을 PostgreSQL 마이그레이션으로 변환했습니다.')
+        self.checkpoint(change={'path': conversion['path'], 'diff': 'SQLite 데이터 파일 → PostgreSQL 마이그레이션'},
+                        plan=None)
+        return {'prepared': True, 'row_counts': snapshot.row_counts,
+                'source_sha256': snapshot.source_sha256,
+                'next': '앱의 SQLite 코드와 의존성을 PostgreSQL로 바꾸고 다시 설정하세요.'}
 
     def clean(self, text):
         for value in sorted(set(self.environment.values()), key=len, reverse=True):
@@ -401,6 +453,7 @@ class DeploymentAgent:
                 set(self.tools.environment) |
                 (MANAGED_POSTGRES_ENV if self.tools.postgres_request else set())),
             "managed_postgres_connection": self.tools.postgres_request is not None,
+            "sqlite_conversion": self.tools.sqlite_conversion,
             "attempts_used": self.tools.attempts}, ensure_ascii=False)}]
         started = time.monotonic()
         while self.steps < self.max_steps:

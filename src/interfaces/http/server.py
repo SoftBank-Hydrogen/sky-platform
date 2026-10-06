@@ -31,7 +31,8 @@ from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       deployment_access_mode, explicit_infrastructure_plan,
                                       infrastructure_compatibility,
                                       inspect_infrastructure,
-                                      plan_infrastructure, validate_infrastructure)
+                                      plan_infrastructure, preflight_sqlite_conversion,
+                                      validate_infrastructure)
 from adapters.database.migrations import collect_sql_migrations
 from application.network_operations import NetworkOperations
 from adapters.aws.postgres import (AwsPostgresProvisioner, PostgresRequest,
@@ -259,6 +260,7 @@ class App(StateRecoveryMixin):
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
                                     infrastructure_plan=job.get('infrastructure_plan'),
                                     postgres_request=postgres_request_from_job(job),
+                                    sqlite_conversion=job.get('sqlite_conversion'),
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))
@@ -1463,6 +1465,9 @@ def handler_for(app: App):
                     postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
                     if postgres_flag not in {'true', 'false'}:
                         raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
+                    sqlite_flag = self.headers.get('X-Sqlite-Convert', 'false')
+                    if sqlite_flag not in {'true', 'false'}:
+                        raise ValueError('SQLite 변환 선택 값이 올바르지 않습니다.')
                     create_plan_id = self.headers.get('X-Postgres-Create-Plan')
                     if create_plan_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', create_plan_id):
                         raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
@@ -1527,10 +1532,18 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         infrastructure_profile = inspect_infrastructure(project)
-                        validate_infrastructure(infrastructure_profile, target,
+                        sqlite_conversion = None
+                        deployment_profile = infrastructure_profile
+                        if sqlite_flag == 'true':
+                            if postgres_request is None:
+                                raise ValueError('SQLite 자동 이전은 PostgreSQL RDS 선택이 필요합니다.')
+                            sqlite_conversion, deployment_profile = preflight_sqlite_conversion(
+                                project, infrastructure_profile)
+                        validate_infrastructure(deployment_profile, target,
                                                 postgres=postgres_request is not None)
                         if postgres_request is not None:
-                            collect_sql_migrations(project)
+                            if sqlite_conversion is None:
+                                collect_sql_migrations(project)
                             if create_plan_id is None:
                                 database = AwsPostgresProvisioner(postgres_request).inspect_current()
                                 app.postgres_operations.require_deployable(
@@ -1548,7 +1561,7 @@ def handler_for(app: App):
                             validate_infrastructure(infrastructure_profile, target)
                         else:
                             infrastructure_plan = explicit_infrastructure_plan(
-                                target, infrastructure_profile,
+                                target, deployment_profile,
                                 existing_postgres_id=database['database_id']
                                 if postgres_request is not None and create_plan_id is None else None,
                                 create_postgres_id=postgres_request.database_id
@@ -1561,8 +1574,10 @@ def handler_for(app: App):
                                      if create_plan_id is not None else
                                      'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
                         infrastructure_plan['compatibility'] = infrastructure_compatibility(
-                            infrastructure_profile, target, postgres=postgres_request is not None,
+                            deployment_profile, target, postgres=postgres_request is not None,
                             public_access=public_flag == 'true')
+                        if sqlite_conversion is not None:
+                            infrastructure_plan['conversion_pending'] = 'sqlite-to-postgresql'
                         access_mode = infrastructure_plan['compatibility']['access_mode']
                         if access_mode is None:
                             raise ValueError('선택한 배포 대상의 공개 범위를 지원하지 않습니다.')
@@ -1593,6 +1608,8 @@ def handler_for(app: App):
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
                                 "events": []}
+                            if sqlite_conversion is not None:
+                                app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion
                             app.jobs[job_id]['source_digest'] = source_digest(project)
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
