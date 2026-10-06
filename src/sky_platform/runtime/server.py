@@ -1,0 +1,2036 @@
+from __future__ import annotations
+
+import argparse
+import difflib
+import fcntl
+import json
+import os
+import re
+import secrets
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from sky_platform.runtime.analysis import AISettings, analyze_project, redact
+from sky_platform.runtime.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from sky_platform.runtime.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from sky_platform.runtime.aws_network import ServiceNetworkRequest, discover_default_network
+from sky_platform.runtime.certificate import deployment_certificate
+from sky_platform.runtime.diagnosis import deployment_diagnosis
+from sky_platform.runtime.cloud import CloudRunAdapter, CloudRunSettings
+from sky_platform.runtime.core import MAX_UPLOAD, DeploymentPlan, LocalDockerAdapter, extract_project, folder_upload_to_zip, source_digest, validate_environment
+from sky_platform.runtime.health import check_deployment
+from sky_platform.runtime.infrastructure import (OpenAIInfrastructurePlanner,
+                                      deployment_access_mode, explicit_infrastructure_plan,
+                                      infrastructure_compatibility,
+                                      inspect_infrastructure,
+                                      plan_infrastructure, validate_infrastructure)
+from sky_platform.runtime.migrations import collect_sql_migrations
+from sky_platform.runtime.network_operations import NetworkOperations
+from sky_platform.runtime.postgres import (AwsPostgresProvisioner, PostgresRequest,
+                                discover_existing_postgres, inspect_postgres_backup_status,
+                                postgres_settings_for_application)
+from sky_platform.runtime.postgres_operations import PostgresOperations
+from sky_platform.runtime.postgres_retirement_operations import PostgresRetirementOperations
+from sky_platform.runtime.snapshot_operations import SnapshotOperations
+
+
+def postgres_request_from_job(job: dict) -> PostgresRequest | None:
+    configuration = job.get('postgres')
+    if configuration is None:
+        return None
+    if not isinstance(configuration, dict) or set(configuration) != {
+            'application_id', 'account', 'region', 'vpc_id', 'subnet_ids',
+            'service_security_group'} or not isinstance(configuration['subnet_ids'], list):
+        raise ValueError('저장된 PostgreSQL 연결 요청이 올바르지 않습니다.')
+    request = PostgresRequest(configuration['application_id'], configuration['account'],
+                              configuration['region'], configuration['vpc_id'],
+                              tuple(configuration['subnet_ids']),
+                              configuration['service_security_group'])
+    request.validate()
+    aws = job.get('aws') or {}
+    if (job.get('target') != 'aws-ecs-express'
+            or job.get('application_id') != request.application_id
+            or aws.get('region') != request.region
+            or aws.get('expected_account') != request.account
+            or aws.get('service_security_group') != request.service_security_group):
+        raise ValueError('저장된 PostgreSQL 연결 요청이 AWS 배포 대상과 다릅니다.')
+    return request
+
+
+def dockerfile_diff(source: Path, plan: dict) -> str:
+    previous = (source / "Dockerfile").read_text() if plan.get("dockerfile_source") == "existing" else ""
+    return "".join(difflib.unified_diff(previous.splitlines(keepends=True),
+                                        plan["dockerfile"].splitlines(keepends=True),
+                                        fromfile="Dockerfile (uploaded)" if previous else "/dev/null",
+                                        tofile="Dockerfile"))
+
+
+class StateDirectoryLock:
+    """Hold an OS lock for the entire lifetime of one server process."""
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.file = None
+
+    def __enter__(self):
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.root.chmod(0o700)
+        self.file = (self.root / '.server.lock').open('a+')
+        self.file_path = self.root / '.server.lock'
+        self.file_path.chmod(0o600)
+        try:
+            fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.file.close()
+            self.file = None
+            raise RuntimeError(f'이미 다른 Sky 서버가 이 상태 디렉터리를 사용 중입니다: {self.root}') from None
+        return self.root
+
+    def __exit__(self, *_):
+        if self.file is not None:
+            fcntl.flock(self.file, fcntl.LOCK_UN)
+            self.file.close()
+            self.file = None
+
+
+class App:
+    def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
+                 cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
+                 monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner):
+        self.root = root.resolve()
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.root.chmod(0o700)
+        self.token = secrets.token_urlsafe(32)
+        self.lock = threading.Lock()
+        self.jobs = {}
+        self.health_history = {}
+        self.monitor_errors = {}
+        if type(monitor_interval) is not int or (monitor_interval != 0 and not 60 <= monitor_interval <= 3600):
+            raise ValueError('Monitoring interval must be 0 or 60–3600 seconds')
+        self.monitor_interval = monitor_interval
+        self.ai_settings = ai_settings if ai_settings is not None else AISettings.from_environment()
+        self.agent_factory = agent_factory
+        self.infrastructure_planner_factory = infrastructure_planner_factory
+        self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
+        self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
+        self.recovery_warnings = []
+        self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings,
+            max_baseline_730h_usd=os.environ.get('SKY_MAX_RDS_730H_USD'))
+        self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
+        self.postgres_retirement_operations = PostgresRetirementOperations(
+            self.root / 'database-retirement-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.postgres_retirement_operations.recovery_warnings)
+        self.snapshot_operations = SnapshotOperations(self.root / 'snapshot-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.snapshot_operations.recovery_warnings)
+        self.network_operations = NetworkOperations(self.root / 'network-operations', self.aws_settings)
+        self.recovery_warnings.extend(self.network_operations.recovery_warnings)
+        self.restore()
+
+    def clean_uncommitted_uploads(self):
+        for directory in sorted(self.root.iterdir()):
+            if not re.fullmatch(r'[a-f0-9]{16}', directory.name):
+                continue
+            marker = directory / '.uncommitted-upload'
+            if not marker.exists() and not marker.is_symlink():
+                continue
+            job_file = directory / 'job.json'
+            if job_file.exists() or job_file.is_symlink():
+                continue
+            try:
+                if (directory.is_symlink() or not directory.is_dir()
+                        or marker.is_symlink() or not marker.is_file()):
+                    raise ValueError('Unsafe upload marker')
+                for entry in directory.iterdir():
+                    if entry.is_symlink():
+                        raise ValueError('Symlink in uncommitted upload')
+                    if entry.name == '.uncommitted-upload' and entry.is_file():
+                        continue
+                    if entry.name == 'source.zip' and entry.is_file():
+                        continue
+                    if entry.name == 'source' and entry.is_dir():
+                        continue
+                    if re.fullmatch(r'\.job-[A-Za-z0-9_]+\.tmp', entry.name) and entry.is_file():
+                        continue
+                    raise ValueError('Unexpected file in uncommitted upload')
+                shutil.rmtree(directory)
+            except (OSError, ValueError):
+                self.recovery_warnings.append(
+                    '미접수 업로드 디렉터리를 안전하게 정리하지 못했습니다: ' + directory.name)
+
+    def clear_upload_marker(self, directory: Path):
+        try:
+            (directory / '.uncommitted-upload').unlink()
+        except OSError:
+            self.recovery_warnings.append(
+                '접수된 작업의 업로드 표시를 정리하지 못했습니다: ' + directory.name)
+
+    def restore(self):
+        self.clean_uncommitted_uploads()
+        for path in sorted(self.root.glob("*/job.json")):
+            try:
+                job = json.loads(path.read_text())
+                if not isinstance(job, dict):
+                    raise ValueError("Invalid job record")
+                job_id = path.parent.name
+                if not re.fullmatch(r"[a-f0-9]{16}", job_id) or job.get("id") != job_id:
+                    raise ValueError("Invalid job identity")
+                if ("application_id" in job and not re.fullmatch(
+                        r"[a-z][a-z0-9-]{2,30}", job["application_id"])):
+                    raise ValueError("Invalid application identity")
+                project = Path(job["project"]).resolve()
+                if not project.is_relative_to((path.parent / "source").resolve()):
+                    raise ValueError("Invalid project path")
+                if job.get("plan") is not None:
+                    DeploymentPlan(**job["plan"])
+                elif job.get("mode") != "agent":
+                    raise ValueError("Missing deployment plan")
+                postgres_request_from_job(job)
+                if job.get('postgres_creation_id') is not None and (
+                        not isinstance(job['postgres_creation_id'], str)
+                        or not re.fullmatch(r'[a-f0-9]{16}', job['postgres_creation_id'])
+                        or job.get('target') != 'aws-ecs-express'
+                        or job.get('postgres') is None):
+                    raise ValueError('Invalid PostgreSQL creation binding')
+                if job["status"] not in {"planned", "provisioning", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
+                    raise ValueError("Invalid job status")
+                if (not isinstance(job["events"], list) or any(
+                        not isinstance(event, dict) or any(not isinstance(event.get(key), str)
+                        for key in ("time", "stage", "message")) for event in job["events"])):
+                    raise ValueError("Invalid events")
+                job.setdefault("created_at", datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat())
+                if not isinstance(job["created_at"], str):
+                    raise ValueError("Invalid timestamp")
+                self.jobs[job_id] = job
+                health_file = path.parent / 'health.json'
+                if health_file.is_file():
+                    try:
+                        history = json.loads(health_file.read_text())
+                        if (not isinstance(history, list) or len(history) > 20
+                                or any(not isinstance(item, dict)
+                                       or type(item.get('healthy')) is not bool
+                                       or not isinstance(item.get('checked_at'), str)
+                                       or not isinstance(item.get('reason'), str)
+                                       or item.get('source') not in {'automatic', 'manual'}
+                                       for item in history)):
+                            raise ValueError('Invalid health history')
+                        self.health_history[job_id] = history
+                    except (OSError, ValueError, TypeError):
+                        self.recovery_warnings.append(f"상태 확인 기록을 불러오지 못했습니다: {job_id}")
+                if job["status"] == "running":
+                    job["status"] = "cancelled" if job.get('cancel_requested') and not job.get('attempts') else "interrupted"
+                    if job.get('aws_update_submitted') and not job.get('aws_update_failed_at'):
+                        job['aws_update_failed_at'] = datetime.now(timezone.utc).isoformat()
+                    job["events"].append({"time": datetime.now(timezone.utc).isoformat(),
+                        "stage": job['status'], "message": (
+                            "서버 재시작 후 배포 시도 전 취소 요청을 확인했습니다."
+                            if job['status'] == 'cancelled' else
+                            "서버 재시작으로 완료 여부를 확인하지 못했습니다. 컨테이너 상태를 확인하세요. 자동 재배포는 하지 않습니다.")})
+                    job.pop('cancel_requested', None)
+                    self.save(job_id)
+                if job['status'] == 'provisioning':
+                    job['status'] = 'interrupted'
+                    job['events'].append({'time': datetime.now(timezone.utc).isoformat(),
+                        'stage': 'interrupted', 'message': '서버 재시작으로 DB 생성과 배포 연결을 중단했습니다. DB 생성 상태를 재확인하세요. 자동 배포하지 않습니다.'})
+                    self.save(job_id)
+                if job.get('deployment_state') == 'deleting':
+                    job['deployment_state'] = 'delete_failed'
+                    job['events'].append({"time": datetime.now(timezone.utc).isoformat(),
+                        "stage": "retire_interrupted", "message": "서버 재시작으로 종료 확인이 중단됐습니다. 배포 종료를 다시 실행할 수 있습니다."})
+                    self.save(job_id)
+                if job.get('aws_image_cleanup_state') == 'running':
+                    job['aws_image_cleanup_state'] = 'failed'
+                    self.save(job_id)
+                if job.get('aws_migration_cleanup_state') == 'running':
+                    job['aws_migration_cleanup_state'] = 'failed'
+                    self.save(job_id)
+                if job.get('release_rollback_state') == 'running':
+                    job['release_rollback_state'] = ('needs_attention' if job.get('release_rollback_submitted') else 'failed')
+                    if job.get('release_rollback_submitted'):
+                        job['deployment_state'] = 'needs_attention'
+                        job.setdefault('release_rollback_failed_at', datetime.now(timezone.utc).isoformat())
+                    self.save(job_id)
+            except (OSError, ValueError, KeyError, TypeError):
+                self.recovery_warnings.append(f"작업 기록을 불러오지 못했습니다: {path.parent.name}")
+        for job in self.jobs.values():
+            rollback_target = self.jobs.get(job.get('release_rollback_target_id') or job.get('replaces_job_id'))
+            legacy_rollback = 'release_rollback_restore_pending' not in job
+            if (rollback_target and job.get('release_rollback_state') == 'succeeded'
+                    and job.get('deployment_state') == 'superseded'
+                    and (job.get('release_rollback_restore_pending') or legacy_rollback)
+                    and rollback_target.get('deployment_state') == 'superseded'
+                    and not any(successor is not job
+                                and successor.get('replaces_job_id') == rollback_target['id']
+                                and successor.get('status') == 'succeeded'
+                                and successor.get('created_at', '') > job.get('created_at', '')
+                                for successor in self.jobs.values())):
+                rollback_target['deployment_state'] = 'active'
+                rollback_target['result']['images'] = list(dict.fromkeys(
+                    [*(rollback_target['result'].get('images') or [rollback_target['result']['image']]),
+                     *(job.get('result', {}).get('images') or [])]))
+                self.save(rollback_target['id'])
+            if job.get('release_rollback_restore_pending') and rollback_target and \
+                    rollback_target.get('deployment_state') == 'active':
+                job['release_rollback_restore_pending'] = False
+                self.save(job['id'])
+            previous = self.jobs.get(job.get('replaces_job_id'))
+            if not previous or previous.get('deployment_state', 'active') != 'active':
+                continue
+            if (job.get('status') == 'succeeded' and job.get('result')
+                    and job.get('deployment_state', 'active') == 'active'
+                    and not job.get('release_rollback_state')):
+                previous['deployment_state'] = 'superseded'
+                self.save(previous['id'])
+            elif ((job.get('aws_update_submitted') or any(event.get('stage') == 'update_submitting'
+                      for event in job.get('events', []))) and not job.get('aws_reconciled')
+                  and job.get('status') in {'failed', 'interrupted'}):
+                previous['deployment_state'] = 'needs_attention'
+                self.save(previous['id'])
+
+    def summaries(self):
+        with self.lock:
+            return [{"id": job["id"], "status": job["status"], "created_at": job.get("created_at"),
+                     "application_id": job.get("application_id", job["id"]),
+                     "deployment_state": job.get("deployment_state", "active"),
+                     "release_rollback_state": job.get('release_rollback_state'),
+                     "analyzer": (job.get("plan") or {}).get("analyzer", job.get("mode", "static")),
+                     "result": job.get("result"),
+                     "last_health": (self.health_history.get(job['id']) or [None])[-1],
+                     "monitor_error": self.monitor_errors.get(job['id'])}
+                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)]
+
+    def releases(self, application_id):
+        with self.lock:
+            return [{"id": job["id"], "status": job["status"], "target": job.get("target", "local-docker"),
+                     "created_at": job.get("created_at"), "result": job.get("result"),
+                     "deployment_state": job.get("deployment_state", "active"),
+                     "release_rollback_state": job.get('release_rollback_state')}
+                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
+                    if job.get("application_id", job["id"]) == application_id]
+
+    def ensure_application_available(self, application_id, target):
+        # The caller holds self.lock while reserving the new job.
+        if target in {'auto', 'aws-ecs-express'} and self.postgres_retirement_operations.blocks_deployment(application_id):
+            raise ValueError(f'{application_id}의 PostgreSQL 폐기 기록이 있어 AWS 배포를 시작할 수 없습니다.')
+        if any(job.get("application_id") == application_id and job.get("target") == target
+               and job.get("status") in {"provisioning", "running", "waiting_input"} for job in self.jobs.values()):
+            raise ValueError(f"{application_id}의 {target} 배포가 이미 진행 중입니다.")
+        if any(job.get("application_id") == application_id and job.get("target") == target
+               and job.get("deployment_state") in {"deleting", "needs_attention"} for job in self.jobs.values()):
+            raise ValueError(f"{application_id}의 {target} 서비스 상태를 먼저 확인해야 합니다.")
+        if any(job.get('application_id') == application_id and job.get('target') == target
+               and job.get('aws_image_cleanup_state') == 'running' for job in self.jobs.values()):
+            raise ValueError(f'{application_id}의 실패 이미지 정리가 진행 중입니다.')
+        if any(job.get('application_id') == application_id and job.get('target') == target
+               and job.get('release_rollback_state') == 'running' for job in self.jobs.values()):
+            raise ValueError(f'{application_id}의 이전 릴리스 롤백이 진행 중입니다.')
+
+    def event(self, job_id, stage, message):
+        with self.lock:
+            job = self.jobs[job_id]
+            job["events"].append({"time": datetime.now(timezone.utc).isoformat(),
+                                  "stage": stage, "message": message})
+            self.save(job_id)
+
+    def start_job_worker(self, job_id, worker, environment=None):
+        args = (job_id,) if environment is None else (job_id, environment)
+        try:
+            threading.Thread(target=worker, args=args, daemon=True).start()
+        except Exception:
+            if environment is not None:
+                environment.clear()
+            with self.lock:
+                job = self.jobs[job_id]
+                job['status'] = 'interrupted'
+                job['events'].append({
+                    'time': datetime.now(timezone.utc).isoformat(),
+                    'stage': 'interrupted',
+                    'message': '배포 작업을 시작하지 못했습니다. 실행 결과를 확인하고 새 배포를 시작하세요.'})
+                self.save(job_id)
+            return False
+        return True
+
+    def check_and_record_health(self, job_id: str, source: str = 'manual') -> dict:
+        if source not in {'automatic', 'manual'}:
+            raise ValueError('Invalid health check source')
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job or job.get('status') != 'succeeded' or not isinstance(job.get('result'), dict):
+                raise ValueError('Only completed deployments can be checked')
+            snapshot = json.loads(json.dumps(job))
+        result = check_deployment(snapshot)
+        entry = {'healthy': bool(result.get('healthy')),
+                 'checked_at': result.get('checked_at') or datetime.now(timezone.utc).isoformat(),
+                 'reason': redact(str(result.get('reason') or ''))[:300], 'source': source}
+        with self.lock:
+            current = self.jobs.get(job_id)
+            if (not current or current.get('status') != 'succeeded'
+                    or current.get('deployment_state', 'active') != 'active'
+                    or current.get('result') != snapshot['result']
+                    or (source == 'automatic' and any(
+                        other is not current
+                        and other.get('application_id', other['id']) == current.get('application_id', current['id'])
+                        and other.get('target', 'local-docker') == current.get('target', 'local-docker')
+                        and other.get('status') in {'provisioning', 'running', 'waiting_input'}
+                        for other in self.jobs.values()))):
+                return result
+            history = (self.health_history.get(job_id, []) + [entry])[-20:]
+            path = self.root / job_id / 'health.json'
+            temporary = None
+            try:
+                descriptor, temporary = tempfile.mkstemp(prefix='.health-', suffix='.tmp', dir=path.parent)
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                    json.dump(history, output, ensure_ascii=False)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, path)
+                self.health_history[job_id] = history
+                self.monitor_errors.pop(job_id, None)
+            except OSError as exc:
+                self.monitor_errors[job_id] = '상태 확인 기록 저장 실패: ' + str(exc)[:200]
+            finally:
+                if temporary is not None:
+                    Path(temporary).unlink(missing_ok=True)
+        return result
+
+    def monitor_once(self) -> None:
+        with self.lock:
+            jobs = list(self.jobs.values())
+            candidates = [job['id'] for job in jobs
+                          if job.get('status') == 'succeeded' and job.get('result')
+                          and job.get('deployment_state', 'active') == 'active'
+                          and job.get('release_rollback_state') not in {'running', 'needs_attention'}
+                          and not any(other is not job
+                                      and other.get('application_id', other['id']) == job.get('application_id', job['id'])
+                                      and other.get('target', 'local-docker') == job.get('target', 'local-docker')
+                                      and other.get('status') in {'provisioning', 'running', 'waiting_input'} for other in jobs)]
+        for job_id in candidates:
+            try:
+                self.check_and_record_health(job_id, 'automatic')
+            except Exception as exc:
+                # Monitoring is observational; it must not alter deployment history on failure.
+                with self.lock:
+                    self.monitor_errors[job_id] = '자동 상태 확인 실패: ' + str(exc)[:200]
+                continue
+
+    def monitor_loop(self, stop: threading.Event) -> None:
+        if stop.wait(5):
+            return
+        while not stop.is_set():
+            self.monitor_once()
+            if stop.wait(self.monitor_interval):
+                return
+
+    def save(self, job_id):
+        path = self.root / job_id / "job.json"
+        temporary = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(prefix='.job-', suffix='.tmp', dir=path.parent)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                json.dump(self.jobs[job_id], output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            job = self.jobs[job_id]
+            job['status'] = 'failed'
+            job.pop('result', None)
+            if not job.get('persistence_failed'):
+                job['persistence_failed'] = True
+                job.setdefault('events', []).append({
+                    'time': datetime.now(timezone.utc).isoformat(), 'stage': 'error',
+                    'message': '작업 기록을 저장하지 못했습니다. 배포 리소스 상태를 직접 확인하세요.'})
+            raise RuntimeError('배포 작업 기록 저장에 실패했습니다.') from exc
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
+
+    def run_agent(self, job_id, environment=None):
+        environment = {} if environment is None else environment
+        tools = None
+        def checkpoint(**updates):
+            with self.lock:
+                job = self.jobs[job_id]
+                if job.get('cancel_requested') and ('attempts' in updates or updates.get('status') in {'waiting_input', 'succeeded', 'failed'}):
+                    raise DeploymentCancelled()
+                if "change" in updates:
+                    job.setdefault("changes", []).append(updates.pop("change"))
+                job.update(updates)
+                if "plan" in updates and updates["plan"] is None:
+                    job["diff"] = ""
+                if job.get("plan"):
+                    job["diff"] = dockerfile_diff(Path(job["project"]), job["plan"])
+                self.save(job_id)
+        try:
+            job = self.jobs[job_id]
+            if (job.get('source_digest') is not None
+                    and source_digest(Path(job['project'])) != job['source_digest']):
+                raise ValueError('업로드한 앱 소스가 변경됐습니다. 새 배포를 시작하세요.')
+            target = job.get("target", "local-docker")
+            adapter_factory = LocalDockerAdapter
+            if target == "cloud-run":
+                settings = CloudRunSettings(**job["cloud"])
+                adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
+            elif target == "aws-ecs-express":
+                settings = AwsSettings(**job["aws"])
+                adapter_factory = lambda event: AwsExpressAdapter(event, settings, existing=job.get('prior_result'),
+                                                                    checkpoint=checkpoint,
+                                                                    **({'rehearsal': True} if job.get('postgres') is None else {}))
+            tools = DeploymentTools(Path(job["project"]), self.root / job_id / "work", job_id,
+                                    environment, lambda s, m: self.event(job_id, s, m), checkpoint,
+                                    attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
+                                    infrastructure_plan=job.get('infrastructure_plan'),
+                                    postgres_request=postgres_request_from_job(job),
+                                    cancel_check=lambda: self.cancel_requested(job_id),
+                                    require_existing_work=bool(job.get('steps', 0)),
+                                    expected_work_digest=job.get('work_digest'))
+            self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
+            result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
+                                     steps=job.get("steps", 0)).run()
+            checkpoint(status="succeeded", result=result, missing_environment=[], deployment_state="active")
+            if job.get('replaces_job_id'):
+                with self.lock:
+                    previous = self.jobs.get(job['replaces_job_id'])
+                    if previous and previous.get('deployment_state', 'active') == 'active':
+                        if (target == 'aws-ecs-express' and result.get('previous_task_definition_arn')
+                                and previous.get('result')):
+                            previous['result']['task_definition_arn'] = result['previous_task_definition_arn']
+                        previous['deployment_state'] = 'superseded'
+                        self.save(previous['id'])
+            self.event(job_id, "succeeded", "실제 HTTP 응답 확인 완료")
+        except DeploymentCancelled:
+            checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+            self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+        except NeedsEnvironment as exc:
+            # Previous values are not persisted, so ask for their names again on resume too.
+            names = sorted(set(exc.names) | set(environment))
+            try:
+                digest = source_digest(tools.work)
+                checkpoint(status="waiting_input", missing_environment=names,
+                           input_reason=exc.reason, work_digest=digest)
+            except DeploymentCancelled:
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+            except (OSError, ValueError):
+                checkpoint(status="failed", missing_environment=[])
+                self.event(job_id, "error", "작업용 소스의 무결성을 확인하지 못했습니다. 새 배포를 시작하세요.")
+            else:
+                self.event(job_id, "waiting_input", exc.reason)
+        except Exception as exc:
+            if self.cancel_requested(job_id) and not self.jobs[job_id].get('attempts'):
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+                return
+            message = str(exc)
+            for value in sorted(set(environment.values()), key=len, reverse=True):
+                if value:
+                    message = message.replace(value, "[REDACTED]")
+            self.event(job_id, "error", message)
+            try:
+                checkpoint(status="failed")
+            except DeploymentCancelled:
+                checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
+                self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
+                return
+            if self.jobs[job_id].get('aws_update_submitted') and not self.jobs[job_id].get('aws_update_failed_at'):
+                checkpoint(aws_update_failed_at=datetime.now(timezone.utc).isoformat())
+            if (self.jobs[job_id].get('aws_update_submitted') or any(
+                    event.get('stage') == 'update_submitting' for event in self.jobs[job_id].get('events', []))) \
+                    and self.jobs[job_id].get('replaces_job_id'):
+                with self.lock:
+                    previous = self.jobs.get(self.jobs[job_id]['replaces_job_id'])
+                    if previous and previous.get('deployment_state', 'active') == 'active':
+                        previous['deployment_state'] = 'needs_attention'
+                        self.save(previous['id'])
+        finally:
+            environment.clear()
+            if tools is not None:
+                tools.environment.clear()
+
+    def cancel_requested(self, job_id):
+        with self.lock:
+            return bool(self.jobs[job_id].get('cancel_requested'))
+
+    def run_postgres_then_agent(self, job_id: str) -> None:
+        """Wait for a separately journaled RDS creation; never retry it on restart."""
+        try:
+            job = self.jobs[job_id]
+            request = postgres_request_from_job(job)
+            if request is None:
+                raise ValueError('PostgreSQL 생성 작업에 연결 정보가 없습니다.')
+            creation_id = job.get('postgres_creation_id')
+            if not creation_id:
+                raise ValueError('DB 생성 시도 연결 기록이 없습니다. 앱은 자동 배포하지 않습니다.')
+            deadline = time.monotonic() + 3600
+            while True:
+                operation = self.postgres_operations.get(request.application_id)
+                if operation.get('creation_id') != creation_id:
+                    raise ValueError('DB 생성 시도가 배포 작업과 다릅니다. 앱은 자동 배포하지 않습니다.')
+                if operation['status'] == 'succeeded':
+                    if operation['database_id'] != request.database_id:
+                        raise ValueError('생성된 DB 식별자가 배포 계획과 다릅니다.')
+                    self.postgres_operations.require_successful_creation(request, creation_id)
+                    if source_digest(Path(job['project'])) != job.get('source_digest'):
+                        raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
+                    database = AwsPostgresProvisioner(request).inspect_current()
+                    self.postgres_operations.require_deployable(
+                        request.application_id, database['database_id'])
+                    with self.lock:
+                        job = self.jobs[job_id]
+                        if job['status'] != 'provisioning':
+                            return
+                        job['status'] = 'running'
+                        self.save(job_id)
+                    self.event(job_id, 'database_ready', '소유 PostgreSQL 생성 완료. 앱 배포를 시작합니다.')
+                    self.run_agent(job_id)
+                    return
+                if operation['status'] != 'running':
+                    raise ValueError('DB 생성 결과가 불확실합니다. 생성 상태를 재확인하세요. 앱은 자동 배포하지 않습니다.')
+                if time.monotonic() > deadline:
+                    raise TimeoutError('DB 생성 대기 시간이 초과됐습니다. 상태를 재확인하세요. 앱은 자동 배포하지 않습니다.')
+                time.sleep(3)
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                if job['status'] not in {'provisioning', 'running'}:
+                    return
+                job['status'] = 'interrupted'
+                self.save(job_id)
+            self.event(job_id, 'database_attention', redact(str(exc))[:500])
+
+    def resume_postgres_deployment(self, job_id: str) -> dict:
+        """Explicitly continue an untouched app job after its RDS create is confirmed."""
+        def eligible(job):
+            return (job and job.get('status') == 'interrupted'
+                    and job.get('mode') == 'agent'
+                    and job.get('target') == 'aws-ecs-express'
+                    and job.get('infrastructure_plan', {}).get('database', {}).get('binding') == 'create'
+                    and isinstance(job.get('postgres_creation_id'), str)
+                    and isinstance(job.get('source_digest'), str)
+                    and re.fullmatch(r'[a-f0-9]{64}', job['source_digest'])
+                    and job.get('attempts') == 0 and job.get('steps') == 0
+                    and not job.get('changes') and job.get('plan') is None
+                    and not job.get('result') and not job.get('cancel_requested')
+                    and not job.get('aws_update_submitted') and not job.get('persistence_failed')
+                    and not (self.root / job_id / 'work').exists())
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('DB 생성 후 앱 배포를 안전하게 재개할 수 없는 작업입니다.')
+            request = postgres_request_from_job(job)
+            if request is None:
+                raise ValueError('저장된 DB 연결 요청을 확인하지 못했습니다.')
+            creation_id = job['postgres_creation_id']
+            project = Path(job['project'])
+            expected_digest = job['source_digest']
+        if source_digest(project) != expected_digest:
+            raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
+        self.postgres_operations.require_successful_creation(request, creation_id)
+        database = AwsPostgresProvisioner(request).inspect_current()
+        self.postgres_operations.require_deployable(request.application_id, database['database_id'])
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('배포 작업 상태가 변경됐습니다. 이력을 다시 확인하세요.')
+            self.ensure_application_available(request.application_id, 'aws-ecs-express')
+            if any(other is not job and other.get('application_id') == request.application_id
+                   and other.get('target') == 'aws-ecs-express'
+                   and other.get('status') == 'succeeded'
+                   and other.get('deployment_state', 'active') == 'active'
+                   for other in self.jobs.values()):
+                raise ValueError('같은 앱의 다른 AWS 릴리스가 활성 상태입니다. 이전 작업을 재개할 수 없습니다.')
+            self.postgres_operations.require_successful_creation(request, creation_id)
+            if source_digest(project) != expected_digest:
+                raise ValueError('업로드한 앱 소스가 변경됐습니다. 기존 DB 사용으로 새 배포를 시작하세요.')
+            job['status'] = 'running'
+            self.save(job_id)
+        self.event(job_id, 'database_manual_resume',
+                   '생성된 소유 PostgreSQL을 재확인했습니다. 요청에 따라 앱 배포만 시작합니다.')
+        try:
+            threading.Thread(target=self.run_agent, args=(job_id,), daemon=True).start()
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['status'] = 'interrupted'
+                self.save(job_id)
+            self.event(job_id, 'database_attention',
+                       '앱 배포 작업을 시작하지 못했습니다: ' + redact(str(exc))[:300])
+            return {'id': job_id, 'status': 'interrupted'}
+        return {'id': job_id, 'status': 'running'}
+
+    def resume_unstarted_deployment(self, job_id: str) -> dict:
+        """Explicitly restart a job that never reached an AI step or deployment attempt."""
+        def eligible(job):
+            return (job and job.get('mode') == 'agent' and job.get('status') == 'interrupted'
+                    and job.get('target') in {'local-docker', 'cloud-run', 'aws-ecs-express'}
+                    and job.get('attempts') == 0 and job.get('steps') == 0
+                    and job.get('changes') == [] and job.get('plan') is None
+                    and job.get('result') is None and not job.get('cancel_requested')
+                    and not job.get('persistence_failed') and not job.get('aws_update_submitted')
+                    and isinstance(job.get('infrastructure_plan'), dict)
+                    and job['infrastructure_plan'].get('database') is None
+                    and job.get('postgres') is None and job.get('postgres_creation_id') is None
+                    and job.get('prior_result') is None
+                    and isinstance(job.get('source_digest'), str)
+                    and re.fullmatch(r'[a-f0-9]{64}', job['source_digest']))
+
+        if not self.ai_settings.available:
+            raise ValueError('AI 배포를 재개하려면 서버에 OPENAI_API_KEY를 설정하세요.')
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('배포 시도 전 상태를 안전하게 재개할 수 없는 작업입니다.')
+            project = Path(job['project'])
+            expected_digest = job['source_digest']
+        work = self.root / job_id / 'work'
+        def unchanged():
+            return (source_digest(project) == expected_digest
+                    and not work.is_symlink()
+                    and (not work.exists() or
+                         (work.is_dir() and source_digest(work) == expected_digest)))
+        if not unchanged():
+            raise ValueError('업로드 또는 작업용 소스가 변경됐습니다. 새 배포를 시작하세요.')
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job) or not unchanged():
+                raise ValueError('배포 작업이나 소스 상태가 변경됐습니다. 이력을 다시 확인하세요.')
+            self.ensure_application_available(job['application_id'], job['target'])
+            if (job['target'] == 'aws-ecs-express' and any(
+                    other is not job and other.get('application_id') == job['application_id']
+                    and other.get('target') == 'aws-ecs-express'
+                    and other.get('status') == 'succeeded'
+                    and other.get('deployment_state', 'active') == 'active'
+                    for other in self.jobs.values())):
+                raise ValueError('같은 앱의 AWS 릴리스가 활성 상태입니다. 이전 작업을 재개할 수 없습니다.')
+            job['status'] = 'running'
+            job['events'].append({'time': datetime.now(timezone.utc).isoformat(),
+                                  'stage': 'manual_resume',
+                                  'message': '배포 시도 전 중단된 작업을 다시 시작했습니다.'})
+            self.save(job_id)
+        started = self.start_job_worker(job_id, self.run_agent)
+        return {'id': job_id, 'status': 'running' if started else 'interrupted'}
+
+    def run(self, job_id, environment=None):
+        environment = {} if environment is None else environment
+        try:
+            job = self.jobs[job_id]
+            result = LocalDockerAdapter(lambda s, m: self.event(job_id, s, m)).deploy(
+                Path(job["project"]), DeploymentPlan(**job["plan"]), job_id, environment)
+            with self.lock:
+                job.update(status="succeeded", result=result)
+                self.save(job_id)
+        except Exception as exc:
+            message = str(exc)
+            for value in sorted(set(environment.values()), key=len, reverse=True):
+                if value:
+                    message = message.replace(value, "[REDACTED]")
+            self.event(job_id, "error", message)
+            with self.lock:
+                self.jobs[job_id]["status"] = "failed"
+                self.save(job_id)
+        finally:
+            environment.clear()
+
+    def retire_aws(self, job_id):
+        try:
+            with self.lock:
+                job = json.loads(json.dumps(self.jobs[job_id]))
+            result = job['result']
+            attempt_id = result.get('owner_attempt') or result['service'].removeprefix('sky-')
+            adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
+                                        AwsSettings(**job['aws']))
+            adapter.retire(result, attempt_id)
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'delete_failed'
+                self.jobs[job_id]['retire_error'] = str(exc)[:300]
+                self.save(job_id)
+            self.event(job_id, 'retire_failed', str(exc)[:300])
+        else:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'deleted'
+                self.jobs[job_id]['retired_at'] = datetime.now(timezone.utc).isoformat()
+                self.jobs[job_id].pop('retire_error', None)
+                self.save(job_id)
+            self.event(job_id, 'retired', 'ECS 서비스와 해당 ECR 이미지 태그의 삭제를 확인했습니다.')
+
+    def retire_local(self, job_id):
+        try:
+            with self.lock:
+                job = json.loads(json.dumps(self.jobs[job_id]))
+            adapter = LocalDockerAdapter(lambda stage, message: self.event(job_id, stage, message))
+            if job['status'] == 'succeeded':
+                adapter.retire(job['result'], job_id)
+            else:
+                for number in range(1, job['attempts'] + 1):
+                    attempt = f'{job_id}-a{number}'
+                    adapter.retire({'container': f'sky-{attempt}',
+                                    'image': f'sky/{attempt}:latest'}, job_id)
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'delete_failed'
+                self.jobs[job_id]['retire_error'] = str(exc)[:300]
+                self.save(job_id)
+            self.event(job_id, 'retire_failed', str(exc)[:300])
+        else:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'deleted'
+                self.jobs[job_id]['retired_at'] = datetime.now(timezone.utc).isoformat()
+                self.jobs[job_id].pop('retire_error', None)
+                self.save(job_id)
+            self.event(job_id, 'retired', '로컬 Docker 컨테이너와 이미지 태그의 삭제를 확인했습니다.')
+
+    def retire_cloud(self, job_id):
+        try:
+            with self.lock:
+                job = json.loads(json.dumps(self.jobs[job_id]))
+            result = job['result']
+            attempt_id = result['service'].removeprefix('sky-')
+            CloudRunAdapter(lambda stage, message: self.event(job_id, stage, message),
+                            CloudRunSettings(**job['cloud'])).retire(result, attempt_id)
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'delete_failed'
+                self.jobs[job_id]['retire_error'] = str(exc)[:300]
+                self.save(job_id)
+            self.event(job_id, 'retire_failed', str(exc)[:300])
+        else:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'deleted'
+                self.jobs[job_id]['retired_at'] = datetime.now(timezone.utc).isoformat()
+                self.jobs[job_id].pop('retire_error', None)
+                self.save(job_id)
+            self.event(job_id, 'retired', 'Cloud Run 서비스와 해당 Artifact Registry 이미지의 삭제를 확인했습니다.')
+
+    def reconcile_aws_update(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'} or not failed.get('aws_update_submitted')
+                    or failed.get('target') != 'aws-ecs-express' or not previous
+                    or previous.get('deployment_state') != 'needs_attention'
+                    or previous.get('status') != 'succeeded'):
+                raise ValueError('재확인할 AWS 업데이트가 아닙니다.')
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        prior_result = previous_snapshot['result']
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+        deployments = json.loads(adapter.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                              '--service', prior_result['service']], private=True, quiet=True))
+        items = deployments.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        if (not latest.get('serviceDeploymentArn')
+                or latest.get('status') not in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}):
+            return {'reconciled': False, 'reason': 'AWS 새 배포 또는 롤백이 아직 완료되지 않았습니다.'}
+        no_new_deployment = latest['serviceDeploymentArn'] == failed_snapshot.get('aws_previous_deployment_arn')
+        if no_new_deployment:
+            failed_at = failed_snapshot.get('aws_update_failed_at')
+            try:
+                settled = datetime.fromisoformat(failed_at)
+                if settled.tzinfo is None or datetime.now(timezone.utc) - settled < timedelta(minutes=10):
+                    raise ValueError('AWS 배포 이력 반영을 기다리는 중입니다. 실패 또는 재시작 후 10분 뒤 다시 확인하세요.')
+            except (TypeError, ValueError) as exc:
+                return {'reconciled': False, 'reason': str(exc) if str(exc).startswith('AWS 배포') else
+                        '업데이트 결과를 확인할 시간이 기록되지 않았습니다.'}
+        service_data = json.loads(adapter.aws(['ecs', 'describe-express-gateway-service',
+                                               '--service-arn', prior_result['service_arn'], '--include', 'TAGS'],
+                                              private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in service_data.get('tags', [])}
+        owner_attempt = prior_result.get('owner_attempt') or prior_result['service'].removeprefix('sky-')
+        if (service_data.get('serviceArn') != prior_result['service_arn']
+                or service_data.get('status', {}).get('statusCode') != 'ACTIVE'
+                or service_data.get('currentDeployment')
+                or tags.get('sky-managed') != 'true'
+                or tags.get('sky-attempt') != owner_attempt):
+            return {'reconciled': False, 'reason': 'ECS 서비스 소유권 또는 완료 상태를 확인할 수 없습니다.'}
+        active_images = {config.get('primaryContainer', {}).get('image')
+                         for config in service_data.get('activeConfigurations', [])}
+        candidate_image = failed_snapshot.get('aws_candidate_image')
+        attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+        expected_image = prior_result['image'].rsplit(':', 1)[0] + ':' + attempt
+        if candidate_image != expected_image:
+            raise ValueError('업데이트 이미지 식별자가 예상과 다릅니다.')
+        if (not no_new_deployment and latest['status'] == 'SUCCESSFUL'
+                and active_images == {candidate_image}):
+            active_configs = service_data.get('activeConfigurations', [])
+            task_arn = active_configs[0].get('taskDefinitionArn') if len(active_configs) == 1 else None
+            task_prefix = (f"arn:aws:ecs:{prior_result['region']}:{prior_result['account']}:task-definition/")
+            if (not isinstance(task_arn, str) or not task_arn.startswith(task_prefix)
+                    or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_arn.removeprefix(task_prefix))):
+                return {'reconciled': False, 'reason': '새 릴리스의 ECS 태스크 정의를 확인할 수 없습니다.'}
+            candidate_result = {**prior_result, 'image': candidate_image,
+                                'images': [*(prior_result.get('images') or [prior_result['image']]), candidate_image],
+                                'task_definition_arn': task_arn,
+                                'previous_task_definition_arn': prior_result.get('task_definition_arn'),
+                                'health_url': prior_result['url'].rstrip('/') + failed_snapshot['plan']['health_path']}
+            candidate = {**failed_snapshot, 'status': 'succeeded', 'result': candidate_result,
+                         'deployment_state': 'active'}
+            health = check_deployment(candidate)
+            if health['healthy']:
+                with self.lock:
+                    if (self.jobs[job_id].get('status') not in {'failed', 'interrupted'}
+                            or self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention'):
+                        raise ValueError('재확인 도중 작업 상태가 변경됐습니다.')
+                    self.jobs[job_id].update(status='succeeded', result=candidate_result,
+                                             deployment_state='active')
+                    self.save(job_id)
+                    self.jobs[previous_snapshot['id']]['deployment_state'] = 'superseded'
+                    self.save(previous_snapshot['id'])
+                self.event(job_id, 'reconciled', 'AWS 새 릴리스의 이미지와 HTTP 200을 확인해 성공으로 복구했습니다.')
+                return {'reconciled': True, 'release': 'new', 'health': health}
+        previous_ready = (active_images == {prior_result['image']}
+                          and (no_new_deployment or latest['status'] in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}))
+        health = check_deployment(previous_snapshot) if previous_ready else {
+            'healthy': False, 'reason': 'AWS 이전 이미지가 유일한 활성 구성인지 확인할 수 없습니다.'}
+        if health['healthy']:
+            with self.lock:
+                if self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention':
+                    raise ValueError('재확인 도중 작업 상태가 변경됐습니다.')
+                self.jobs[previous_snapshot['id']]['deployment_state'] = 'active'
+                self.save(previous_snapshot['id'])
+                self.jobs[job_id]['aws_reconciled'] = 'previous'
+                self.save(job_id)
+            self.event(job_id, 'reconciled', '이전 릴리스의 이미지와 HTTP 200을 확인했습니다.')
+            return {'reconciled': True, 'release': 'previous', 'health': health}
+        return {'reconciled': False, 'reason': '활성 이미지 또는 HTTP 응답을 확인할 수 없습니다.', 'health': health}
+
+    def inspect_interrupted_aws_migration(self, job_id: str) -> dict:
+        """Record one owned ECS task outcome without restarting an interrupted deployment."""
+        from sky_platform.runtime.aws_migrations import inspect_migration_task
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if (not job or job.get('mode') != 'agent'
+                    or job.get('target') != 'aws-ecs-express'
+                    or job.get('status') not in {'failed', 'interrupted'}
+                    or job.get('result') is not None
+                    or type(job.get('attempts')) is not int
+                    or not 1 <= job['attempts'] <= 3
+                    or not job.get('aws_migration_task_arn')
+                    or not job.get('aws_migration_task_definition_arn')):
+                raise ValueError('재확인할 중단된 AWS SQL 마이그레이션 작업이 아닙니다.')
+            snapshot = json.loads(json.dumps(job))
+        request = postgres_request_from_job(snapshot)
+        if request is None or request.application_id != snapshot.get('application_id'):
+            raise ValueError('작업의 PostgreSQL 소유 정보를 확인하지 못했습니다.')
+        settings = AwsSettings(**snapshot['aws'])
+        if settings.region != request.region or settings.expected_account != request.account:
+            raise AwsConfigurationError('작업의 AWS 계정·리전과 PostgreSQL 소유 정보가 다릅니다.')
+        adapter = AwsExpressAdapter(lambda *_: None, settings)
+        caller = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+        if caller.get('Account') != request.account:
+            raise AwsConfigurationError('현재 AWS 계정이 마이그레이션 소유 계정과 다릅니다.')
+        outcome = inspect_migration_task(adapter, request.application_id, request.account,
+            request.region, job_id + '-a' + str(snapshot['attempts']),
+            snapshot['aws_migration_task_arn'], snapshot['aws_migration_task_definition_arn'])
+        inspected = {**outcome, 'checked_at': datetime.now(timezone.utc).isoformat()}
+        with self.lock:
+            current = self.jobs.get(job_id)
+            if (not current or current.get('status') not in {'failed', 'interrupted'}
+                    or current.get('attempts') != snapshot['attempts']
+                    or current.get('aws_migration_task_arn') != snapshot['aws_migration_task_arn']
+                    or current.get('aws_migration_task_definition_arn') != snapshot['aws_migration_task_definition_arn']):
+                raise ValueError('재확인 중 배포 작업 상태가 변경됐습니다.')
+            current['aws_migration_inspection'] = inspected
+            current['events'].append({'time': inspected['checked_at'], 'stage': 'migration_inspected',
+                'message': 'AWS SQL 마이그레이션 태스크 결과: ' + outcome['status']
+                           + '. 앱 배포는 자동 재개하지 않습니다.'})
+            self.save(job_id)
+        return inspected
+
+    def cleanup_interrupted_aws_migration(self, job_id: str) -> dict:
+        """Explicitly retire a verified stopped migration's unique AWS artifacts."""
+        from sky_platform.runtime.aws_migrations import cleanup_interrupted_migration
+
+        def recorded_success(job):
+            completed = job.get('aws_migration_result') or {}
+            return (job.get('aws_migration_status') == 'succeeded'
+                    and all(completed.get(key) for key in
+                            ('task_arn', 'task_definition_arn', 'image', 'image_digest'))
+                    and completed.get('task_arn') == job.get('aws_migration_task_arn')
+                    and completed.get('task_definition_arn') == job.get('aws_migration_task_definition_arn')
+                    and completed.get('image') == job.get('aws_migration_image')
+                    and completed.get('image_digest') == job.get('aws_migration_image_digest'))
+
+        def eligible(job):
+            if not job:
+                return False
+            inspection = job.get('aws_migration_inspection') or {}
+            inspected = (inspection.get('status') in {'succeeded', 'failed'}
+                         and inspection.get('task_arn') and inspection.get('task_definition_arn')
+                         and inspection.get('task_arn') == job.get('aws_migration_task_arn')
+                         and inspection.get('task_definition_arn') == job.get('aws_migration_task_definition_arn'))
+            deployment = job.get('result') or {}
+            migration = deployment.get('migration') or {}
+            incomplete_success = (job.get('status') == 'succeeded'
+                                  and migration.get('cleanup_complete') is False
+                                  and recorded_success(job))
+            interrupted = (job.get('status') in {'failed', 'interrupted'}
+                           and job.get('result') is None
+                           and (inspected or recorded_success(job)))
+            return (job and job.get('mode') == 'agent'
+                    and job.get('target') == 'aws-ecs-express'
+                    and type(job.get('attempts')) is int and 1 <= job['attempts'] <= 3
+                    and job.get('aws_migration_cleanup_state') not in {'running', 'done'}
+                    and (interrupted or incomplete_success))
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not eligible(job):
+                raise ValueError('정리할 수 있는 중단된 AWS SQL 마이그레이션이 아닙니다.')
+            snapshot = json.loads(json.dumps(job))
+            job['aws_migration_cleanup_state'] = 'running'
+            job.pop('aws_migration_cleanup_error', None)
+            self.save(job_id)
+        try:
+            request = postgres_request_from_job(snapshot)
+            if request is None or request.application_id != snapshot.get('application_id'):
+                raise ValueError('작업의 PostgreSQL 소유 정보를 확인하지 못했습니다.')
+            settings = AwsSettings(**snapshot['aws'])
+            if settings.region != request.region or settings.expected_account != request.account:
+                raise AwsConfigurationError('작업의 AWS 계정·리전과 PostgreSQL 소유 정보가 다릅니다.')
+            adapter = AwsExpressAdapter(lambda *_: None, settings)
+            caller = json.loads(adapter.aws(['sts', 'get-caller-identity'], private=True, quiet=True))
+            if caller.get('Account') != request.account:
+                raise AwsConfigurationError('현재 AWS 계정이 마이그레이션 소유 계정과 다릅니다.')
+            def definition_inactive_checkpoint():
+                with self.lock:
+                    current = self.jobs[job_id]
+                    if (current.get('aws_migration_cleanup_state') != 'running'
+                            or current.get('aws_migration_task_definition_arn') != snapshot['aws_migration_task_definition_arn']):
+                        raise ValueError('정리 중 작업 기록이 변경됐습니다.')
+                    current['aws_migration_cleanup_definition_inactive'] = True
+                    self.save(job_id)
+            result = cleanup_interrupted_migration(adapter, request,
+                job_id + '-a' + str(snapshot['attempts']), snapshot['aws_migration_task_arn'],
+                snapshot['aws_migration_task_definition_arn'], snapshot['aws_migration_image'],
+                snapshot['aws_migration_image_digest'],
+                definition_inactive=bool(snapshot.get('aws_migration_cleanup_definition_inactive')),
+                verified_outcome=recorded_success(snapshot),
+                checkpoint=definition_inactive_checkpoint)
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['aws_migration_cleanup_state'] = 'failed'
+                self.jobs[job_id]['aws_migration_cleanup_error'] = redact(str(exc))[:300]
+                self.save(job_id)
+            raise
+        with self.lock:
+            current = self.jobs[job_id]
+            current['aws_migration_cleanup_state'] = 'done'
+            current['aws_migration_cleanup_image_deleted'] = result['image_deleted']
+            if current.get('status') == 'succeeded':
+                current['result']['migration']['cleanup_complete'] = True
+            self.save(job_id)
+        self.event(job_id, 'migration_cleanup', 'SQL 마이그레이션의 전용 ECS 정의와 ECR 태그를 정리했습니다.')
+        return result
+
+    def cleanup_abandoned_aws_image(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'}
+                    or failed.get('target') != 'aws-ecs-express' or failed.get('aws_reconciled') != 'previous'
+                    or failed.get('aws_image_cleanup_state') in {'running', 'done'}
+                    or not previous or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'active'
+                    or any(other is not failed and other is not previous
+                           and other.get('application_id') == failed.get('application_id')
+                           and other.get('target') == 'aws-ecs-express'
+                           and other.get('status') in {'provisioning', 'running', 'waiting_input'} for other in self.jobs.values())):
+                raise ValueError('정리할 수 있는 실패 AWS 이미지가 아닙니다.')
+            failed['aws_image_cleanup_state'] = 'running'
+            self.save(job_id)
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        try:
+            health = check_deployment(previous_snapshot)
+            if not health['healthy']:
+                raise ValueError('기존 AWS 릴리스의 실제 실행 상태를 확인할 수 없습니다: ' + health['reason'])
+            adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+            attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+            result = adapter.cleanup_abandoned_image(previous_snapshot['result'],
+                                                      failed_snapshot.get('aws_candidate_image'), attempt)
+        except Exception:
+            with self.lock:
+                self.jobs[job_id]['aws_image_cleanup_state'] = 'failed'
+                self.save(job_id)
+            raise
+        with self.lock:
+            self.jobs[job_id]['aws_image_cleanup_state'] = 'done'
+            self.save(job_id)
+        self.event(job_id, 'cleanup', '이전 릴리스가 실행 중임을 확인하고 실패한 ECR 이미지 태그를 삭제했습니다.')
+        return result
+
+    def request_aws_update_rollback(self, job_id):
+        with self.lock:
+            failed = self.jobs.get(job_id)
+            previous = self.jobs.get(failed.get('replaces_job_id')) if failed else None
+            if (not failed or failed.get('status') not in {'failed', 'interrupted'}
+                    or failed.get('target') != 'aws-ecs-express' or not failed.get('aws_update_submitted')
+                    or failed.get('aws_reconciled') or not previous
+                    or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'needs_attention'):
+                raise ValueError('롤백을 요청할 수 있는 AWS 업데이트가 아닙니다.')
+            failed_snapshot = json.loads(json.dumps(failed))
+            previous_snapshot = json.loads(json.dumps(previous))
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**previous_snapshot['aws']))
+        attempt = failed_snapshot['id'] + '-a' + str(failed_snapshot.get('attempts', 0))
+        result = adapter.request_update_rollback(previous_snapshot['result'],
+                                                 failed_snapshot.get('aws_candidate_image'),
+                                                 failed_snapshot.get('aws_previous_deployment_arn'), attempt)
+        with self.lock:
+            if self.jobs[previous_snapshot['id']].get('deployment_state') != 'needs_attention':
+                raise ValueError('롤백 요청 중 이전 릴리스 상태가 변경됐습니다.')
+            self.jobs[job_id]['aws_rollback_requested'] = True
+            self.jobs[job_id]['aws_rollback_deployment_arn'] = result['service_deployment_arn']
+            self.save(job_id)
+        self.event(job_id, 'rollback_requested', '진행 중인 ECS 배포의 이전 리비전 롤백을 요청했습니다. 완료 후 결과를 재확인하세요.')
+        return result
+
+    def start_release_rollback(self, job_id, target_job_id=None):
+        with self.lock:
+            current = self.jobs.get(job_id)
+            target_job_id = target_job_id or (current.get('replaces_job_id') if current else None)
+            previous = self.jobs.get(target_job_id)
+            current_result = current.get('result') if current else None
+            previous_result = previous.get('result') if previous else None
+            if (not current or current.get('status') != 'succeeded'
+                    or current.get('target') != 'aws-ecs-express'
+                    or current.get('deployment_state', 'active') != 'active'
+                    or current.get('release_rollback_state') == 'running'
+                    or not previous or previous.get('status') != 'succeeded'
+                    or previous.get('deployment_state') != 'superseded'
+                    or previous.get('application_id') != current.get('application_id')
+                    or previous.get('target') != 'aws-ecs-express'
+                    or not isinstance(current_result, dict) or not isinstance(previous_result, dict)
+                    or not previous_result.get('task_definition_arn')
+                    or any(previous_result.get(key) != current_result.get(key)
+                           for key in ('service', 'service_arn', 'account', 'region', 'url'))
+                    or previous_result.get('image') not in (current_result.get('images') or [])
+                    or any(other is not current and other is not previous
+                           and other.get('application_id') == current.get('application_id')
+                           and other.get('target') == 'aws-ecs-express'
+                           and (other.get('status') in {'provisioning', 'running', 'waiting_input'}
+                                or other.get('deployment_state') in {'deleting', 'needs_attention'}
+                                or other.get('aws_image_cleanup_state') == 'running')
+                           for other in self.jobs.values())):
+                raise ValueError('이전 릴리스로 되돌릴 수 있는 활성 AWS 배포가 아닙니다.')
+            current['release_rollback_state'] = 'running'
+            current['release_rollback_target_id'] = previous['id']
+            current.pop('release_rollback_submitted', None)
+            current.pop('release_rollback_failed_at', None)
+            self.save(job_id)
+        threading.Thread(target=self.run_release_rollback, args=(job_id,), daemon=True).start()
+
+    def finish_release_rollback(self, job_id, previous_id):
+        with self.lock:
+            current = self.jobs[job_id]
+            previous = self.jobs[previous_id]
+            current['release_rollback_state'] = 'succeeded'
+            current['deployment_state'] = 'superseded'
+            current['release_rollback_restore_pending'] = True
+            self.save(job_id)
+            previous['result']['images'] = list(dict.fromkeys(
+                [*(previous['result'].get('images') or [previous['result']['image']]),
+                 *(current['result'].get('images') or [])]))
+            previous['deployment_state'] = 'active'
+            self.save(previous_id)
+            current['release_rollback_restore_pending'] = False
+            self.save(job_id)
+        self.event(job_id, 'release_rollback_succeeded', '이전 릴리스의 이미지와 HTTP 200을 확인했습니다.')
+
+    def run_release_rollback(self, job_id):
+        with self.lock:
+            current = json.loads(json.dumps(self.jobs[job_id]))
+            previous = json.loads(json.dumps(self.jobs[current['release_rollback_target_id']]))
+        def checkpoint(**updates):
+            with self.lock:
+                self.jobs[job_id].update(updates)
+                self.save(job_id)
+        try:
+            adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
+                                        AwsSettings(**current['aws']))
+            adapter.rollback_release(current['result'], previous['result'],
+                                     (previous.get('plan') or {}).get('health_path', '/'), checkpoint)
+            self.finish_release_rollback(job_id, previous['id'])
+        except Exception as exc:
+            self.event(job_id, 'release_rollback_failed', str(exc)[:300])
+            with self.lock:
+                job = self.jobs[job_id]
+                job['release_rollback_state'] = ('needs_attention' if job.get('release_rollback_submitted') else 'failed')
+                if job.get('release_rollback_submitted'):
+                    job['deployment_state'] = 'needs_attention'
+                    job['release_rollback_failed_at'] = datetime.now(timezone.utc).isoformat()
+                self.save(job_id)
+
+    def reconcile_release_rollback(self, job_id):
+        with self.lock:
+            current = self.jobs.get(job_id)
+            previous = self.jobs.get(current.get('release_rollback_target_id')) if current else None
+            if (not current or current.get('release_rollback_state') != 'needs_attention'
+                    or not current.get('release_rollback_submitted') or not previous
+                    or current.get('deployment_state') != 'needs_attention'
+                    or previous.get('deployment_state') != 'superseded'):
+                raise ValueError('재확인할 이전 릴리스 롤백이 아닙니다.')
+            current_snapshot = json.loads(json.dumps(current))
+            previous_snapshot = json.loads(json.dumps(previous))
+        result = current_snapshot['result']
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(**current_snapshot['aws']))
+        listed = json.loads(adapter.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
+                                         '--service', result['service']], private=True, quiet=True))
+        items = listed.get('serviceDeployments', [])
+        latest = max(items, key=lambda item: item.get('createdAt', '')) if items else {}
+        arn = latest.get('serviceDeploymentArn')
+        old_arn = current_snapshot.get('release_rollback_previous_deployment_arn')
+        no_new = arn == old_arn
+        if not arn or latest.get('status') not in {'SUCCESSFUL', 'ROLLBACK_SUCCESSFUL'}:
+            return {'reconciled': False, 'reason': 'ECS 배포 또는 롤백이 아직 완료되지 않았습니다.'}
+        if no_new:
+            try:
+                failed_at = datetime.fromisoformat(current_snapshot['release_rollback_failed_at'])
+                if failed_at.tzinfo is None or datetime.now(timezone.utc) - failed_at < timedelta(minutes=10):
+                    return {'reconciled': False, 'reason': 'AWS 배포 이력 반영을 10분간 기다립니다.'}
+            except (KeyError, TypeError, ValueError):
+                return {'reconciled': False, 'reason': '롤백 실패 시점을 확인할 수 없습니다.'}
+        service_data = json.loads(adapter.aws(['ecs', 'describe-express-gateway-service',
+                                               '--service-arn', result['service_arn'], '--include', 'TAGS'],
+                                              private=True, quiet=True)).get('service', {})
+        tags = {item.get('key'): item.get('value') for item in service_data.get('tags', [])}
+        owner = result.get('owner_attempt') or result['service'].removeprefix('sky-')
+        configs = service_data.get('activeConfigurations', [])
+        active = configs[0] if len(configs) == 1 else {}
+        previous_result = previous_snapshot['result']
+        previous_task_arn = (previous_result.get('task_definition_arn')
+                             or (result.get('previous_task_definition_arn')
+                                 if current_snapshot.get('replaces_job_id') == previous_snapshot['id'] else None))
+        if (service_data.get('serviceArn') != result['service_arn']
+                or service_data.get('status', {}).get('statusCode') != 'ACTIVE'
+                or service_data.get('currentDeployment')
+                or len(configs) != 1
+                or tags.get('sky-managed') != 'true'
+                or tags.get('sky-attempt') != owner):
+            return {'reconciled': False, 'reason': 'ECS 서비스 소유권 또는 완료 상태를 확인할 수 없습니다.'}
+        if (current_snapshot.get('replaces_job_id') == previous_snapshot['id']
+                and previous_result.get('task_definition_arn') and result.get('previous_task_definition_arn')
+                and previous_result['task_definition_arn'] != result['previous_task_definition_arn']):
+            return {'reconciled': False, 'reason': '이전 릴리스의 태스크 정의 기록이 일치하지 않습니다.'}
+        if (not no_new and latest['status'] == 'SUCCESSFUL'
+                and active.get('primaryContainer', {}).get('image') == previous_result['image']
+                and previous_task_arn and active.get('taskDefinitionArn') == previous_task_arn):
+            previous_snapshot['deployment_state'] = 'active'
+            health = check_deployment(previous_snapshot)
+            if health['healthy']:
+                self.finish_release_rollback(job_id, previous_snapshot['id'])
+                return {'reconciled': True, 'release': 'previous', 'health': health}
+        if (active.get('primaryContainer', {}).get('image') == result['image']
+                and result.get('task_definition_arn')
+                and active.get('taskDefinitionArn') == result['task_definition_arn']
+                and (no_new or latest['status'] == 'ROLLBACK_SUCCESSFUL')):
+            current_snapshot['deployment_state'] = 'active'
+            health = check_deployment(current_snapshot)
+            if health['healthy']:
+                with self.lock:
+                    self.jobs[job_id]['release_rollback_state'] = 'failed'
+                    self.jobs[job_id]['deployment_state'] = 'active'
+                    self.save(job_id)
+                self.event(job_id, 'release_rollback_reconciled', '기존 릴리스가 계속 실행 중임을 확인했습니다.')
+                return {'reconciled': True, 'release': 'current', 'health': health}
+        return {'reconciled': False, 'reason': '실행 중인 ECS 이미지를 확정할 수 없습니다.'}
+
+
+def handler_for(app: App):
+    class Handler(BaseHTTPRequestHandler):
+        def json_response(self, status, data):
+            payload = json.dumps(data, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            if self.path == "/":
+                content = (Path(__file__).parent / "static/index.html").read_text()
+                payload = content.replace("__TOKEN__", app.token).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if self.headers.get("X-Sky-Token") != app.token:
+                self.json_response(403, {"error": "Invalid session token"})
+                return
+            if self.path == "/api/config":
+                self.json_response(200, {"ai_available": app.ai_settings.available,
+                    "ai_model": app.ai_settings.model if app.ai_settings.available else None,
+                    "monitor_interval": app.monitor_interval,
+                    "targets": [{"id": "auto", "name": "AI 자동 선택", "available": app.ai_settings.available},
+                                {"id": "local-docker", "name": "Local Docker", "available": True},
+                                {"id": "cloud-run", "name": "Google Cloud Run",
+                                 "available": app.cloud_settings.unavailable_reason() is None,
+                                 "reason": app.cloud_settings.unavailable_reason()},
+                                {"id": "aws-ecs-express", "name": "AWS ECS Express Mode",
+                                 "available": app.aws_settings.unavailable_reason() is None,
+                                 "reason": app.aws_settings.unavailable_reason()}],
+                    "recovery_warnings": app.recovery_warnings})
+                return
+            if self.path == "/api/jobs":
+                self.json_response(200, app.summaries())
+                return
+            if self.path == "/api/aws/default-network":
+                try:
+                    self.json_response(200, discover_default_network(app.aws_settings))
+                except (ValueError, AwsConfigurationError) as exc:
+                    self.json_response(400, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, app.network_operations.get(application_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/backups", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, inspect_postgres_backup_status(
+                        application_id, app.aws_settings))
+                except (ValueError, AwsConfigurationError) as exc:
+                    self.json_response(400, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/[a-z][a-z0-9-]{2,254}/operation", self.path):
+                application_id, snapshot_id = self.path.split('/')[3], self.path.split('/')[5]
+                try:
+                    self.json_response(200, app.snapshot_operations.get(application_id, snapshot_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, discover_existing_postgres(application_id, app.aws_settings))
+                except (ValueError, AwsConfigurationError) as exc:
+                    self.json_response(400, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    operation = app.postgres_operations.get(application_id)
+                    if app.postgres_retirement_operations.blocks_deployment(application_id):
+                        retirement = app.postgres_retirement_operations.get(application_id)
+                        operation = {**operation,
+                            'status': 'retired' if retirement['status'] == 'succeeded' else 'needs_attention',
+                            'message': 'PostgreSQL 폐기 기록이 있습니다. 폐기 상태를 확인하세요.'}
+                    self.json_response(200, operation)
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/operation", self.path):
+                application_id = self.path.split('/')[3]
+                try:
+                    self.json_response(200, app.postgres_retirement_operations.get(application_id))
+                except ValueError as exc:
+                    self.json_response(404, {"error": str(exc)})
+                return
+            if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/releases", self.path):
+                application_id = self.path.split('/')[3]
+                self.json_response(200, app.releases(application_id))
+                return
+            if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/health", self.path):
+                job_id = self.path.split('/')[3]
+                with app.lock:
+                    job = app.jobs.get(job_id)
+                    snapshot = json.loads(json.dumps(job)) if job else None
+                if not snapshot:
+                    self.json_response(404, {"error": "Not found"})
+                elif snapshot.get('status') != 'succeeded':
+                    self.json_response(409, {"error": "Only completed deployments can be checked"})
+                elif snapshot.get('deployment_state', 'active') in {'deleting', 'deleted'}:
+                    self.json_response(409, {"error": "배포 종료 중이거나 이미 종료됐습니다."})
+                else:
+                    self.json_response(200, app.check_and_record_health(job_id))
+                return
+            if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/certificate", self.path):
+                job_id = self.path.split('/')[3]
+                with app.lock:
+                    job = app.jobs.get(job_id)
+                    snapshot = json.loads(json.dumps(job)) if job else None
+                    history = json.loads(json.dumps(app.health_history.get(job_id, [])))
+                if snapshot:
+                    self.json_response(200, deployment_certificate(snapshot, history))
+                else:
+                    self.json_response(404, {"error": "Not found"})
+                return
+            if self.path.startswith("/api/jobs/"):
+                with app.lock:
+                    job_id = self.path.rsplit("/", 1)[-1]
+                    job = app.jobs.get(job_id)
+                    response = ({**job, 'diagnosis': deployment_diagnosis(job),
+                                 'health_history': app.health_history.get(job_id, []),
+                                 'last_health': (app.health_history.get(job_id) or [None])[-1],
+                                 'monitor_error': app.monitor_errors.get(job_id)}
+                                if job else {"error": "Not found"})
+                    self.json_response(200 if job else 404, response)
+                return
+            self.json_response(404, {"error": "Not found"})
+
+        def do_POST(self):
+            if self.headers.get("X-Sky-Token") != app.token:
+                self.json_response(403, {"error": "Invalid session token"})
+                return
+            try:
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('서비스 네트워크 계획 입력은 256바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'vpc_id'}
+                            or not isinstance(payload['vpc_id'], str)):
+                        raise ValueError('VPC ID가 필요합니다.')
+                    request = ServiceNetworkRequest(application_id, app.aws_settings.expected_account,
+                                                    app.aws_settings.region, payload['vpc_id'])
+                    self.json_response(200, app.network_operations.plan(request))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('서비스 네트워크 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 네트워크 계획 ID가 필요합니다.')
+                    self.json_response(202, app.network_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/reconcile", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('서비스 네트워크 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.network_operations.reconcile(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 1024:
+                        raise ValueError('PostgreSQL 생성 계획 입력은 1 KiB 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'vpc_id', 'subnet_ids'}
+                            or not isinstance(payload['vpc_id'], str)
+                            or not isinstance(payload['subnet_ids'], list)
+                            or any(not isinstance(value, str) for value in payload['subnet_ids'])):
+                        raise ValueError('VPC ID와 서브넷 ID 목록이 필요합니다.')
+                    settings = postgres_settings_for_application(
+                        application_id, payload['vpc_id'], app.aws_settings)
+                    request = PostgresRequest(application_id, settings.expected_account, settings.region,
+                        payload['vpc_id'], tuple(payload['subnet_ids']), settings.service_security_group)
+                    request.validate()
+                    self.json_response(200, app.postgres_operations.plan(request))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('PostgreSQL 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 생성 계획 ID가 필요합니다.')
+                    self.json_response(202, app.postgres_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/reconcile", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('PostgreSQL 생성 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.postgres_operations.reconcile(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/failed-create/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('실패 스택 정리 계획 조회에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.postgres_operations.cleanup_plan(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/failed-create/start", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 512:
+                        raise ValueError('실패 스택 정리 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict)
+                            or set(payload) != {'plan_id', 'confirm_stack_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])
+                            or not isinstance(payload['confirm_stack_id'], str)
+                            or len(payload['confirm_stack_id']) > 256):
+                        raise ValueError('유효한 계획 ID와 스택 ARN이 필요합니다.')
+                    self.json_response(202, app.postgres_operations.cleanup_start(
+                        application_id, payload['plan_id'], payload['confirm_stack_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('DB 폐기 계획 조회에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.postgres_retirement_operations.plan(application_id))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/postgres/retirement/start", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('DB 폐기 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict)
+                            or set(payload) != {'plan_id', 'confirm_database_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])
+                            or not isinstance(payload['confirm_database_id'], str)
+                            or not re.fullmatch(r'sky-[a-z][a-z0-9-]{2,30}', payload['confirm_database_id'])):
+                        raise ValueError('유효한 폐기 계획 ID와 정확한 DB ID가 필요합니다.')
+                    with app.lock:
+                        if any(job.get('application_id') == application_id
+                               and job.get('status') in {'provisioning', 'running', 'waiting_input'}
+                               for job in app.jobs.values()):
+                            raise ValueError('이 앱의 배포가 진행 중입니다. 완료 후 다시 시도하세요.')
+                        result = app.postgres_retirement_operations.start(
+                            application_id, payload['plan_id'], payload['confirm_database_id'])
+                    self.json_response(202, result)
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/plan", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 512:
+                        raise ValueError('스냅샷 계획 입력은 512바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'snapshot_id'}
+                            or not isinstance(payload['snapshot_id'], str)):
+                        raise ValueError('수동 스냅샷 ID가 필요합니다.')
+                    self.json_response(200, app.snapshot_operations.plan(
+                        application_id, payload['snapshot_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/create", self.path):
+                    application_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('스냅샷 생성 요청 본문이 올바르지 않습니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {'plan_id'}
+                            or not isinstance(payload['plan_id'], str)
+                            or not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', payload['plan_id'])):
+                        raise ValueError('유효한 스냅샷 계획 ID가 필요합니다.')
+                    self.json_response(202, app.snapshot_operations.start(application_id, payload['plan_id']))
+                    return
+                if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/snapshots/[a-z][a-z0-9-]{2,254}/reconcile", self.path):
+                    application_id, snapshot_id = self.path.split('/')[3], self.path.split('/')[5]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('스냅샷 재확인 요청에는 본문이 없어야 합니다.')
+                    self.json_response(200, app.snapshot_operations.reconcile(application_id, snapshot_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release/reconcile", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('릴리스 롤백 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.reconcile_release_rollback(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback-release", self.path):
+                    job_id = self.path.split('/')[3]
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if size < 0 or size > 512:
+                        raise ValueError('릴리스 롤백 요청 본문은 512바이트 이하이어야 합니다.')
+                    payload = json.loads(self.rfile.read(size)) if size else {}
+                    if (not isinstance(payload, dict) or set(payload) not in (set(), {'target_job_id'})
+                            or ('target_job_id' in payload and
+                                (not isinstance(payload['target_job_id'], str)
+                                 or not re.fullmatch(r'[a-f0-9]{16}', payload['target_job_id'])))):
+                        raise ValueError('롤백 대상 작업 ID가 올바르지 않습니다.')
+                    app.start_release_rollback(job_id, payload.get('target_job_id'))
+                    self.json_response(202, {'id': job_id, 'release_rollback_state': 'running'})
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/rollback", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('롤백 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.request_aws_update_rollback(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/cleanup-image", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('이미지 정리 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.cleanup_abandoned_aws_image(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/migration/inspect", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('SQL 마이그레이션 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.inspect_interrupted_aws_migration(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/migration/cleanup", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('SQL 마이그레이션 정리 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.cleanup_interrupted_aws_migration(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/reconcile", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('AWS 상태 재확인 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.reconcile_aws_update(job_id))
+                    return
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/retire", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('배포 종료 요청에는 본문을 넣을 수 없습니다.')
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        orphan_local = (job and job.get('mode') == 'agent'
+                                        and job.get('target') == 'local-docker'
+                                        and job.get('status') in {'failed', 'interrupted'}
+                                        and not job.get('result')
+                                        and type(job.get('attempts')) is int
+                                        and 1 <= job['attempts'] <= 3)
+                        successful = (job and job.get('status') == 'succeeded'
+                                      and job.get('target') in {'aws-ecs-express', 'local-docker', 'cloud-run'}
+                                      and job.get('result'))
+                        if (not (orphan_local or successful)
+                                or job.get('deployment_state', 'active') not in {'active', 'delete_failed'}
+                                or job.get('release_rollback_state') in {'running', 'needs_attention'}
+                                or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')
+                                       and other.get('target') == 'aws-ecs-express'
+                                       and (other.get('status') in {'provisioning', 'running', 'waiting_input'}
+                                            or other.get('aws_image_cleanup_state') == 'running')
+                                       for other in app.jobs.values()))):
+                            message = ('종료할 수 있는 AWS 배포가 아닙니다.' if job and job.get('target') == 'aws-ecs-express'
+                                       else '종료할 수 있는 배포가 아닙니다.')
+                            self.json_response(409, {'error': message})
+                            return
+                        target = job['target']
+                        job['deployment_state'] = 'deleting'
+                        job.pop('retire_error', None)
+                        app.save(job_id)
+                    threading.Thread(target=app.retire_aws if target == 'aws-ecs-express' else
+                                     app.retire_cloud if target == 'cloud-run' else app.retire_local,
+                                     args=(job_id,), daemon=True).start()
+                    self.json_response(202, {'id': job_id, 'deployment_state': 'deleting'})
+                    return
+                if self.path == "/api/compatibility":
+                    public_flag = self.headers.get('X-Public-Access', 'false')
+                    if public_flag not in {'true', 'false'}:
+                        raise ValueError('공개 접근 선택 값이 올바르지 않습니다.')
+                    size = int(self.headers.get('Content-Length', '0'))
+                    content_type = self.headers.get('Content-Type', '')
+                    folder_upload = content_type.lower().startswith('multipart/form-data;')
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError('업로드는 20 MiB 이하여야 합니다.')
+                    with tempfile.TemporaryDirectory(prefix='sky-compatibility-') as temporary:
+                        archive = Path(temporary) / 'app.zip'
+                        body = self.rfile.read(size)
+                        if folder_upload:
+                            folder_upload_to_zip(body, content_type, archive)
+                        else:
+                            archive.write_bytes(body)
+                        project = extract_project(archive, Path(temporary) / 'source')
+                        profile = inspect_infrastructure(project)
+                        digest = source_digest(project)
+                        availability = {'local-docker': None,
+                                        'aws-ecs-express': app.aws_settings.unavailable_reason(),
+                                        'cloud-run': app.cloud_settings.unavailable_reason()}
+                        reports = []
+                        for target in ('local-docker', 'aws-ecs-express', 'cloud-run'):
+                            report = infrastructure_compatibility(
+                                profile, target, public_access=public_flag == 'true')
+                            reason = availability[target]
+                            reports.append({**report, 'configured': reason is None,
+                                            'configuration_reason': reason,
+                                            'preview_eligible': report['compatible'] and reason is None,
+                                            'cost': {'estimate': None,
+                                                     'note': '대상 전체 비용은 아직 산정하지 않았습니다.'}})
+                    self.json_response(200, {'source_digest': digest,
+                                             'inspection': {
+                                                 'requirements': list(profile.requirements),
+                                                 'evidence_files': list(profile.evidence),
+                                                 'scanned_files': profile.scanned_files,
+                                             },
+                                             'reports': reports})
+                    return
+                if self.path == "/api/deployments":
+                    if not app.ai_settings.available:
+                        self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY를 설정하세요."})
+                        return
+                    requested_target = self.headers.get("X-Deploy-Target", "local-docker")
+                    if requested_target not in {"auto", "local-docker", "cloud-run", "aws-ecs-express"}:
+                        raise ValueError("Unsupported deployment target")
+                    target = requested_target
+                    public_flag = self.headers.get("X-Public-Access", "false")
+                    if public_flag not in {"true", "false"}:
+                        raise ValueError("Invalid public access selection")
+                    if target == "cloud-run" and app.cloud_settings.unavailable_reason():
+                        raise ValueError(app.cloud_settings.unavailable_reason())
+                    if target == "aws-ecs-express":
+                        if app.aws_settings.unavailable_reason():
+                            raise ValueError(app.aws_settings.unavailable_reason())
+                    if target != 'auto' and deployment_access_mode(target, public_flag == 'true') is None:
+                        raise ValueError('AWS ECS Express 대상은 인터넷 공개 선택이 필요합니다.')
+                    size = int(self.headers.get("Content-Length", "0"))
+                    content_type = self.headers.get('Content-Type', '')
+                    folder_upload = content_type.lower().startswith('multipart/form-data;')
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError("Upload must be smaller than 20 MiB (plus folder form overhead)")
+                    job_id = uuid.uuid4().hex[:16]
+                    application_id = self.headers.get("X-Application-Id", "app-" + job_id)
+                    if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
+                        raise ValueError("Application ID must be 3-31 lowercase letters, digits or hyphens, starting with a letter")
+                    postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
+                    if postgres_flag not in {'true', 'false'}:
+                        raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
+                    create_plan_id = self.headers.get('X-Postgres-Create-Plan')
+                    if create_plan_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', create_plan_id):
+                        raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
+                    if create_plan_id is not None and postgres_flag == 'true':
+                        raise ValueError('기존 DB 사용과 신규 DB 생성을 동시에 선택할 수 없습니다.')
+                    postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
+                    supplied_postgres_network = tuple(name in self.headers for name in postgres_headers)
+                    if postgres_flag != 'true' and any(supplied_postgres_network):
+                        raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
+                    postgres_request = None
+                    aws_settings_for_job = app.aws_settings
+                    if postgres_flag == 'true' or create_plan_id is not None:
+                        settings = app.aws_settings
+                        if (target not in {'auto', 'aws-ecs-express'} or public_flag != 'true'
+                                or not settings.expected_account):
+                            raise ValueError('PostgreSQL 경로에는 공개 AWS 대상과 계정 고정이 필요합니다.')
+                        if settings.unavailable_reason():
+                            raise ValueError(settings.unavailable_reason())
+                        if create_plan_id is not None:
+                            postgres_request = app.postgres_operations.reviewed_request(
+                                application_id, create_plan_id)
+                            vpc_id = postgres_request.vpc_id
+                        else:
+                            if supplied_postgres_network == (True, False) or supplied_postgres_network == (False, True):
+                                raise ValueError('PostgreSQL VPC와 서브넷 입력은 함께 지정하세요.')
+                            if supplied_postgres_network == (False, False):
+                                discovered = discover_existing_postgres(application_id, settings)
+                                vpc_id = discovered['vpc_id']
+                                subnet_ids = tuple(discovered['subnet_ids'])
+                            else:
+                                vpc_id = self.headers['X-Postgres-Vpc-Id']
+                                subnet_ids = tuple(part.strip() for part in
+                                                   self.headers['X-Postgres-Subnet-Ids'].split(','))
+                        aws_settings_for_job = postgres_settings_for_application(
+                            application_id, vpc_id, settings)
+                        if create_plan_id is not None:
+                            if (postgres_request.account != settings.expected_account
+                                    or postgres_request.region != settings.region
+                                    or postgres_request.service_security_group != aws_settings_for_job.service_security_group):
+                                raise ValueError('검토한 DB 계획과 현재 AWS 계정·네트워크 설정이 다릅니다.')
+                        else:
+                            postgres_request = PostgresRequest(application_id, settings.expected_account,
+                                settings.region, vpc_id, subnet_ids,
+                                aws_settings_for_job.service_security_group)
+                        postgres_request.validate()
+                        if target == 'auto':
+                            target = 'aws-ecs-express'
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    try:
+                        (directory / '.uncommitted-upload').touch(mode=0o600)
+                        archive = directory / "source.zip"
+                        upload = self.rfile.read(size)
+                        if len(upload) != size:
+                            raise ValueError('Incomplete upload')
+                        if folder_upload:
+                            folder_upload_to_zip(upload, content_type, archive)
+                        else:
+                            archive.write_bytes(upload)
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        infrastructure_profile = inspect_infrastructure(project)
+                        validate_infrastructure(infrastructure_profile, target,
+                                                postgres=postgres_request is not None)
+                        if postgres_request is not None:
+                            collect_sql_migrations(project)
+                            if create_plan_id is None:
+                                database = AwsPostgresProvisioner(postgres_request).inspect_current()
+                                app.postgres_operations.require_deployable(
+                                    application_id, database['database_id'])
+                        if target == 'auto':
+                            available_targets = ['local-docker']
+                            if app.cloud_settings.unavailable_reason() is None:
+                                available_targets.append('cloud-run')
+                            if (deployment_access_mode('aws-ecs-express', public_flag == 'true') is not None
+                                    and app.aws_settings.unavailable_reason() is None):
+                                available_targets.append('aws-ecs-express')
+                            infrastructure_plan = plan_infrastructure(project, available_targets,
+                                public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
+                            target = infrastructure_plan['target']
+                            validate_infrastructure(infrastructure_profile, target)
+                        else:
+                            infrastructure_plan = explicit_infrastructure_plan(
+                                target, infrastructure_profile,
+                                existing_postgres_id=database['database_id']
+                                if postgres_request is not None and create_plan_id is None else None,
+                                create_postgres_id=postgres_request.database_id
+                                if create_plan_id is not None else None)
+                            if requested_target == 'auto' and postgres_request is not None:
+                                infrastructure_plan['planner'] = 'policy'
+                                infrastructure_plan['rationale'] = (
+                                    'PostgreSQL 연결에는 AWS ECS Express만 지원됩니다. 앱의 PostgreSQL 근거와 ' +
+                                    ('검토된 생성 계획을 확인해 AWS를 선택했습니다. DB는 생성 후 앱 실패에도 보존됩니다.'
+                                     if create_plan_id is not None else
+                                     'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
+                        infrastructure_plan['compatibility'] = infrastructure_compatibility(
+                            infrastructure_profile, target, postgres=postgres_request is not None,
+                            public_access=public_flag == 'true')
+                        access_mode = infrastructure_plan['compatibility']['access_mode']
+                        if access_mode is None:
+                            raise ValueError('선택한 배포 대상의 공개 범위를 지원하지 않습니다.')
+                        with app.lock:
+                            app.ensure_application_available(application_id, target)
+                            latest = None
+                            if target == 'aws-ecs-express':
+                                previous = [old for old in app.jobs.values()
+                                            if old.get('application_id') == application_id
+                                            and old.get('target') == 'aws-ecs-express'
+                                            and old.get('status') == 'succeeded'
+                                            and old.get('deployment_state', 'active') == 'active'
+                                            and old.get('result')]
+                                if previous:
+                                    if create_plan_id is not None:
+                                        raise ValueError('활성 AWS 릴리스가 있는 앱에는 신규 DB 생성·배포를 시작할 수 없습니다.')
+                                    latest = max(previous, key=lambda item: item.get('created_at', ''))
+                                    if postgres_request is None and latest['result'].get('database') is not None:
+                                        raise ValueError('기존 PostgreSQL 서비스 업데이트에는 동일한 DB 연결 요청이 필요합니다.')
+                                    if postgres_request is not None and latest['result'].get('database') != database:
+                                        raise ValueError('기존 AWS 서비스의 PostgreSQL 연결 기록이 현재 DB와 다릅니다.')
+                            app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
+                                "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
+                                "application_id": application_id,
+                                "public": access_mode == 'public',
+                                "status": "provisioning" if create_plan_id is not None else "running",
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
+                                "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
+                                "events": []}
+                            app.jobs[job_id]['source_digest'] = source_digest(project)
+                            if target == "cloud-run":
+                                app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
+                            elif target == "aws-ecs-express":
+                                app.jobs[job_id]["aws"] = asdict(aws_settings_for_job)
+                                if postgres_request is not None:
+                                    app.jobs[job_id]['postgres'] = {
+                                        **asdict(postgres_request),
+                                        'subnet_ids': list(postgres_request.subnet_ids)}
+                                if latest is not None:
+                                    app.jobs[job_id]['prior_result'] = latest['result']
+                                    app.jobs[job_id]['replaces_job_id'] = latest['id']
+                            app.save(job_id)
+                        app.clear_upload_marker(directory)
+                    except Exception:
+                        if not (directory / 'job.json').is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            try:
+                                shutil.rmtree(directory)
+                            except OSError:
+                                app.recovery_warnings.append(
+                                    '접수 실패 업로드 디렉터리를 정리하지 못했습니다: ' + job_id)
+                        raise
+                    if create_plan_id is not None:
+                        try:
+                            operation = app.postgres_operations.start(application_id, create_plan_id)
+                            creation_id = operation.get('creation_id')
+                            if not isinstance(creation_id, str) or not re.fullmatch(r'[a-f0-9]{16}', creation_id):
+                                raise ValueError('DB 생성 시도 ID를 확인하지 못했습니다.')
+                            with app.lock:
+                                app.jobs[job_id]['postgres_creation_id'] = creation_id
+                                app.save(job_id)
+                            threading.Thread(target=app.run_postgres_then_agent,
+                                             args=(job_id,), daemon=True).start()
+                        except Exception as exc:
+                            with app.postgres_operations.lock:
+                                creation_recorded = application_id in app.postgres_operations.operations
+                            status = 'interrupted' if creation_recorded else 'failed'
+                            with app.lock:
+                                app.jobs[job_id]['status'] = status
+                                app.save(job_id)
+                            app.event(job_id, 'database_attention' if creation_recorded else 'database_plan_rejected',
+                                      ('DB 생성 요청의 결과가 불확실합니다. 생성 상태를 재확인하세요: '
+                                       if creation_recorded else
+                                       'DB 생성 요청 전 계획 검증에 실패했습니다. 가격 계획을 다시 확인하세요: ')
+                                      + redact(str(exc))[:300])
+                            self.json_response(202, {"id": job_id, "status": status})
+                            return
+                        self.json_response(202, {"id": job_id, "status": "provisioning"})
+                    else:
+                        started = app.start_job_worker(job_id, app.run_agent)
+                        self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
+                    return
+                if self.path.startswith("/api/deployments/") and self.path.endswith("/resume"):
+                    job_id = self.path.split('/')[-2]
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 65536:
+                        raise ValueError("Environment input must be under 64 KiB")
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict) or set(payload) != {"environment"}:
+                        raise ValueError("Expected an environment object")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job.get('mode') != 'agent' or job['status'] != 'waiting_input':
+                            self.json_response(409, {"error": "환경변수 입력을 기다리는 배포가 아닙니다."})
+                            return
+                        work = app.root / job_id / 'work'
+                        expected_digest = job.get('work_digest')
+                        try:
+                            unchanged = (work.is_dir() and not work.is_symlink()
+                                         and (expected_digest is None or source_digest(work) == expected_digest))
+                        except (OSError, ValueError):
+                            unchanged = False
+                        if not unchanged:
+                            self.json_response(409, {"error": "입력 대기 이후 작업용 소스가 없거나 변경됐습니다. 새 배포를 시작하세요."})
+                            return
+                        environment = validate_environment(payload['environment'], job['missing_environment'])
+                        job.update(status="running", environment_names=sorted(environment), missing_environment=[])
+                        app.save(job_id)
+                    started = app.start_job_worker(job_id, app.run_agent, environment)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-postgres", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('DB 생성 후 앱 배포 재개에는 본문이 없어야 합니다.')
+                    self.json_response(202, app.resume_postgres_deployment(job_id))
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-unstarted", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('배포 시도 전 작업 재개에는 본문이 없어야 합니다.')
+                    self.json_response(202, app.resume_unstarted_deployment(job_id))
+                    return
+                if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/cancel", self.path):
+                    job_id = self.path.split('/')[3]
+                    if int(self.headers.get("Content-Length", "0")) != 0:
+                        raise ValueError("Cancellation request must be empty")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job.get('mode') != 'agent' or job['status'] not in {'waiting_input', 'running'}:
+                            self.json_response(409, {"error": "입력 대기 또는 배포 시도 전 작업만 취소할 수 있습니다."})
+                            return
+                        if job['status'] == 'running' and (job.get('attempts', 0) != 0 or job.get('cancel_requested')):
+                            self.json_response(409, {"error": "이미 배포 시도가 시작됐거나 취소 요청이 접수됐습니다. 결과를 확인하세요."})
+                            return
+                        pending = job['status'] == 'running'
+                        if pending:
+                            job['cancel_requested'] = True
+                        else:
+                            job.update(status='cancelled', missing_environment=[])
+                        job['events'].append({"time": datetime.now(timezone.utc).isoformat(),
+                                              "stage": "cancel_requested" if pending else "cancelled",
+                                              "message": "배포 시도 전 취소를 요청했습니다." if pending else "사용자가 입력 대기 작업을 취소했습니다."})
+                        app.save(job_id)
+                    self.json_response(202 if pending else 200,
+                                       {"id": job_id, "status": "cancelling" if pending else "cancelled"})
+                    return
+                if self.path == "/api/analyze":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= MAX_UPLOAD:
+                        raise ValueError("Upload a ZIP smaller than 20 MiB")
+                    job_id = uuid.uuid4().hex[:16]
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    try:
+                        (directory / '.uncommitted-upload').touch(mode=0o600)
+                        archive = directory / "source.zip"
+                        archive.write_bytes(self.rfile.read(size))
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        plan = analyze_project(project, self.headers.get("X-Analysis-Mode", "static"), app.ai_settings)
+                        diff = dockerfile_diff(project, asdict(plan))
+                        with app.lock:
+                            app.jobs[job_id] = {"id": job_id, "status": "planned",
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
+                            app.save(job_id)
+                        app.clear_upload_marker(directory)
+                    except Exception:
+                        if not (directory / 'job.json').is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            try:
+                                shutil.rmtree(directory)
+                            except OSError:
+                                app.recovery_warnings.append(
+                                    '접수 실패 업로드 디렉터리를 정리하지 못했습니다: ' + job_id)
+                        raise
+                    self.json_response(201, app.jobs[job_id])
+                    return
+                if self.path.startswith("/api/deploy/"):
+                    job_id = self.path.rsplit("/", 1)[-1]
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 <= size <= 65536:
+                        raise ValueError("Deployment input exceeds 64 KiB")
+                    try:
+                        payload = json.loads(self.rfile.read(size)) if size else {}
+                    except (ValueError, UnicodeError):
+                        raise ValueError("Deployment input must be valid JSON") from None
+                    if not isinstance(payload, dict) or set(payload) - {"environment"}:
+                        raise ValueError("Expected an environment object")
+                    with app.lock:
+                        job = app.jobs.get(job_id)
+                        if not job or job["status"] != "planned":
+                            self.json_response(409, {"error": "A planned job is required"})
+                            return
+                        environment = validate_environment(payload.get("environment"), job["plan"]["required_env"])
+                        if source_digest(Path(job["project"])) != job["plan"]["source_digest"]:
+                            self.json_response(409, {"error": "Source changed after analysis; analyze again"})
+                            return
+                        job["status"] = "running"
+                        job["environment_names"] = sorted(environment)
+                        app.save(job_id)
+                    started = app.start_job_worker(job_id, app.run, environment)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
+                    return
+                self.json_response(404, {"error": "Not found"})
+            except Exception as exc:
+                self.json_response(400, {"error": str(exc)})
+
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sky local development server")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--state-dir", type=Path, default=Path(".sky"))
+    parser.add_argument("--monitor-interval", type=int, default=300,
+                        help="Seconds between health checks (60–3600; 0 disables monitoring)")
+    args = parser.parse_args()
+    if args.monitor_interval != 0 and not 60 <= args.monitor_interval <= 3600:
+        parser.error('--monitor-interval must be 0 or 60–3600 seconds')
+    with StateDirectoryLock(args.state_dir) as state_dir:
+        app = App(state_dir, monitor_interval=args.monitor_interval)
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(app))
+        stop_monitor = threading.Event()
+        if app.monitor_interval:
+            threading.Thread(target=app.monitor_loop, args=(stop_monitor,), daemon=True).start()
+        print(f"Sky: http://127.0.0.1:{args.port}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_monitor.set()
+            server.server_close()
+
+
+if __name__ == "__main__":
+    main()

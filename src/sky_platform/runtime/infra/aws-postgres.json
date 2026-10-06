@@ -1,0 +1,122 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Sky retained private PostgreSQL instance for a single application",
+  "Parameters": {
+    "ApplicationId": {"Type": "String", "MinLength": 3, "MaxLength": 31,
+      "AllowedPattern": "[a-z][a-z0-9]*(-[a-z0-9]+)*"},
+    "EngineVersion": {"Type": "String", "MinLength": 3, "MaxLength": 20},
+    "AvailabilityZone": {"Type": "AWS::EC2::AvailabilityZone::Name"},
+    "VpcId": {"Type": "AWS::EC2::VPC::Id"},
+    "SubnetIds": {"Type": "List<AWS::EC2::Subnet::Id>"},
+    "ServiceSecurityGroupId": {"Type": "AWS::EC2::SecurityGroup::Id"}
+  },
+  "Resources": {
+    "DatabaseSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "PostgreSQL from one Sky service security group",
+        "VpcId": {"Ref": "VpcId"},
+        "SecurityGroupIngress": [{
+          "IpProtocol": "tcp",
+          "FromPort": 5432,
+          "ToPort": 5432,
+          "SourceSecurityGroupId": {"Ref": "ServiceSecurityGroupId"}
+        }],
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "DatabaseSubnetGroup": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "Sky PostgreSQL subnets",
+        "SubnetIds": {"Ref": "SubnetIds"},
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "DBInstanceIdentifier": {"Fn::Sub": "sky-${ApplicationId}"},
+        "Engine": "postgres",
+        "EngineVersion": {"Ref": "EngineVersion"},
+        "AvailabilityZone": {"Ref": "AvailabilityZone"},
+        "EngineLifecycleSupport": "open-source-rds-extended-support-disabled",
+        "DBInstanceClass": "db.t4g.micro",
+        "AllocatedStorage": "20",
+        "StorageType": "gp3",
+        "StorageEncrypted": true,
+        "BackupRetentionPeriod": 7,
+        "DeletionProtection": true,
+        "PubliclyAccessible": false,
+        "DBName": "appdb",
+        "MasterUsername": "sky",
+        "ManageMasterUserPassword": true,
+        "DBSubnetGroupName": {"Ref": "DatabaseSubnetGroup"},
+        "VPCSecurityGroups": [{"Ref": "DatabaseSecurityGroup"}],
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "DatabaseExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "ManagedPolicyArns": ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
+        "Policies": [{
+          "PolicyName": "ReadManagedDatabaseSecret",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": "secretsmanager:GetSecretValue",
+              "Resource": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}
+            }]
+          }
+        }],
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    },
+    "MigrationLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {"Fn::Sub": "/sky/migrations/${ApplicationId}"},
+        "RetentionInDays": 14,
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "DatabaseIdentifier": {"Value": {"Ref": "Database"}},
+    "RequestedEngineVersion": {"Value": {"Ref": "EngineVersion"}},
+    "DatabaseArn": {"Value": {"Fn::GetAtt": ["Database", "DBInstanceArn"]}},
+    "EndpointAddress": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Address"]}},
+    "EndpointPort": {"Value": {"Fn::GetAtt": ["Database", "Endpoint.Port"]}},
+    "SecretArn": {"Value": {"Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]}},
+    "DatabaseExecutionRoleArn": {"Value": {"Fn::GetAtt": ["DatabaseExecutionRole", "Arn"]}},
+    "MigrationLogGroupName": {"Value": {"Ref": "MigrationLogGroup"}},
+    "DatabaseSecurityGroupId": {"Value": {"Ref": "DatabaseSecurityGroup"}}
+  }
+}

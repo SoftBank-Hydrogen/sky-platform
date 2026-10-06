@@ -1,0 +1,28 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Sky application-owned ECS service security group",
+  "Parameters": {
+    "ApplicationId": {
+      "Type": "String", "MinLength": 3, "MaxLength": 31,
+      "AllowedPattern": "[a-z][a-z0-9]*(-[a-z0-9]+)*"
+    },
+    "VpcId": {"Type": "AWS::EC2::VPC::Id"}
+  },
+  "Resources": {
+    "ServiceSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Sky ECS service group for one application",
+        "VpcId": {"Ref": "VpcId"},
+        "Tags": [
+          {"Key": "sky-managed", "Value": "true"},
+          {"Key": "sky-app", "Value": {"Ref": "ApplicationId"}}
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ServiceSecurityGroupId": {"Value": {"Ref": "ServiceSecurityGroup"}},
+    "VpcId": {"Value": {"Ref": "VpcId"}}
+  }
+}

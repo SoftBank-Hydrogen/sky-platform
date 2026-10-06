@@ -1,0 +1,36 @@
+[project]
+name = "sky-platform"
+version = "0.1.0"
+description = "One action, verified deployments across local and cloud targets"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+sky-platform = "sky_platform.runtime.server:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"sky_platform.runtime" = ["static/*", "infra/*"]
+
+[tool.pytest.ini_options]
+# "tests"는 드릴 스크립트를 최상위 모듈로 불러오는 기존 테스트에 필요하다.
+pythonpath = ["src", ".", "tests"]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["live: 실계정·실모델 검증. CI에서 실행하지 않는다"]
+norecursedirs = ["tests/live", "fixtures"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+# 가져온 런타임과 회귀 테스트는 단계적으로 포맷 규칙을 적용한다.
+extend-exclude = ["src/sky_platform/runtime", "tests/*.py", "tests/fixtures"]
