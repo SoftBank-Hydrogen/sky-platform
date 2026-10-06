@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import fcntl
 import json
 import os
 import re
@@ -39,6 +38,7 @@ from sky_platform.runtime.postgres import (AwsPostgresProvisioner, PostgresReque
 from sky_platform.runtime.postgres_operations import PostgresOperations
 from sky_platform.runtime.postgres_retirement_operations import PostgresRetirementOperations
 from sky_platform.runtime.snapshot_operations import SnapshotOperations
+from sky_platform.runtime.state_directory import StateDirectoryLock
 
 
 def postgres_request_from_job(job: dict) -> PostgresRequest | None:
@@ -70,33 +70,6 @@ def dockerfile_diff(source: Path, plan: dict) -> str:
                                         plan["dockerfile"].splitlines(keepends=True),
                                         fromfile="Dockerfile (uploaded)" if previous else "/dev/null",
                                         tofile="Dockerfile"))
-
-
-class StateDirectoryLock:
-    """Hold an OS lock for the entire lifetime of one server process."""
-    def __init__(self, root: Path):
-        self.root = root.resolve()
-        self.file = None
-
-    def __enter__(self):
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.root.chmod(0o700)
-        self.file = (self.root / '.server.lock').open('a+')
-        self.file_path = self.root / '.server.lock'
-        self.file_path.chmod(0o600)
-        try:
-            fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            self.file.close()
-            self.file = None
-            raise RuntimeError(f'이미 다른 Sky 서버가 이 상태 디렉터리를 사용 중입니다: {self.root}') from None
-        return self.root
-
-    def __exit__(self, *_):
-        if self.file is not None:
-            fcntl.flock(self.file, fcntl.LOCK_UN)
-            self.file.close()
-            self.file = None
 
 
 class App:
@@ -2007,10 +1980,10 @@ def handler_for(app: App):
     return Handler
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Sky local development server")
+def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
+    parser = argparse.ArgumentParser(description=f"{product_name} local development server")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--state-dir", type=Path, default=Path(".sky"))
+    parser.add_argument("--state-dir", type=Path, default=Path(default_state_dir))
     parser.add_argument("--monitor-interval", type=int, default=300,
                         help="Seconds between health checks (60–3600; 0 disables monitoring)")
     args = parser.parse_args()
@@ -2022,7 +1995,7 @@ def main():
         stop_monitor = threading.Event()
         if app.monitor_interval:
             threading.Thread(target=app.monitor_loop, args=(stop_monitor,), daemon=True).start()
-        print(f"Sky: http://127.0.0.1:{args.port}", flush=True)
+        print(f"{product_name}: http://127.0.0.1:{args.port}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -2030,6 +2003,10 @@ def main():
         finally:
             stop_monitor.set()
             server.server_close()
+
+
+def main():
+    serve()
 
 
 if __name__ == "__main__":
