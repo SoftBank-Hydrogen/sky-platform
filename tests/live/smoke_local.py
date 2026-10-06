@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 from contextlib import nullcontext
 
-from sky_platform.planning.analysis import AISettings, OpenAIAnalyzer
-from sky_platform.api.server import App, handler_for
+from planning.analysis import AISettings, OpenAIAnalyzer
+from api.server import App, handler_for
 
 
 def smoke(mode):

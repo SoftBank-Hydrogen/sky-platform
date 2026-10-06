@@ -6,11 +6,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from sky_platform.deployment.aws_migrations import (AwsMigrationRunner, cleanup_interrupted_migration,
+from deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from deployment.aws_migrations import (AwsMigrationRunner, cleanup_interrupted_migration,
                                      inspect_migration_task, main)
-from sky_platform.database.migrations import collect_sql_migrations
-from sky_platform.database.postgres import PostgresRequest
+from database.migrations import collect_sql_migrations
+from database.postgres import PostgresRequest
 
 
 ACCOUNT = '123456789012'
@@ -373,7 +373,7 @@ class AwsMigrationTests(unittest.TestCase):
                     *, checkpoint):
             checkpoint()
             return {'image_deleted': True}
-        with patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+        with patch('deployment.aws_migrations.cleanup_interrupted_migration',
                    side_effect=cleaned) as cleanup:
             self.assertTrue(self.runner.cleanup_completed())
             self.assertFalse(self.runner.completed)
@@ -395,7 +395,7 @@ class AwsMigrationTests(unittest.TestCase):
                         *, checkpoint):
             checkpoint()
             raise RuntimeError('ECR unavailable')
-        with patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+        with patch('deployment.aws_migrations.cleanup_interrupted_migration',
                    side_effect=interrupted):
             with self.assertRaisesRegex(RuntimeError, 'ECR unavailable'):
                 self.runner.cleanup_completed()

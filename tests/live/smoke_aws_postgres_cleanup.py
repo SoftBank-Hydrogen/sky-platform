@@ -6,8 +6,8 @@ import json
 import re
 from pathlib import Path
 
-from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
-from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
+from deployment.aws import AwsConfigurationError, AwsSettings
+from database.postgres import AwsPostgresProvisioner, PostgresRequest
 from tests.live.smoke_aws_restore_marker_source import save, save_new
 
 

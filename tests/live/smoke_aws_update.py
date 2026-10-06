@@ -12,8 +12,8 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from sky_platform.deployment.aws import AwsExpressAdapter, AwsSettings
-from sky_platform.deployment.core import analyze
+from deployment.aws import AwsExpressAdapter, AwsSettings
+from deployment.core import analyze
 
 
 def assert_version(url, version):

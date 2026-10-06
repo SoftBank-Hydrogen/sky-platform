@@ -12,11 +12,11 @@ import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.aws import AwsSettings
-from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
+from planning.analysis import AISettings
+from deployment.aws import AwsSettings
+from deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from sky_platform.api.server import App, handler_for
+from api.server import App, handler_for
 from tests.live.smoke_aws_network import retire_probe
 
 

@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sky_platform.deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from sky_platform.deployment.aws_pricing import estimate_postgres_base_capacity
+from deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from deployment.aws_pricing import estimate_postgres_base_capacity
 
 
 REGION = 'ap-northeast-2'

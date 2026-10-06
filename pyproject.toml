@@ -9,17 +9,20 @@ dependencies = []
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
-sky-platform = "sky_platform.cli:main"
+sky-platform = "sky_platform:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+py-modules = ["sky_platform"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"sky_platform.assets" = ["static/*", "infra/*"]
+assets = ["static/*", "infra/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -32,4 +35,4 @@ norecursedirs = ["tests/live", "fixtures"]
 line-length = 110
 target-version = "py312"
 # 가져온 런타임과 회귀 테스트는 단계적으로 포맷 규칙을 적용한다.
-extend-exclude = ["src/sky_platform/api", "src/sky_platform/planning", "src/sky_platform/deployment", "src/sky_platform/database", "tests/regression", "tests/live", "tests/support", "tests/fixtures"]
+extend-exclude = ["src/api", "src/planning", "src/deployment", "src/database", "tests/regression", "tests/live", "tests/support", "tests/fixtures"]

@@ -6,9 +6,9 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.core import LocalDockerAdapter, analyze, source_digest, validate_environment
-from sky_platform.api.server import App, StateDirectoryLock, handler_for
+from planning.analysis import AISettings
+from deployment.core import LocalDockerAdapter, analyze, source_digest, validate_environment
+from api.server import App, StateDirectoryLock, handler_for
 
 
 class EnvironmentHistoryTests(unittest.TestCase):
@@ -158,7 +158,7 @@ class EnvironmentHistoryTests(unittest.TestCase):
         app.save(self.job_id)
         stored = (self.root / self.job_id / 'job.json').read_text()
         app.jobs[self.job_id].update(status='succeeded', result={'url': 'http://127.0.0.1:12345'})
-        with patch('sky_platform.api.server.os.replace', side_effect=OSError('disk failure')):
+        with patch('api.server.os.replace', side_effect=OSError('disk failure')):
             with self.assertRaisesRegex(RuntimeError, '저장에 실패'):
                 app.save(self.job_id)
         self.assertEqual((self.root / self.job_id / 'job.json').read_text(), stored)

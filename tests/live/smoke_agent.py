@@ -16,11 +16,11 @@ from unittest.mock import patch
 
 from tests.support.agent_fixture import EnvironmentFixture, PauseAfterRepairFixture, PythonDockerfileFixture, PythonGeneratedFixture, RepairFixture
 from tests.support.openai_wire_fixture import ResponsesWireFixture
-from sky_platform.planning.agent import OpenAIDeployAgent
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.core import source_digest
-from sky_platform.planning.infrastructure import OpenAIInfrastructurePlanner
-from sky_platform.api.server import App, handler_for
+from planning.agent import OpenAIDeployAgent
+from planning.analysis import AISettings
+from deployment.core import source_digest
+from planning.infrastructure import OpenAIInfrastructurePlanner
+from api.server import App, handler_for
 
 
 class InfrastructureFixture:
@@ -176,7 +176,7 @@ def main():
             if args.resume_unstarted:
                 start_worker = app.start_job_worker
                 def fail_worker_start(job_id, worker, environment=None):
-                    with patch('sky_platform.api.server.threading.Thread.start',
+                    with patch('api.server.threading.Thread.start',
                                side_effect=RuntimeError('simulated worker start failure')):
                         return start_worker(job_id, worker, environment)
                 app.start_job_worker = fail_worker_start

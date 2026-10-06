@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.api.server import App, handler_for
+from api.server import App, handler_for
 
 
 JOB_ID = 'a' * 16
@@ -37,8 +37,8 @@ class AwsRetireApiTests(unittest.TestCase):
         self.handler.json_response = Mock()
 
     def test_retire_api_starts_once_and_marks_deleted_after_adapter_success(self):
-        with patch('sky_platform.api.server.threading.Thread') as thread, \
-                patch('sky_platform.api.server.AwsExpressAdapter.retire') as retire:
+        with patch('api.server.threading.Thread') as thread, \
+                patch('api.server.AwsExpressAdapter.retire') as retire:
             self.handler.do_POST()
             self.handler.json_response.assert_called_once_with(202, {'id': JOB_ID, 'deployment_state': 'deleting'})
             thread.assert_called_once()
@@ -56,11 +56,11 @@ class AwsRetireApiTests(unittest.TestCase):
 
     def test_retire_failure_keeps_job_retryable(self):
         self.app.jobs[JOB_ID]['deployment_state'] = 'deleting'
-        with patch('sky_platform.api.server.AwsExpressAdapter.retire', side_effect=RuntimeError('AWS timeout')):
+        with patch('api.server.AwsExpressAdapter.retire', side_effect=RuntimeError('AWS timeout')):
             self.app.retire_aws(JOB_ID)
         self.assertEqual(self.app.jobs[JOB_ID]['deployment_state'], 'delete_failed')
         self.assertIn('AWS timeout', self.app.jobs[JOB_ID]['retire_error'])
-        with patch('sky_platform.api.server.threading.Thread') as thread:
+        with patch('api.server.threading.Thread') as thread:
             self.handler.do_POST()
         self.assertEqual(self.app.jobs[JOB_ID]['deployment_state'], 'deleting')
         thread.assert_called_once()

@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import secrets
 
-from sky_platform.database.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
+from database.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
 
 
 def main(argv=None) -> None:

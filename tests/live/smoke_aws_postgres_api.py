@@ -19,10 +19,10 @@ from pathlib import Path
 
 from tests.support.agent_fixture import call
 from tests.live.smoke_aws_postgres import probe, probe_version
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.aws import AwsSettings
-from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
-from sky_platform.api.server import App, handler_for
+from planning.analysis import AISettings
+from deployment.aws import AwsSettings
+from database.postgres import AwsPostgresProvisioner, PostgresRequest
+from api.server import App, handler_for
 
 
 SOURCES = {runtime: Path(__file__).resolve().parents[2] / 'tests' / 'fixtures' / 'apps' / f'postgres-probe-{runtime}'

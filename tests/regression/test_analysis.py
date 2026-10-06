@@ -7,12 +7,12 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.planning.analysis import (
+from planning.analysis import (
     AISettings, DEFAULT_AI_MODEL, AnalysisError, OpenAIAnalyzer, analyze_project, parse_response,
     redact, source_context, validate_proposal,
 )
-from sky_platform.deployment.core import LocalDockerAdapter, analyze, make_plan
-from sky_platform.api.server import App
+from deployment.core import LocalDockerAdapter, analyze, make_plan
+from api.server import App
 
 
 class AnalysisTests(unittest.TestCase):
@@ -177,7 +177,7 @@ class AnalysisTests(unittest.TestCase):
     def test_provider_uses_responses_structured_output(self):
         response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
             {'type': 'output_text', 'text': json.dumps(self.proposal)}]}]}
-        with patch('sky_platform.planning.analysis.urllib.request.build_opener') as opener:
+        with patch('planning.analysis.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(json.dumps(response).encode())
             result = OpenAIAnalyzer(self.settings).propose(self.files)
             request = opener.return_value.open.call_args.args[0]
@@ -189,14 +189,14 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result, self.proposal)
 
     def test_provider_keeps_response_size_limit_error(self):
-        with patch('sky_platform.planning.analysis.urllib.request.build_opener') as opener:
+        with patch('planning.analysis.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'x' * (1024 * 1024 + 1))
             with self.assertRaisesRegex(AnalysisError, 'response exceeded the size limit'):
                 OpenAIAnalyzer(self.settings).propose(self.files)
 
     def test_provider_error_does_not_expose_response_body(self):
         error = urllib.error.HTTPError('https://api.openai.com', 401, 'unauthorized', {}, io.BytesIO(b'sensitive'))
-        with patch('sky_platform.planning.analysis.urllib.request.build_opener') as opener:
+        with patch('planning.analysis.urllib.request.build_opener') as opener:
             opener.return_value.open.side_effect = error
             with self.assertRaises(AnalysisError) as raised:
                 OpenAIAnalyzer(self.settings).propose(self.files)
@@ -209,9 +209,9 @@ class AnalysisTests(unittest.TestCase):
             io.BytesIO(b'{"error":{"code":"server_is_overloaded"}}'))
         response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
             {'type': 'output_text', 'text': json.dumps(self.proposal)}]}]}
-        with patch('sky_platform.planning.analysis.urllib.request.build_opener') as opener, \
-                patch('sky_platform.planning.openai_http.time.sleep') as sleep, \
-                patch('sky_platform.planning.openai_http.random.uniform', return_value=0):
+        with patch('planning.analysis.urllib.request.build_opener') as opener, \
+                patch('planning.openai_http.time.sleep') as sleep, \
+                patch('planning.openai_http.random.uniform', return_value=0):
             opener.return_value.open.side_effect = [failure, io.BytesIO(json.dumps(response).encode())]
             result = OpenAIAnalyzer(self.settings).propose(self.files)
         self.assertEqual(result, self.proposal)
@@ -221,8 +221,8 @@ class AnalysisTests(unittest.TestCase):
     def test_provider_does_not_retry_spend_limit(self):
         failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 429,
             'limit', {}, io.BytesIO(b'{"error":{"code":"project_spend_limit_exceeded"}}'))
-        with patch('sky_platform.planning.analysis.urllib.request.build_opener') as opener, \
-                patch('sky_platform.planning.openai_http.time.sleep') as sleep:
+        with patch('planning.analysis.urllib.request.build_opener') as opener, \
+                patch('planning.openai_http.time.sleep') as sleep:
             opener.return_value.open.side_effect = failure
             with self.assertRaisesRegex(AnalysisError, 'HTTP 429'):
                 OpenAIAnalyzer(self.settings).propose(self.files)
@@ -249,7 +249,7 @@ class AnalysisTests(unittest.TestCase):
         plan = validate_proposal(self.project, self.files, self.proposal, 'model')
         (app.root / 'job').mkdir()
         app.jobs['job'] = {'project': str(self.project), 'plan': asdict(plan), 'events': []}
-        with patch('sky_platform.api.server.analyze_project') as analysis, patch.object(LocalDockerAdapter, 'deploy', return_value={'url': 'http://127.0.0.1:1234'}) as deploy:
+        with patch('api.server.analyze_project') as analysis, patch.object(LocalDockerAdapter, 'deploy', return_value={'url': 'http://127.0.0.1:1234'}) as deploy:
             app.run('job')
             analysis.assert_not_called()
             self.assertEqual(deploy.call_args.args[1], plan)

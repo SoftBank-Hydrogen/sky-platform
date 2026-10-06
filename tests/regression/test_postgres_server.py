@@ -9,11 +9,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.support.openai_wire_fixture import ResponsesWireFixture
-from sky_platform.planning.agent import OpenAIDeployAgent
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.aws import AwsSettings
-from sky_platform.database.postgres import PostgresRequest
-from sky_platform.api.server import App, handler_for, postgres_request_from_job
+from planning.agent import OpenAIDeployAgent
+from planning.analysis import AISettings
+from deployment.aws import AwsSettings
+from database.postgres import PostgresRequest
+from api.server import App, handler_for, postgres_request_from_job
 from tests.live.smoke_aws_postgres_api import archive as probe_archive
 
 
@@ -133,7 +133,7 @@ class PostgresServerTests(unittest.TestCase):
         handler.rfile = io.BytesIO(content)
         handler.json_response = Mock()
         with patch.object(AwsSettings, 'unavailable_reason', return_value=None), \
-                patch('sky_platform.api.server.threading.Thread.start'):
+                patch('api.server.threading.Thread.start'):
             handler.do_POST()
         return handler.json_response.call_args.args
 
@@ -146,7 +146,7 @@ class PostgresServerTests(unittest.TestCase):
                     'region': REGION, 'vpc_id': 'vpc-12345678',
                     'subnet_ids': ['subnet-11111111', 'subnet-22222222'],
                     'status': 'available'}
-        with patch('sky_platform.api.server.discover_existing_postgres', return_value=database) as discover:
+        with patch('api.server.discover_existing_postgres', return_value=database) as discover:
             handler.do_GET()
         discover.assert_called_once_with('demo-app', self.settings)
         self.assertEqual(handler.json_response.call_args.args, (200, database))
@@ -156,7 +156,7 @@ class PostgresServerTests(unittest.TestCase):
         handler.path = '/api/applications/demo-app/postgres'
         handler.headers = {}
         handler.json_response = Mock()
-        with patch('sky_platform.api.server.discover_existing_postgres') as discover:
+        with patch('api.server.discover_existing_postgres') as discover:
             handler.do_GET()
         discover.assert_not_called()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
@@ -166,14 +166,14 @@ class PostgresServerTests(unittest.TestCase):
         handler.path = '/api/applications/demo-app/postgres/backups'
         handler.headers = {}
         handler.json_response = Mock()
-        with patch('sky_platform.api.server.inspect_postgres_backup_status') as inspect:
+        with patch('api.server.inspect_postgres_backup_status') as inspect:
             handler.do_GET()
         self.assertEqual(handler.json_response.call_args.args[0], 403)
         inspect.assert_not_called()
         handler.headers = {'X-Sky-Token': self.app.token}
         summary = {'database_id': 'sky-demo-app', 'backup_retention_days': 7,
                    'manual_snapshot_count': 0, 'manual_snapshots': []}
-        with patch('sky_platform.api.server.inspect_postgres_backup_status',
+        with patch('api.server.inspect_postgres_backup_status',
                    return_value=summary) as inspect:
             handler.do_GET()
         self.assertEqual(handler.json_response.call_args.args, (200, summary))
@@ -238,10 +238,10 @@ class PostgresServerTests(unittest.TestCase):
         handler.rfile = io.BytesIO(payload)
         handler.json_response = Mock()
         plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.preflight',
+        with patch('api.server.AwsPostgresProvisioner.preflight',
                    return_value=plan) as preflight, \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.assert_stack_available'), \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.create') as create:
+                patch('api.server.AwsPostgresProvisioner.assert_stack_available'), \
+                patch('api.server.AwsPostgresProvisioner.create') as create:
             handler.do_POST()
         status, result = handler.json_response.call_args.args
         self.assertEqual(status, 200)
@@ -263,10 +263,10 @@ class PostgresServerTests(unittest.TestCase):
                            'Content-Length': str(len(payload))}
         handler.rfile = io.BytesIO(payload)
         handler.json_response = Mock()
-        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value={'account': ACCOUNT,
                                  'pricing': {'baseline_730h_usd': '20.87'}}), \
-                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.create') as create:
+                patch('database.postgres_operations.AwsPostgresProvisioner.create') as create:
             handler.do_POST()
         status, response = handler.json_response.call_args.args
         self.assertEqual(status, 400)
@@ -285,11 +285,11 @@ class PostgresServerTests(unittest.TestCase):
                            'Content-Length': str(len(payload))}
         handler.rfile = io.BytesIO(payload)
         handler.json_response = Mock()
-        with patch('sky_platform.database.postgres.AwsServiceNetworkProvisioner.inspect_current',
+        with patch('database.postgres.AwsServiceNetworkProvisioner.inspect_current',
                    return_value={'service_security_group': GROUP}) as network, \
-                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
+                patch('database.postgres_operations.AwsPostgresProvisioner.preflight',
                       return_value={'account': ACCOUNT}) as preflight, \
-                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'):
+                patch('database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'):
             handler.do_POST()
         self.assertEqual(handler.json_response.call_args.args[0], 200)
         self.assertEqual(preflight.call_args.args, ())
@@ -298,9 +298,9 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_upload_uses_verified_application_network_in_persisted_aws_settings(self):
         self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
-        with patch('sky_platform.database.postgres.AwsServiceNetworkProvisioner.inspect_current',
+        with patch('database.postgres.AwsServiceNetworkProvisioner.inspect_current',
                    return_value={'service_security_group': GROUP}), \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+                patch('api.server.AwsPostgresProvisioner.inspect_current',
                       return_value={'database_id': 'sky-demo-app'}):
             status, payload = self.upload(archive())
         self.assertEqual(status, 202)
@@ -314,7 +314,7 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_upload_rejects_missing_application_network_before_job(self):
         self.app.aws_settings = AwsSettings(REGION, expected_account=ACCOUNT)
-        with patch('sky_platform.database.postgres.AwsServiceNetworkProvisioner.inspect_current',
+        with patch('database.postgres.AwsServiceNetworkProvisioner.inspect_current',
                    side_effect=RuntimeError('앱 네트워크 스택 없음')):
             status, payload = self.upload(archive())
         self.assertEqual(status, 400)
@@ -325,10 +325,10 @@ class PostgresServerTests(unittest.TestCase):
         plan = {'account': ACCOUNT, 'pricing': {'baseline_730h_usd': '20.87'}}
         request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
             ('subnet-11111111', 'subnet-22222222'), GROUP)
-        with patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.preflight',
+        with patch('database.postgres_operations.AwsPostgresProvisioner.preflight',
                    return_value=plan), \
-                patch('sky_platform.database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
-                patch('sky_platform.database.postgres_operations.threading.Thread.start'):
+                patch('database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
+                patch('database.postgres_operations.threading.Thread.start'):
             planned = self.app.postgres_operations.plan(request)
             payload = json.dumps({'plan_id': planned['plan_id']}).encode()
             handler = handler_for(self.app).__new__(handler_for(self.app))
@@ -354,7 +354,7 @@ class PostgresServerTests(unittest.TestCase):
                            'Content-Length': str(len(payload))}
         handler.rfile = io.BytesIO(payload)
         handler.json_response = Mock()
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.preflight') as preflight:
+        with patch('api.server.AwsPostgresProvisioner.preflight') as preflight:
             handler.do_POST()
         self.assertEqual(handler.json_response.call_args.args[0], 400)
         preflight.assert_not_called()
@@ -380,7 +380,7 @@ class PostgresServerTests(unittest.TestCase):
         token = self.reviewed_create_plan()
         with patch.object(self.app.postgres_operations, 'start',
                           return_value={'status': 'running', 'creation_id': 'a' * 16}) as start, \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+                patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             status, payload = self.upload(archive(), postgres=False, create_plan_id=token)
         self.assertEqual((status, payload['status']), (202, 'provisioning'))
         start.assert_called_once_with('demo-app', token)
@@ -446,9 +446,9 @@ class PostgresServerTests(unittest.TestCase):
         job_id = payload['id']
         self.app.postgres_operations.operations['demo-app'] = self.created_operation(
             'succeeded', 'sky-demo-app')
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
-                patch('sky_platform.api.server.DeploymentAgent.run',
+                patch('api.server.DeploymentAgent.run',
                       return_value={'url': 'https://example.test', 'target': 'aws-ecs-express'}) as deploy:
             self.app.run_postgres_then_agent(job_id)
         deploy.assert_called_once_with()
@@ -498,10 +498,10 @@ class PostgresServerTests(unittest.TestCase):
                 assert 'FROM node:22' in plan.dockerfile
                 return {'url': 'https://example.test', 'target': 'aws-ecs-express',
                         'database': {'database_id': 'sky-demo-app'}}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
                 patch('urllib.request.build_opener', return_value=wire), \
-                patch('sky_platform.api.server.AwsExpressAdapter', Adapter):
+                patch('api.server.AwsExpressAdapter', Adapter):
             self.app.run_postgres_then_agent(job_id)
         wire.assert_complete()
         job = self.app.jobs[job_id]
@@ -557,10 +557,10 @@ class PostgresServerTests(unittest.TestCase):
                 assert 'gunicorn' in plan.dockerfile
                 return {'url': 'https://example.test', 'target': 'aws-ecs-express',
                         'database': {'database_id': 'sky-demo-app'}}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
                 patch('urllib.request.build_opener', return_value=wire), \
-                patch('sky_platform.api.server.AwsExpressAdapter', Adapter):
+                patch('api.server.AwsExpressAdapter', Adapter):
             self.app.run_postgres_then_agent(job_id)
         wire.assert_complete()
         job = self.app.jobs[job_id]
@@ -584,10 +584,10 @@ class PostgresServerTests(unittest.TestCase):
         def finish_create(_seconds):
             operation['status'] = 'succeeded'
             operation['database_id'] = 'sky-demo-app'
-        with patch('sky_platform.api.server.time.sleep', side_effect=finish_create) as sleep, \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.time.sleep', side_effect=finish_create) as sleep, \
+                patch('api.server.AwsPostgresProvisioner.inspect_current',
                       return_value={'database_id': 'sky-demo-app'}), \
-                patch('sky_platform.api.server.DeploymentAgent.run',
+                patch('api.server.DeploymentAgent.run',
                       return_value={'url': 'https://example.test', 'target': 'aws-ecs-express'}):
             self.app.run_postgres_then_agent(payload['id'])
         sleep.assert_called_once_with(3)
@@ -602,7 +602,7 @@ class PostgresServerTests(unittest.TestCase):
             'succeeded', 'sky-demo-app')
         project_file = Path(self.app.jobs[payload['id']]['project']) / 'server.js'
         project_file.write_text(project_file.read_text() + '\n// changed during DB creation')
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect, \
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect, \
                 patch.object(self.app, 'run_agent') as deploy:
             self.app.run_postgres_then_agent(payload['id'])
         inspect.assert_not_called()
@@ -618,7 +618,7 @@ class PostgresServerTests(unittest.TestCase):
         operation = self.created_operation('succeeded', 'sky-demo-app')
         operation['creation_id'] = 'b' * 16
         self.app.postgres_operations.operations['demo-app'] = operation
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect, \
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect, \
                 patch.object(self.app, 'run_agent') as deploy:
             self.app.run_postgres_then_agent(payload['id'])
         inspect.assert_not_called()
@@ -652,9 +652,9 @@ class PostgresServerTests(unittest.TestCase):
         self.app.save(job_id)
         self.app.postgres_operations.operations['demo-app'] = self.created_operation(
             'succeeded', 'sky-demo-app')
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}) as inspect, \
-                patch('sky_platform.api.server.threading.Thread.start') as thread, \
+                patch('api.server.threading.Thread.start') as thread, \
                 patch.object(self.app.postgres_operations, 'start') as create:
             result = self.app.resume_postgres_deployment(job_id)
         self.assertEqual(result, {'id': job_id, 'status': 'running'})
@@ -677,9 +677,9 @@ class PostgresServerTests(unittest.TestCase):
                        aws_settings=self.settings, monitor_interval=0)
         self.assertEqual(restored.jobs[payload['id']]['status'], 'interrupted')
         self.assertEqual(restored.postgres_operations.get('demo-app')['creation_id'], 'a' * 16)
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
-                patch('sky_platform.api.server.threading.Thread.start') as thread, \
+                patch('api.server.threading.Thread.start') as thread, \
                 patch.object(restored.postgres_operations, 'start') as create:
             result = restored.resume_postgres_deployment(payload['id'])
         self.assertEqual(result['status'], 'running')
@@ -695,7 +695,7 @@ class PostgresServerTests(unittest.TestCase):
         self.app.jobs[job_id]['status'] = 'interrupted'
         operation = self.created_operation('needs_attention')
         self.app.postgres_operations.operations['demo-app'] = operation
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             with self.assertRaisesRegex(ValueError, '성공 기록'):
                 self.app.resume_postgres_deployment(job_id)
         inspect.assert_not_called()
@@ -721,13 +721,13 @@ class PostgresServerTests(unittest.TestCase):
         project_file = Path(job['project']) / 'server.js'
         original = project_file.read_text()
         project_file.write_text(original + '\n// edited after upload')
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             with self.assertRaisesRegex(ValueError, '앱 소스가 변경'):
                 self.app.resume_postgres_deployment(job_id)
         inspect.assert_not_called()
         project_file.write_text(original)
         operation['request']['service_security_group'] = 'sg-44444444'
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             with self.assertRaisesRegex(ValueError, 'DB 설정이 배포 작업과 다릅니다'):
                 self.app.resume_postgres_deployment(job_id)
         inspect.assert_not_called()
@@ -745,9 +745,9 @@ class PostgresServerTests(unittest.TestCase):
         self.app.jobs['b' * 16] = {'id': 'b' * 16, 'application_id': 'demo-app',
                                    'target': 'aws-ecs-express', 'status': 'succeeded',
                                    'deployment_state': 'active'}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
-                patch('sky_platform.api.server.threading.Thread.start') as thread:
+                patch('api.server.threading.Thread.start') as thread:
             with self.assertRaisesRegex(ValueError, '다른 AWS 릴리스'):
                 self.app.resume_postgres_deployment(job_id)
         thread.assert_not_called()
@@ -770,7 +770,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(handler.json_response.call_args.args[0], 202)
 
     def test_interrupted_migration_inspection_records_owned_task_without_redeploy(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             _, payload = self.upload(archive())
         job_id = payload['id']
@@ -797,7 +797,7 @@ class PostgresServerTests(unittest.TestCase):
                              {'key': 'sky-attempt', 'value': attempt}],
                     'containers': [{'name': 'migration', 'exitCode': 0}]}]})
             raise AssertionError(args)
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True, side_effect=aws) as called, \
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True, side_effect=aws) as called, \
                 patch.object(restored, 'run_agent') as deploy:
             result = restored.inspect_interrupted_aws_migration(job_id)
         self.assertEqual(result['status'], 'succeeded')
@@ -808,13 +808,13 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(restored.jobs[job_id]['aws_migration_inspection']['status'], 'succeeded')
         self.assertEqual(json.loads((self.root / job_id / 'job.json').read_text())
                          ['aws_migration_inspection']['status'], 'succeeded')
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True,
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True,
                    return_value=json.dumps({'Account': '000000000000'})) as wrong_account:
             with self.assertRaisesRegex(Exception, '현재 AWS 계정'):
                 restored.inspect_interrupted_aws_migration(job_id)
         wrong_account.assert_called_once()
         restored.jobs[job_id]['attempts'] = 0
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws') as no_aws:
+        with patch('api.server.AwsExpressAdapter.aws') as no_aws:
             with self.assertRaisesRegex(ValueError, '중단된 AWS SQL'):
                 restored.inspect_interrupted_aws_migration(job_id)
         no_aws.assert_not_called()
@@ -842,7 +842,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(handler.json_response.call_args.args, (200, {'status': 'succeeded'}))
 
     def test_interrupted_migration_cleanup_journals_progress_without_redeploy(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             _, payload = self.upload(archive())
         job_id = payload['id']
@@ -868,9 +868,9 @@ class PostgresServerTests(unittest.TestCase):
                             ['aws_migration_cleanup_definition_inactive'])
             return {'state': 'done', 'image_deleted': True,
                     'task_definition_arn': definition, 'image': image}
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True,
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True,
                    return_value=json.dumps({'Account': ACCOUNT})) as aws, \
-                patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+                patch('deployment.aws_migrations.cleanup_interrupted_migration',
                       side_effect=cleanup) as cleaner, \
                 patch.object(self.app, 'run_agent') as deploy:
             result = self.app.cleanup_interrupted_aws_migration(job_id)
@@ -886,7 +886,7 @@ class PostgresServerTests(unittest.TestCase):
             self.app.cleanup_interrupted_aws_migration(job_id)
 
     def test_interrupted_migration_cleanup_restores_failed_retry_state(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             _, payload = self.upload(archive())
         job_id = payload['id']
@@ -905,9 +905,9 @@ class PostgresServerTests(unittest.TestCase):
         restored = App(self.root, AISettings('fixture-key', 'fixture-model'),
                        aws_settings=self.settings, monitor_interval=0)
         self.assertEqual(restored.jobs[job_id]['aws_migration_cleanup_state'], 'failed')
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True,
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True,
                    return_value=json.dumps({'Account': ACCOUNT})), \
-                patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+                patch('deployment.aws_migrations.cleanup_interrupted_migration',
                       side_effect=RuntimeError('cleanup failed')) as cleanup:
             with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
                 restored.cleanup_interrupted_aws_migration(job_id)
@@ -916,7 +916,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(restored.jobs[job_id]['aws_migration_cleanup_error'], 'cleanup failed')
 
     def test_interrupted_migration_cleanup_uses_journaled_success_after_task_expires(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             _, payload = self.upload(archive())
         job_id = payload['id']
@@ -935,9 +935,9 @@ class PostgresServerTests(unittest.TestCase):
                                              'task_definition_arn': definition},
                    aws_migration_cleanup_definition_inactive=True)
         self.app.save(job_id)
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True,
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True,
                    return_value=json.dumps({'Account': ACCOUNT})), \
-                patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+                patch('deployment.aws_migrations.cleanup_interrupted_migration',
                       return_value={'state': 'done', 'image_deleted': False}) as cleanup:
             self.app.cleanup_interrupted_aws_migration(job_id)
         self.assertTrue(cleanup.call_args.kwargs['definition_inactive'])
@@ -945,7 +945,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['aws_migration_cleanup_state'], 'done')
 
     def test_successful_deployment_can_finish_failed_migration_cleanup(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             _, payload = self.upload(archive())
         job_id = payload['id']
@@ -964,9 +964,9 @@ class PostgresServerTests(unittest.TestCase):
                                          'image': image, 'image_digest': digest},
                    aws_migration_cleanup_definition_inactive=True)
         self.app.save(job_id)
-        with patch('sky_platform.api.server.AwsExpressAdapter.aws', autospec=True,
+        with patch('api.server.AwsExpressAdapter.aws', autospec=True,
                    return_value=json.dumps({'Account': ACCOUNT})), \
-                patch('sky_platform.deployment.aws_migrations.cleanup_interrupted_migration',
+                patch('deployment.aws_migrations.cleanup_interrupted_migration',
                       return_value={'state': 'done', 'image_deleted': True}) as cleanup, \
                 patch.object(self.app, 'run_agent') as deploy:
             self.app.cleanup_interrupted_aws_migration(job_id)
@@ -1003,7 +1003,7 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_opt_in_upload_persists_and_restores_postgres_request(self):
         database = {'database_id': 'sky-demo-app'}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value=database) as inspect:
             status, payload = self.upload(archive())
         self.assertEqual(status, 202)
@@ -1023,8 +1023,8 @@ class PostgresServerTests(unittest.TestCase):
         self.assertTrue(infrastructure['compatibility']['postgres_binding'])
         self.assertEqual(infrastructure['compatibility']['database_engines'], ['postgresql'])
         self.assertNotIn('password', json.dumps(job).lower())
-        with patch('sky_platform.api.server.DeploymentTools') as tools, \
-                patch('sky_platform.api.server.DeploymentAgent') as agent:
+        with patch('api.server.DeploymentTools') as tools, \
+                patch('api.server.DeploymentAgent') as agent:
             agent.return_value.run.return_value = {'url': 'https://example.test'}
             self.app.run_agent(job_id)
         self.assertEqual(tools.call_args.kwargs['postgres_request'].application_id, 'demo-app')
@@ -1035,7 +1035,7 @@ class PostgresServerTests(unittest.TestCase):
                          ('subnet-11111111', 'subnet-22222222'))
 
     def test_python_postgres_zip_upload_records_existing_database_binding(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             status, payload = self.upload(probe_archive('python'))
         self.assertEqual(status, 202)
@@ -1050,7 +1050,7 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_python_postgres_update_upload_reuses_owned_release_and_database(self):
         database = {'database_id': 'sky-demo-app'}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value=database):
             first_status, first_payload = self.upload(probe_archive('python', 'v1'))
             self.assertEqual(first_status, 202)
@@ -1071,7 +1071,7 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_auto_target_uses_only_supported_owned_postgres_path(self):
         database = {'database_id': 'sky-demo-app'}
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value=database), \
                 patch.object(self.app, 'infrastructure_planner_factory') as planner:
             status, payload = self.upload(archive(), target='auto')
@@ -1087,9 +1087,9 @@ class PostgresServerTests(unittest.TestCase):
         database = {'database_id': 'sky-demo-app', 'account': ACCOUNT,
                     'region': REGION, 'vpc_id': 'vpc-12345678',
                     'subnet_ids': ['subnet-11111111', 'subnet-22222222']}
-        with patch('sky_platform.api.server.discover_existing_postgres',
+        with patch('api.server.discover_existing_postgres',
                    return_value=database) as discover, \
-                patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+                patch('api.server.AwsPostgresProvisioner.inspect_current',
                       return_value=database) as inspect:
             status, payload = self.upload(archive(), target='auto', network_headers=False)
         self.assertEqual(status, 202)
@@ -1106,7 +1106,7 @@ class PostgresServerTests(unittest.TestCase):
         self.app.postgres_operations.operations['demo-app'] = operation
         for status_name in ('running', 'needs_attention', 'recovering'):
             with self.subTest(status=status_name), patch(
-                    'sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+                    'api.server.AwsPostgresProvisioner.inspect_current',
                     return_value=database):
                 operation['status'] = status_name
                 status, payload = self.upload(archive())
@@ -1116,7 +1116,7 @@ class PostgresServerTests(unittest.TestCase):
 
         operation['status'] = 'succeeded'
         operation['database_id'] = 'sky-other-app'
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value=database):
             status, payload = self.upload(archive())
         self.assertEqual(status, 400)
@@ -1124,7 +1124,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertFalse(self.app.jobs)
 
         operation['database_id'] = database['database_id']
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value=database):
             status, payload = self.upload(archive())
         self.assertEqual(status, 202)
@@ -1133,7 +1133,7 @@ class PostgresServerTests(unittest.TestCase):
 
     def test_upload_rejects_untrusted_creation_journal(self):
         self.app.postgres_operations.untrusted_applications.add('demo-app')
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current',
+        with patch('api.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}):
             status, payload = self.upload(archive())
         self.assertEqual(status, 400)
@@ -1141,7 +1141,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertFalse(self.app.jobs)
 
     def test_partial_postgres_network_headers_are_rejected_before_discovery(self):
-        with patch('sky_platform.api.server.discover_existing_postgres') as discover:
+        with patch('api.server.discover_existing_postgres') as discover:
             status, payload = self.upload(archive(), partial_network=True)
         self.assertEqual(status, 400)
         self.assertIn('함께', payload['error'])
@@ -1155,14 +1155,14 @@ class PostgresServerTests(unittest.TestCase):
         self.assertFalse(self.app.jobs)
 
     def test_auto_postgres_requires_public_aws_path_before_db_inspection(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             status, payload = self.upload(archive(), target='auto', public=False)
         self.assertEqual(status, 400)
         self.assertIn('공개 AWS', payload['error'])
         inspect.assert_not_called()
 
     def test_missing_sql_bundle_rejects_before_db_inspection(self):
-        with patch('sky_platform.api.server.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('api.server.AwsPostgresProvisioner.inspect_current') as inspect:
             status, payload = self.upload(archive(include_migration=False))
         self.assertEqual(status, 400)
         self.assertIn('migrations/', payload['error'])

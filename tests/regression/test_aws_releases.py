@@ -8,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.aws import AwsSettings
-from sky_platform.deployment.core import DeploymentPlan
-from sky_platform.api.server import App, handler_for
+from planning.analysis import AISettings
+from deployment.aws import AwsSettings
+from deployment.core import DeploymentPlan
+from api.server import App, handler_for
 
 
 REGION = 'ap-northeast-2'
@@ -72,8 +72,8 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app, old_id, new_id = self.pending_update(Path(directory))
             aws = self.reconcile_aws('SUCCESSFUL', 'new-deployment', REPOSITORY + ':' + new_id + '-a1')
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 outcome = app.reconcile_aws_update(new_id)
             self.assertEqual(outcome['release'], 'new')
             self.assertEqual(app.jobs[new_id]['status'], 'succeeded')
@@ -85,8 +85,8 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app, old_id, new_id = self.pending_update(Path(directory))
             aws = self.reconcile_aws('ROLLBACK_SUCCESSFUL', 'new-deployment', REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 outcome = app.reconcile_aws_update(new_id)
             self.assertEqual(outcome['release'], 'previous')
             self.assertEqual(app.jobs[new_id]['status'], 'failed')
@@ -107,8 +107,8 @@ class AwsReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restarted.ensure_application_available('my-app', 'aws-ecs-express')
             aws = self.reconcile_aws('SUCCESSFUL', 'old-deployment', REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment') as health:
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment') as health:
                 self.assertFalse(restarted.reconcile_aws_update(new_id)['reconciled'])
             health.assert_not_called()
 
@@ -119,8 +119,8 @@ class AwsReleaseTests(unittest.TestCase):
                 datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
             app.save(new_id)
             aws = self.reconcile_aws('SUCCESSFUL', 'old-deployment', REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 outcome = app.reconcile_aws_update(new_id)
             self.assertEqual(outcome['release'], 'previous')
             self.assertEqual(app.jobs[old_id]['deployment_state'], 'active')
@@ -130,13 +130,13 @@ class AwsReleaseTests(unittest.TestCase):
             app, old_id, new_id = self.pending_update(Path(directory))
             aws = self.reconcile_aws('SUCCESSFUL', 'new-deployment', REPOSITORY + ':' + FIRST_ATTEMPT,
                                      current_deployment='in-progress')
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment') as health:
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment') as health:
                 self.assertFalse(app.reconcile_aws_update(new_id)['reconciled'])
             health.assert_not_called()
             aws = self.reconcile_aws('SUCCESSFUL', 'new-deployment', REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 outcome = app.reconcile_aws_update(new_id)
             self.assertEqual(outcome['release'], 'previous')
             self.assertEqual(app.jobs[old_id]['deployment_state'], 'active')
@@ -150,8 +150,8 @@ class AwsReleaseTests(unittest.TestCase):
             restarted = App(root, AISettings('fixture-key', 'fixture-model'), aws_settings=AwsSettings(REGION))
             self.assertEqual(restarted.jobs[new_id]['status'], 'interrupted')
             aws = self.reconcile_aws('SUCCESSFUL', 'new-deployment', REPOSITORY + ':' + new_id + '-a1')
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 outcome = restarted.reconcile_aws_update(new_id)
             self.assertEqual(outcome['release'], 'new')
             self.assertEqual(restarted.jobs[new_id]['status'], 'succeeded')
@@ -168,7 +168,7 @@ class AwsReleaseTests(unittest.TestCase):
             def fail(_agent):
                 app.jobs[new_id]['aws_update_submitted'] = True
                 raise RuntimeError('AWS update outcome unknown')
-            with patch('sky_platform.api.server.DeploymentAgent.run', autospec=True, side_effect=fail):
+            with patch('api.server.DeploymentAgent.run', autospec=True, side_effect=fail):
                 app.run_agent(new_id)
             self.assertEqual(app.jobs[new_id]['status'], 'failed')
             self.assertEqual(app.jobs[old_id]['deployment_state'], 'needs_attention')
@@ -180,15 +180,15 @@ class AwsReleaseTests(unittest.TestCase):
             app.jobs[new_id]['aws_reconciled'] = 'previous'
             app.save(old_id)
             app.save(new_id)
-            with patch('sky_platform.api.server.check_deployment', return_value={'healthy': True}), \
-                    patch('sky_platform.api.server.AwsExpressAdapter.cleanup_abandoned_image',
+            with patch('api.server.check_deployment', return_value={'healthy': True}), \
+                    patch('api.server.AwsExpressAdapter.cleanup_abandoned_image',
                           side_effect=RuntimeError('ECR unavailable')):
                 with self.assertRaisesRegex(RuntimeError, 'ECR unavailable'):
                     app.cleanup_abandoned_aws_image(new_id)
             self.assertEqual(app.jobs[new_id]['aws_image_cleanup_state'], 'failed')
             deleted = {'state': 'deleted', 'image': app.jobs[new_id]['aws_candidate_image']}
-            with patch('sky_platform.api.server.check_deployment', return_value={'healthy': True}), \
-                    patch('sky_platform.api.server.AwsExpressAdapter.cleanup_abandoned_image', return_value=deleted) as cleanup:
+            with patch('api.server.check_deployment', return_value={'healthy': True}), \
+                    patch('api.server.AwsExpressAdapter.cleanup_abandoned_image', return_value=deleted) as cleanup:
                 self.assertEqual(app.cleanup_abandoned_aws_image(new_id), deleted)
             cleanup.assert_called_once()
             self.assertEqual(app.jobs[new_id]['aws_image_cleanup_state'], 'done')
@@ -207,7 +207,7 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app, old_id, new_id = self.pending_update(Path(directory))
             deployment_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service-deployment/default/{SERVICE}/new'
-            with patch('sky_platform.api.server.AwsExpressAdapter.request_update_rollback',
+            with patch('api.server.AwsExpressAdapter.request_update_rollback',
                        return_value={'service_deployment_arn': deployment_arn, 'state': 'requested'}) as rollback:
                 outcome = app.request_aws_update_rollback(new_id)
             self.assertEqual(outcome['state'], 'requested')
@@ -220,8 +220,8 @@ class AwsReleaseTests(unittest.TestCase):
             self.assertEqual(restarted.jobs[old_id]['deployment_state'], 'needs_attention')
             aws = self.reconcile_aws('ROLLBACK_SUCCESSFUL', deployment_arn,
                                      REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 self.assertEqual(restarted.reconcile_aws_update(new_id)['release'], 'previous')
             self.assertEqual(restarted.jobs[old_id]['deployment_state'], 'active')
 
@@ -265,10 +265,10 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app, first_id, second_id, third_id = self.three_releases(root)
-            with patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.threading.Thread'):
                 app.start_release_rollback(third_id, first_id)
             self.assertEqual(app.jobs[third_id]['release_rollback_target_id'], first_id)
-            with patch('sky_platform.api.server.AwsExpressAdapter.rollback_release', return_value={'state': 'successful'}):
+            with patch('api.server.AwsExpressAdapter.rollback_release', return_value={'state': 'successful'}):
                 app.run_release_rollback(third_id)
             self.assertEqual(app.jobs[first_id]['deployment_state'], 'active')
             self.assertEqual(app.jobs[second_id]['deployment_state'], 'superseded')
@@ -301,7 +301,7 @@ class AwsReleaseTests(unittest.TestCase):
             handler.headers = {'X-Sky-Token': app.token, 'Content-Length': str(len(payload))}
             handler.rfile = io.BytesIO(payload)
             handler.json_response = Mock()
-            with patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.threading.Thread'):
                 handler.do_POST()
             handler.json_response.assert_called_once_with(202,
                 {'id': third_id, 'release_rollback_state': 'running'})
@@ -316,8 +316,8 @@ class AwsReleaseTests(unittest.TestCase):
                 deployment_state='needs_attention')
             app.save(third_id)
             aws = self.reconcile_aws('SUCCESSFUL', 'restored-deployment', app.jobs[first_id]['result']['image'])
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 self.assertEqual(app.reconcile_release_rollback(third_id)['release'], 'previous')
             self.assertEqual(app.jobs[first_id]['deployment_state'], 'active')
             self.assertEqual(app.jobs[second_id]['deployment_state'], 'superseded')
@@ -353,7 +353,7 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app, old_id, new_id = self.completed_release(root)
-            with patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.threading.Thread'):
                 app.start_release_rollback(new_id)
             self.assertEqual(app.jobs[new_id]['release_rollback_state'], 'running')
             with self.assertRaises(ValueError):
@@ -362,7 +362,7 @@ class AwsReleaseTests(unittest.TestCase):
                 checkpoint(release_rollback_submitted=True,
                            release_rollback_previous_deployment_arn='old-deployment')
                 return {'state': 'successful'}
-            with patch('sky_platform.api.server.AwsExpressAdapter.rollback_release', autospec=True, side_effect=rollback):
+            with patch('api.server.AwsExpressAdapter.rollback_release', autospec=True, side_effect=rollback):
                 app.run_release_rollback(new_id)
             self.assertEqual(app.jobs[new_id]['release_rollback_state'], 'succeeded')
             self.assertEqual(app.jobs[new_id]['deployment_state'], 'superseded')
@@ -426,8 +426,8 @@ class AwsReleaseTests(unittest.TestCase):
                                'X-Application-Id': 'my-app'}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('sky_platform.api.server.AwsSettings.unavailable_reason', return_value=None), \
-                    patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.AwsSettings.unavailable_reason', return_value=None), \
+                    patch('api.server.threading.Thread'):
                 handler.do_POST()
             third_id = handler.json_response.call_args.args[1]['id']
             self.assertEqual(app.jobs[third_id]['replaces_job_id'], old_id)
@@ -436,7 +436,7 @@ class AwsReleaseTests(unittest.TestCase):
                             'image': REPOSITORY + ':' + third_id + '-a1',
                             'task_definition_arn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:3',
                             'previous_task_definition_arn': app.jobs[old_id]['result']['task_definition_arn']}
-            with patch('sky_platform.api.server.DeploymentAgent.run', return_value=third_result):
+            with patch('api.server.DeploymentAgent.run', return_value=third_result):
                 app.run_agent(third_id)
             self.assertEqual(app.jobs[old_id]['deployment_state'], 'superseded')
             restarted = App(root, AISettings('fixture-key', 'fixture-model'), aws_settings=AwsSettings(REGION))
@@ -447,19 +447,19 @@ class AwsReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app, old_id, new_id = self.completed_release(root)
-            with patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.threading.Thread'):
                 app.start_release_rollback(new_id)
             def rollback(_adapter, _current, _previous, _health_path, checkpoint):
                 checkpoint(release_rollback_submitted=True,
                            release_rollback_previous_deployment_arn='old-deployment')
                 raise RuntimeError('HTTP verification failed')
-            with patch('sky_platform.api.server.AwsExpressAdapter.rollback_release', autospec=True, side_effect=rollback):
+            with patch('api.server.AwsExpressAdapter.rollback_release', autospec=True, side_effect=rollback):
                 app.run_release_rollback(new_id)
             self.assertEqual(app.jobs[new_id]['release_rollback_state'], 'needs_attention')
             self.assertEqual(app.jobs[new_id]['deployment_state'], 'needs_attention')
             aws = self.reconcile_aws('SUCCESSFUL', 'rollback-deployment', REPOSITORY + ':' + FIRST_ATTEMPT)
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 self.assertEqual(app.reconcile_release_rollback(new_id)['release'], 'previous')
             self.assertEqual(app.jobs[old_id]['deployment_state'], 'active')
 
@@ -477,8 +477,8 @@ class AwsReleaseTests(unittest.TestCase):
                 restarted.ensure_application_available('my-app', 'aws-ecs-express')
             aws = self.reconcile_aws('ROLLBACK_SUCCESSFUL', 'rollback-deployment',
                                      REPOSITORY + ':' + new_id + '-a1')
-            with patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                    patch('sky_platform.api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
+            with patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                    patch('api.server.check_deployment', return_value={'healthy': True, 'reason': 'HTTP 200'}):
                 self.assertEqual(restarted.reconcile_release_rollback(new_id)['release'], 'current')
             self.assertEqual(restarted.jobs[new_id]['deployment_state'], 'active')
             self.assertEqual(restarted.jobs[new_id]['release_rollback_state'], 'failed')
@@ -504,8 +504,8 @@ class AwsReleaseTests(unittest.TestCase):
             ]
             for aws in cases:
                 with self.subTest(aws=aws), \
-                        patch('sky_platform.api.server.AwsExpressAdapter.aws', side_effect=aws), \
-                        patch('sky_platform.api.server.check_deployment') as health:
+                        patch('api.server.AwsExpressAdapter.aws', side_effect=aws), \
+                        patch('api.server.check_deployment') as health:
                     self.assertFalse(app.reconcile_release_rollback(new_id)['reconciled'])
                     health.assert_not_called()
                 self.assertEqual(app.jobs[new_id]['deployment_state'], 'needs_attention')
@@ -539,8 +539,8 @@ class AwsReleaseTests(unittest.TestCase):
                                'X-Application-Id': 'my-app'}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('sky_platform.api.server.AwsSettings.unavailable_reason', return_value=None), \
-                    patch('sky_platform.api.server.threading.Thread'):
+            with patch('api.server.AwsSettings.unavailable_reason', return_value=None), \
+                    patch('api.server.threading.Thread'):
                 handler.do_POST()
             new_id = handler.json_response.call_args.args[1]['id']
             new_job = app.jobs[new_id]
@@ -548,7 +548,7 @@ class AwsReleaseTests(unittest.TestCase):
             self.assertEqual(new_job['replaces_job_id'], FIRST_ID)
             new_result = {**old_result, 'image': REPOSITORY + ':' + new_id + '-a1',
                           'owner_attempt': FIRST_ATTEMPT, 'images': [old_result['image'], REPOSITORY + ':' + new_id + '-a1']}
-            with patch('sky_platform.api.server.DeploymentAgent.run', return_value=new_result):
+            with patch('api.server.DeploymentAgent.run', return_value=new_result):
                 app.run_agent(new_id)
             self.assertEqual(app.jobs[new_id]['status'], 'succeeded')
             self.assertEqual(app.jobs[FIRST_ID]['deployment_state'], 'superseded')

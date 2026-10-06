@@ -8,10 +8,10 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.deployment.cloud import CloudConfigurationError, CloudRunAdapter, CloudRunSettings
-from sky_platform.planning.analysis import AISettings
-from sky_platform.deployment.core import analyze
-from sky_platform.api.server import App
+from deployment.cloud import CloudConfigurationError, CloudRunAdapter, CloudRunSettings
+from planning.analysis import AISettings
+from deployment.core import analyze
+from api.server import App
 from tests.support.agent_fixture import RepairFixture
 
 
@@ -77,7 +77,7 @@ class CloudTests(unittest.TestCase):
         return subprocess.CompletedProcess(args, 0, output, '')
 
     def deploy(self):
-        with patch('sky_platform.deployment.cloud.shutil.which', return_value='/bin/gcloud'), patch('sky_platform.deployment.cloud.subprocess.run', side_effect=self.execute), patch.object(self.adapter, 'verify') as verify:
+        with patch('deployment.cloud.shutil.which', return_value='/bin/gcloud'), patch('deployment.cloud.subprocess.run', side_effect=self.execute), patch.object(self.adapter, 'verify') as verify:
             result = self.adapter.deploy(self.project, self.plan, self.attempt, {'APP_SECRET': 'private-app-value'})
             return result, verify
 
@@ -118,7 +118,7 @@ class CloudTests(unittest.TestCase):
         self.existing_service = True
         with self.assertRaises(CloudConfigurationError):
             self.deploy()
-        with patch('sky_platform.deployment.cloud.subprocess.run', side_effect=self.execute):
+        with patch('deployment.cloud.subprocess.run', side_effect=self.execute):
             self.adapter.cleanup_failure(self.attempt)
         self.assertFalse(any(args[1:3] == ['run', 'deploy'] or 'delete' in args for args, _ in self.commands))
 
@@ -126,7 +126,7 @@ class CloudTests(unittest.TestCase):
         self.fail_deploy = True
         with self.assertRaises(RuntimeError):
             self.deploy()
-        with patch('sky_platform.deployment.cloud.subprocess.run', side_effect=self.execute):
+        with patch('deployment.cloud.subprocess.run', side_effect=self.execute):
             self.adapter.cleanup_failure(self.attempt)
         self.assertTrue(any(args[1:4] == ['run', 'services', 'delete'] for args, _ in self.commands))
         self.assertTrue(any(args[1:5] == ['artifacts', 'docker', 'images', 'delete'] for args, _ in self.commands))
@@ -140,7 +140,7 @@ class CloudTests(unittest.TestCase):
         self.adapter.image = f'{self.settings.region}-docker.pkg.dev/{self.settings.project}/{self.settings.repository}/sky-{self.attempt}:latest'
         self.deployed = True
         self.owner = 'other-attempt'
-        with patch('sky_platform.deployment.cloud.subprocess.run', side_effect=self.execute):
+        with patch('deployment.cloud.subprocess.run', side_effect=self.execute):
             self.adapter.cleanup_failure(self.attempt)
         self.assertFalse(any('delete' in args for args, _ in self.commands))
 
@@ -156,20 +156,20 @@ class CloudTests(unittest.TestCase):
                 self.adapter.validate_url(url)
 
     def test_missing_cli_disables_cloud(self):
-        with patch('sky_platform.deployment.cloud.shutil.which', return_value=None):
+        with patch('deployment.cloud.shutil.which', return_value=None):
             self.assertIn('gcloud', self.settings.unavailable_reason())
             with self.assertRaises(CloudConfigurationError):
                 self.adapter.prepare_infrastructure()
 
     def test_iam_failure_is_not_an_application_retry(self):
-        with patch('sky_platform.deployment.cloud.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'PERMISSION_DENIED')):
+        with patch('deployment.cloud.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'PERMISSION_DENIED')):
             with self.assertRaises(CloudConfigurationError) as raised:
                 self.adapter.gcloud(['services', 'enable', 'run.googleapis.com'], private=True)
         self.assertFalse(raised.exception.retryable)
 
     def test_probe_does_not_follow_redirect_with_identity_token(self):
         error = urllib.error.HTTPError('https://app.run.app/', 302, 'redirect', {'Location': 'https://attacker.example'}, io.BytesIO())
-        with patch('sky_platform.deployment.cloud.urllib.request.build_opener') as opener, patch('sky_platform.deployment.cloud.time.sleep'):
+        with patch('deployment.cloud.urllib.request.build_opener') as opener, patch('deployment.cloud.time.sleep'):
             opener.return_value.open.side_effect = lambda *a, **kw: (_ for _ in ()).throw(error)
             with self.assertRaisesRegex(RuntimeError, 'HTTP 200'):
                 self.adapter.verify('https://app.run.app/', 'private-id')
@@ -178,7 +178,7 @@ class CloudTests(unittest.TestCase):
             self.assertTrue(all(call.args[0].full_url == 'https://app.run.app/' for call in opener.return_value.open.call_args_list))
 
     def test_private_probe_rejects_authorization_failure(self):
-        with patch('sky_platform.deployment.cloud.urllib.request.build_opener') as opener:
+        with patch('deployment.cloud.urllib.request.build_opener') as opener:
             opener.return_value.open.side_effect = urllib.error.HTTPError('https://app.run.app/', 403, 'denied', {}, io.BytesIO())
             with self.assertRaises(CloudConfigurationError):
                 self.adapter.verify('https://app.run.app/', 'private-id')
@@ -219,7 +219,7 @@ class CloudTests(unittest.TestCase):
                             'cloud': self.settings.__dict__, 'plan': None, 'status': 'running',
                             'project': str(source), 'events': [], 'changes': [], 'attempts': 0, 'steps': 0}
         app.save(job_id)
-        with patch('sky_platform.api.server.CloudRunAdapter', CloudFixture):
+        with patch('api.server.CloudRunAdapter', CloudFixture):
             app.run_agent(job_id)
         result = app.jobs[job_id]
         self.assertEqual(result['status'], 'succeeded', result['events'][-1])

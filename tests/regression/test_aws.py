@@ -6,12 +6,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from sky_platform.deployment.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
+from deployment.aws import (AwsConfigurationError, AwsExpressAdapter, AwsSettings,
                            database_configuration_matches, postgres_ssl_environment,
                            service_group_ingress_is_restricted)
-from sky_platform.deployment.core import analyze
-from sky_platform.database.postgres import PostgresRequest
-from sky_platform.database.migrations import MigrationBundle, SqlMigration
+from deployment.core import analyze
+from database.postgres import PostgresRequest
+from database.migrations import MigrationBundle, SqlMigration
 
 
 ACCOUNT = '123456789012'
@@ -42,7 +42,7 @@ class AwsTests(unittest.TestCase):
         with patch.dict(os.environ, {'SKY_AWS_REGION': REGION,
                                       'SKY_AWS_ACCOUNT_ID': ACCOUNT,
                                       'SKY_AWS_SERVICE_SECURITY_GROUP': SERVICE_GROUP}), \
-                patch('sky_platform.deployment.aws.shutil.which', return_value='/usr/bin/tool'):
+                patch('deployment.aws.shutil.which', return_value='/usr/bin/tool'):
             settings = AwsSettings.from_environment()
             self.assertIsNone(settings.unavailable_reason())
         self.assertEqual(settings.expected_account, ACCOUNT)
@@ -56,7 +56,7 @@ class AwsTests(unittest.TestCase):
         def aws(args, **kwargs):
             calls.append(args)
             return json.dumps({'Account': ACCOUNT})
-        with patch('sky_platform.deployment.aws.shutil.which', return_value='/usr/bin/tool'), \
+        with patch('deployment.aws.shutil.which', return_value='/usr/bin/tool'), \
                 patch.object(self.adapter, 'aws', side_effect=aws):
             with self.assertRaisesRegex(AwsConfigurationError, '리소스를 생성하지 않았습니다'):
                 self.adapter.prepare_infrastructure()
@@ -132,7 +132,7 @@ class AwsTests(unittest.TestCase):
         with patch.object(self.adapter, 'validate_service_security_group'), \
                 patch.object(self.adapter, 'prepare_infrastructure',
                              return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build'), \
+                patch('deployment.aws.ImageBuilder.build'), \
                 patch.object(self.adapter, 'command', side_effect=command), \
                 patch.object(self.adapter, 'aws', side_effect=aws), \
                 patch.object(self.adapter, 'verify'):
@@ -180,12 +180,12 @@ class AwsTests(unittest.TestCase):
             return ''
         self.plan.required_env = ['PGHOST', 'PGPASSWORD']
         bundle = MigrationBundle(self.project / 'migrations', (SqlMigration('0001_init.sql', 'a' * 64),), 'b' * 64)
-        with patch('sky_platform.database.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
-                patch('sky_platform.deployment.aws_migrations.AwsMigrationRunner') as migrator, \
+        with patch('database.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
+                patch('deployment.aws_migrations.AwsMigrationRunner') as migrator, \
                 patch.object(adapter, 'validate_service_security_group'), \
                 patch.object(adapter, 'prepare_infrastructure',
                              return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build'), \
+                patch('deployment.aws.ImageBuilder.build'), \
                 patch.object(adapter, 'command', side_effect=command), \
                 patch.object(adapter, 'aws', side_effect=aws), \
                 patch.object(adapter, 'verify'):
@@ -209,7 +209,7 @@ class AwsTests(unittest.TestCase):
     def test_postgres_binding_rejects_wrong_target_before_build(self):
         request = PostgresRequest('demo-app', ACCOUNT, REGION, 'vpc-12345678',
                                   ('subnet-12345678', 'subnet-87654321'), SERVICE_GROUP)
-        with patch('sky_platform.deployment.aws.ImageBuilder.build') as build:
+        with patch('deployment.aws.ImageBuilder.build') as build:
             with self.assertRaisesRegex(AwsConfigurationError, '계정·리전'):
                 self.adapter.deploy(self.project, self.plan, ATTEMPT, postgres=request)
             build.assert_not_called()
@@ -220,7 +220,7 @@ class AwsTests(unittest.TestCase):
         adapter = AwsExpressAdapter(lambda *_: None,
                                     AwsSettings(REGION, expected_account=ACCOUNT,
                                                 service_security_group=SERVICE_GROUP))
-        with patch('sky_platform.database.postgres.AwsPostgresProvisioner.inspect_current') as inspect:
+        with patch('database.postgres.AwsPostgresProvisioner.inspect_current') as inspect:
             with self.assertRaisesRegex(ValueError, '배포 시스템이 설정'):
                 adapter.deploy(self.project, self.plan, ATTEMPT,
                                environment={'PGSSLROOTCERT': '/tmp/untrusted.pem'}, postgres=request)
@@ -229,7 +229,7 @@ class AwsTests(unittest.TestCase):
     def test_postgres_release_cannot_drop_existing_binding(self):
         adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION),
                                     existing={'database': {'database_id': 'sky-demo-app'}})
-        with patch('sky_platform.deployment.aws.ImageBuilder.build') as build:
+        with patch('deployment.aws.ImageBuilder.build') as build:
             with self.assertRaisesRegex(AwsConfigurationError, 'PostgreSQL 연결 구성'):
                 adapter.deploy(self.project, self.plan, ATTEMPT)
             build.assert_not_called()
@@ -314,11 +314,11 @@ class AwsTests(unittest.TestCase):
                 return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
             raise AssertionError(args)
 
-        with patch('sky_platform.database.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
+        with patch('database.postgres.AwsPostgresProvisioner.inspect_current', return_value=database), \
                 patch.object(adapter, 'validate_service_security_group'), \
                 patch.object(adapter, 'prepare_infrastructure',
                              return_value=(ACCOUNT, REPOSITORY, 'base-execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build'), \
+                patch('deployment.aws.ImageBuilder.build'), \
                 patch.object(adapter, 'command', return_value='unix:///var/run/docker.sock'), \
                 patch.object(adapter, 'aws', side_effect=aws), \
                 patch.object(adapter, 'verify'):
@@ -342,7 +342,7 @@ class AwsTests(unittest.TestCase):
         adapter = AwsExpressAdapter(lambda *_: None, AwsSettings(REGION), existing=prior)
         with patch.object(adapter, 'prepare_infrastructure',
                           return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build') as build:
+                patch('deployment.aws.ImageBuilder.build') as build:
             with self.assertRaisesRegex(AwsConfigurationError, '리소스 정보'):
                 adapter.deploy(self.project, self.plan, 'b' * 16 + '-a1')
             build.assert_not_called()
@@ -360,7 +360,7 @@ class AwsTests(unittest.TestCase):
             if args[:2] == ['cloudformation', 'describe-stacks']:
                 return json.dumps({'Stacks': [{'StackStatus': 'CREATE_COMPLETE', 'Outputs': outputs}]})
             return ''
-        with patch('sky_platform.deployment.aws.shutil.which', return_value='/usr/bin/tool'), patch.object(self.adapter, 'aws', side_effect=aws):
+        with patch('deployment.aws.shutil.which', return_value='/usr/bin/tool'), patch.object(self.adapter, 'aws', side_effect=aws):
             result = self.adapter.prepare_infrastructure()
         self.assertEqual(result[1], REPOSITORY)
         deploy = next(args for args in calls if args[:2] == ['cloudformation', 'deploy'])
@@ -415,9 +415,9 @@ class AwsTests(unittest.TestCase):
             raise AssertionError(args)
         self.plan.required_env = ['APP_SECRET']
         with patch.object(self.adapter, 'prepare_infrastructure', return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build'), patch.object(self.adapter, 'command', side_effect=command), \
+                patch('deployment.aws.ImageBuilder.build'), patch.object(self.adapter, 'command', side_effect=command), \
                 patch.object(self.adapter, 'aws', side_effect=aws), patch.object(self.adapter, 'verify') as verify, \
-                patch('sky_platform.deployment.aws.time.sleep'):
+                patch('deployment.aws.time.sleep'):
             result = self.adapter.deploy(self.project, self.plan, ATTEMPT, {'APP_SECRET': 'synthetic-value'})
         self.assertEqual(result['url'], url)
         self.assertEqual(result['service_arn'], ARN)
@@ -458,7 +458,7 @@ class AwsTests(unittest.TestCase):
                     'tags': [{'key': 'sky-managed', 'value': 'true'},
                              {'key': 'sky-attempt', 'value': ATTEMPT}]}})
             return '{}'
-        with patch.object(self.adapter, 'aws', side_effect=aws), patch('sky_platform.deployment.aws.time.sleep'):
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('deployment.aws.time.sleep'):
             self.adapter.cleanup_failure(ATTEMPT)
         self.assertLess(next(i for i, call in enumerate(calls)
                              if call[:2] == ['ecs', 'delete-express-gateway-service']),
@@ -495,7 +495,7 @@ class AwsTests(unittest.TestCase):
                     'tags': [{'key': 'sky-managed', 'value': 'true'},
                              {'key': 'sky-attempt', 'value': ATTEMPT}]}})
             raise AssertionError(args)
-        with patch.object(self.adapter, 'aws', side_effect=aws), patch('sky_platform.deployment.aws.time.sleep'):
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('deployment.aws.time.sleep'):
             self.adapter.cleanup_failure(ATTEMPT)
         self.assertFalse(any(call[:2] == ['ecr', 'batch-delete-image'] for call in calls))
         self.assertTrue(any(stage == 'cleanup' and '보존' in message for stage, message in self.events))
@@ -533,7 +533,7 @@ class AwsTests(unittest.TestCase):
             if args[:2] == ['ecr', 'batch-delete-image']:
                 return json.dumps({'failures': []})
             return '{}'
-        with patch.object(self.adapter, 'aws', side_effect=aws), patch('sky_platform.deployment.aws.time.sleep'):
+        with patch.object(self.adapter, 'aws', side_effect=aws), patch('deployment.aws.time.sleep'):
             self.assertEqual(self.adapter.retire(result, ATTEMPT)['state'], 'deleted')
         self.assertLess(next(i for i, args in enumerate(calls) if args[:2] == ['ecs', 'delete-express-gateway-service']),
                         next(i for i, args in enumerate(calls) if args[:2] == ['ecr', 'batch-delete-image']))
@@ -611,9 +611,9 @@ class AwsTests(unittest.TestCase):
                 return 'unix:///var/run/docker.sock'
             return ''
         with patch.object(adapter, 'prepare_infrastructure', return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
-                patch('sky_platform.deployment.aws.ImageBuilder.build'), patch.object(adapter, 'command', side_effect=command), \
+                patch('deployment.aws.ImageBuilder.build'), patch.object(adapter, 'command', side_effect=command), \
                 patch.object(adapter, 'aws', side_effect=aws), patch.object(adapter, 'verify') as verify, \
-                patch('sky_platform.deployment.aws.time.sleep'):
+                patch('deployment.aws.time.sleep'):
             result = adapter.deploy(self.project, self.plan, second_attempt)
         self.assertEqual(result['url'], url)
         self.assertEqual(result['service'], SERVICE)

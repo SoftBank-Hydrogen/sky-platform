@@ -1,6 +1,6 @@
 import pytest
 
-from sky_platform.contract import (
+from contract import (
     AppRequirements,
     Artifact,
     ArtifactKind,

@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from sky_platform.deployment.aws import AwsConfigurationError
-from sky_platform.database.postgres import AwsPostgresProvisioner
+from deployment.aws import AwsConfigurationError
+from database.postgres import AwsPostgresProvisioner
 from tests.live.smoke_aws_postgres_rollback_drill import (retire_before_create,
                                                       start_after_stable_preflight)
 

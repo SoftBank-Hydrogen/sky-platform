@@ -13,11 +13,11 @@ import sys
 import time
 from pathlib import Path
 
-from sky_platform.deployment.aws import AwsSettings
-from sky_platform.deployment.aws_network import (AwsServiceNetworkProvisioner,
+from deployment.aws import AwsSettings
+from deployment.aws_network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from sky_platform.database.postgres import AwsPostgresProvisioner, PostgresRequest
-from sky_platform.database.postgres_operations import PostgresOperations
+from database.postgres import AwsPostgresProvisioner, PostgresRequest
+from database.postgres_operations import PostgresOperations
 from tests.live.smoke_aws_network import retire_probe
 from tests.live.smoke_aws_postgres_cleanup import apply as cleanup_database
 from tests.live.smoke_aws_restore_marker_source import save, save_new

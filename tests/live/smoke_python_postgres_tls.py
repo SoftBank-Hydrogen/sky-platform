@@ -14,8 +14,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from sky_platform.deployment.core import ImageBuilder, make_plan
-from sky_platform.database.migrations import collect_sql_migrations
+from deployment.core import ImageBuilder, make_plan
+from database.migrations import collect_sql_migrations
 
 
 def command(args):

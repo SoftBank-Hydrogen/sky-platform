@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sky_platform.deployment.aws import AwsConfigurationError, AwsSettings
-from sky_platform.database.postgres_restore_instance import RestoreInstance
+from deployment.aws import AwsConfigurationError, AwsSettings
+from database.postgres_restore_instance import RestoreInstance
 
 
 APP = 'demo-app'
@@ -35,12 +35,12 @@ class RestoreInstanceTests(unittest.TestCase):
                                  {'Key': 'sky-source-snapshot', 'Value': SNAPSHOT}]}
 
     def test_preflight_requires_existing_owned_group(self):
-        with patch('sky_platform.database.postgres_restore_instance.plan_restore_drill',
+        with patch('database.postgres_restore_instance.plan_restore_drill',
                    return_value={'vpc_id': VPC}), \
                 patch.object(self.restore.network, 'inspect',
                              return_value={'group_id': GROUP}):
             self.assertEqual(self.restore.preflight()['restore_security_group_id'], GROUP)
-        with patch('sky_platform.database.postgres_restore_instance.plan_restore_drill',
+        with patch('database.postgres_restore_instance.plan_restore_drill',
                    return_value={'vpc_id': VPC}), \
                 patch.object(self.restore.network, 'inspect',
                              return_value={'group_id': 'sg-99999999'}):
@@ -54,7 +54,7 @@ class RestoreInstanceTests(unittest.TestCase):
         def aws(args, **_kwargs):
             commands.append(args)
             return json.dumps({'DBInstance': self.db})
-        with patch('sky_platform.database.postgres_restore_instance.plan_restore_drill',
+        with patch('database.postgres_restore_instance.plan_restore_drill',
                    return_value=plan), patch.object(self.restore.network, 'inspect',
                    return_value={'group_id': GROUP}), patch.object(self.restore.adapter,
                    'aws', side_effect=aws):
@@ -68,7 +68,7 @@ class RestoreInstanceTests(unittest.TestCase):
         self.assertNotIn('--storage-type', command)
 
     def test_create_refuses_vpc_mismatch_before_restore_call(self):
-        with patch('sky_platform.database.postgres_restore_instance.plan_restore_drill',
+        with patch('database.postgres_restore_instance.plan_restore_drill',
                    return_value={'vpc_id': 'vpc-99999999'}), \
                 patch.object(self.restore.network, 'inspect',
                              return_value={'group_id': GROUP}), \
@@ -93,7 +93,7 @@ class RestoreInstanceTests(unittest.TestCase):
                 self.restore.inspect()
 
     def test_probe_inspection_accepts_only_verified_temporary_link(self):
-        with patch('sky_platform.database.postgres_restore_instance.RestoreProbeNetwork.inspect',
+        with patch('database.postgres_restore_instance.RestoreProbeNetwork.inspect',
                    return_value={'status': 'open'}) as link, \
                 patch.object(self.restore, '_inspect_instance',
                              return_value={'status': 'available'}):

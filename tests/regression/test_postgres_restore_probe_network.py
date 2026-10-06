@@ -2,9 +2,9 @@ import json
 import unittest
 from unittest.mock import patch
 
-from sky_platform.deployment.aws import AwsConfigurationError
-from sky_platform.database.postgres_restore_network import RestoreNetworkRequest
-from sky_platform.database.postgres_restore_probe_network import RestoreProbeNetwork
+from deployment.aws import AwsConfigurationError
+from database.postgres_restore_network import RestoreNetworkRequest
+from database.postgres_restore_probe_network import RestoreProbeNetwork
 
 
 ACCOUNT = '123456789012'

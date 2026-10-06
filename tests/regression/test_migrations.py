@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sky_platform.database.migrations import collect_sql_migrations, stage_migrator_context
+from database.migrations import collect_sql_migrations, stage_migrator_context
 
 
 class MigrationBundleTests(unittest.TestCase):

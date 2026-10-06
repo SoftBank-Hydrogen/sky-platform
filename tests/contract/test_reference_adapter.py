@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import pytest
 
-from sky_platform.contract import (
+from contract import (
     AppRequirements,
     Blocker,
     DataRequirement,

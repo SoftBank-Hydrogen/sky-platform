@@ -3,7 +3,7 @@ import {createRequire} from 'node:module';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
-const {verifyRestoredData} = require('../../src/sky_platform/assets/infra/postgres-restore-verifier.js');
+const {verifyRestoredData} = require('../../src/assets/infra/postgres-restore-verifier.js');
 const checksum = 'a'.repeat(64);
 const manifest = {migrations: [{name: '0001_init.sql', sha256: checksum}]};
 

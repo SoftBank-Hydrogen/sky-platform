@@ -5,7 +5,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from sky_platform.deployment.core import LocalDockerAdapter, analyze, extract_project
+from deployment.core import LocalDockerAdapter, analyze, extract_project
 
 
 def main():

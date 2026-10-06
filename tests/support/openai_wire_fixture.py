@@ -6,7 +6,7 @@ import json
 import threading
 import urllib.request
 
-from sky_platform.planning.agent import COMPACT_AGENT_REQUEST_BYTES
+from planning.agent import COMPACT_AGENT_REQUEST_BYTES
 
 
 class ResponsesWireFixture:
