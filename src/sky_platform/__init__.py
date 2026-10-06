@@ -1,1 +1,1 @@
-"""Sky deployment platform."""
+"""sky 배포 플랫폼."""
