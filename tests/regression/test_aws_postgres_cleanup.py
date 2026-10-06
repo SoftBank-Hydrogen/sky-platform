@@ -2,8 +2,8 @@
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError
-from database.postgres import PostgresRequest
+from adapters.aws.ecs import AwsConfigurationError
+from adapters.aws.postgres import PostgresRequest
 from tests.live.smoke_aws_postgres_cleanup import _db_users, plan
 
 

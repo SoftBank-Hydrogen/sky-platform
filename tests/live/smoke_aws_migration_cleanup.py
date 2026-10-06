@@ -9,9 +9,9 @@ import secrets
 import tempfile
 from pathlib import Path
 
-from deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from deployment.aws_migrations import cleanup_interrupted_migration, inspect_migration_task
-from database.postgres import PostgresRequest
+from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from adapters.aws.migrations import cleanup_interrupted_migration, inspect_migration_task
+from adapters.aws.postgres import PostgresRequest
 
 
 def save(path: Path, record: dict) -> None:

@@ -5,8 +5,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from planning.agent import AgentError, DeploymentAgent, DeploymentTools
-from database.postgres import PostgresRequest
+from application.agent import AgentError, DeploymentAgent, DeploymentTools
+from adapters.aws.postgres import PostgresRequest
 from tests.live.smoke_aws_postgres_api import PostgresFixture, archive
 
 

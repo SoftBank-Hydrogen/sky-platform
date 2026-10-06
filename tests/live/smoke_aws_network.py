@@ -6,10 +6,10 @@ import json
 import re
 import secrets
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from deployment.aws_network import (AwsServiceNetworkProvisioner,
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from database.postgres import postgres_settings_for_application
+from adapters.aws.postgres import postgres_settings_for_application
 
 
 def retire_probe(provisioner: AwsServiceNetworkProvisioner, expected_stack: str,

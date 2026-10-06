@@ -10,9 +10,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from api.server import App, handler_for
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_postgres_api import archive
 
 
@@ -35,10 +35,10 @@ def run() -> dict:
         raise AssertionError('Unexpected AWS command in local drill: ' + repr(args))
 
     with tempfile.TemporaryDirectory(prefix='sky-auto-db-browser-') as directory, \
-            patch('api.server.discover_existing_postgres', return_value=database) as discover, \
-            patch('api.server.AwsPostgresProvisioner.inspect_current',
+            patch('interfaces.http.server.discover_existing_postgres', return_value=database) as discover, \
+            patch('interfaces.http.server.AwsPostgresProvisioner.inspect_current',
                   return_value=database) as inspect, \
-            patch('deployment.aws.AwsExpressAdapter.aws', autospec=True,
+            patch('adapters.aws.ecs.AwsExpressAdapter.aws', autospec=True,
                   side_effect=reject_aws), \
             patch.object(AwsSettings, 'unavailable_reason', return_value=None):
         root = Path(directory)

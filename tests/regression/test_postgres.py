@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from database.postgres import (AwsPostgresProvisioner, PostgresRequest, TEMPLATE,
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.postgres import (AwsPostgresProvisioner, PostgresRequest, TEMPLATE,
                                 discover_existing_postgres, inspect_postgres_backup_status, main)
 
 
@@ -74,8 +74,8 @@ class PostgresTests(unittest.TestCase):
                     'DBInstanceArn': DB_ARN, 'BackupRetentionPeriod': 7,
                     'LatestRestorableTime': '2026-10-12T00:00:00Z'}]})
             return json.dumps({'DBSnapshots': snapshots})
-        with patch('database.postgres.discover_existing_postgres', return_value=database), \
-                patch('database.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws):
+        with patch('adapters.aws.postgres.discover_existing_postgres', return_value=database), \
+                patch('adapters.aws.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws):
             result = inspect_postgres_backup_status('demo-app', settings)
         self.assertEqual(result['backup_retention_days'], 7)
         self.assertEqual(result['database_status'], 'available')
@@ -93,8 +93,8 @@ class PostgresTests(unittest.TestCase):
                     'DBInstanceIdentifier': 'sky-demo-app',
                     'DBSnapshotArn': f'arn:aws:rds:{REGION}:{ACCOUNT}:snapshot:sky-demo-app-before-migration',
                     'SnapshotType': 'manual', 'Status': 'creating', 'Encrypted': True}
-        with patch('database.postgres.discover_existing_postgres', return_value=database), \
-                patch('database.postgres.AwsExpressAdapter.aws', side_effect=[
+        with patch('adapters.aws.postgres.discover_existing_postgres', return_value=database), \
+                patch('adapters.aws.postgres.AwsExpressAdapter.aws', side_effect=[
                     json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'sky-demo-app',
                         'DBInstanceArn': DB_ARN, 'BackupRetentionPeriod': 7}]}),
                     json.dumps({'DBSnapshots': [snapshot]})]):
@@ -107,8 +107,8 @@ class PostgresTests(unittest.TestCase):
                                service_security_group=SERVICE_GROUP)
         database = {'database_id': 'sky-demo-app', 'deletion_protection': True,
                     'retained_on_stack_delete': True}
-        with patch('database.postgres.discover_existing_postgres', return_value=database), \
-                patch('database.postgres.AwsExpressAdapter.aws', side_effect=[
+        with patch('adapters.aws.postgres.discover_existing_postgres', return_value=database), \
+                patch('adapters.aws.postgres.AwsExpressAdapter.aws', side_effect=[
                     json.dumps({'DBInstances': [{'DBInstanceIdentifier': 'sky-demo-app',
                         'DBInstanceArn': DB_ARN, 'BackupRetentionPeriod': 7}]}),
                     json.dumps({'DBSnapshots': [{'DBSnapshotIdentifier': 'foreign',
@@ -149,7 +149,7 @@ class PostgresTests(unittest.TestCase):
             raise AssertionError(args)
         price = {'baseline_730h_usd': '20.87'}
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
-                patch('database.postgres.estimate_postgres_base_capacity', return_value=price):
+                patch('adapters.aws.postgres.estimate_postgres_base_capacity', return_value=price):
             result = self.provisioner.preflight()
         self.assertEqual(result['availability_zones'], ['a', 'b'])
         self.assertEqual(result['database_availability_zone'], 'a')
@@ -170,7 +170,7 @@ class PostgresTests(unittest.TestCase):
                 result['OrderableDBInstanceOptions'][0]['StorageType'] = 'gp2'
             return json.dumps(result)
         with patch.object(self.provisioner.adapter, 'aws', side_effect=wrong_storage), \
-                patch('database.postgres.estimate_postgres_base_capacity') as pricing:
+                patch('adapters.aws.postgres.estimate_postgres_base_capacity') as pricing:
             with self.assertRaisesRegex(AwsConfigurationError, 'gp3'):
                 self.provisioner.preflight()
             pricing.assert_not_called()
@@ -205,7 +205,7 @@ class PostgresTests(unittest.TestCase):
                     'AvailabilityZones': [{'Name': 'a'}]}]})
             raise AssertionError(args)
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws), \
-                patch('database.postgres.estimate_postgres_base_capacity',
+                patch('adapters.aws.postgres.estimate_postgres_base_capacity',
                       return_value={'baseline_730h_usd': '20.87'}):
             result = self.provisioner.preflight()
             self.assertEqual(result['engine_version'], '17.5')
@@ -433,8 +433,8 @@ class PostgresTests(unittest.TestCase):
         verified = {'database_id': 'sky-demo-app', 'engine_version': '18.3',
                     'status': 'available', 'deletion_protection': True,
                     'retained_on_stack_delete': True, 'secret_arn': SECRET}
-        with patch('database.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
-                patch('database.postgres.AwsPostgresProvisioner.inspect_current',
+        with patch('adapters.aws.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
+                patch('adapters.aws.postgres.AwsPostgresProvisioner.inspect_current',
                       return_value=verified) as inspect:
             result = discover_existing_postgres('demo-app', settings)
         self.assertEqual(calls[1][:4], ['rds', 'describe-db-instances',
@@ -446,7 +446,7 @@ class PostgresTests(unittest.TestCase):
     def test_discovery_rejects_wrong_account_before_database_read(self):
         settings = AwsSettings(REGION, expected_account=ACCOUNT,
                                service_security_group=SERVICE_GROUP)
-        with patch('database.postgres.AwsExpressAdapter.aws',
+        with patch('adapters.aws.postgres.AwsExpressAdapter.aws',
                    return_value=json.dumps({'Account': '999999999999'})) as aws:
             with self.assertRaisesRegex(AwsConfigurationError, '계정'):
                 discover_existing_postgres('demo-app', settings)
@@ -463,10 +463,10 @@ class PostgresTests(unittest.TestCase):
         verified = {'database_id': 'sky-demo-app', 'engine_version': '18.3',
                     'status': 'available', 'deletion_protection': True,
                     'retained_on_stack_delete': True}
-        with patch('database.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
-                patch('database.postgres.AwsServiceNetworkProvisioner.inspect_current',
+        with patch('adapters.aws.postgres.AwsExpressAdapter.aws', autospec=True, side_effect=aws), \
+                patch('adapters.aws.postgres.AwsServiceNetworkProvisioner.inspect_current',
                       return_value={'service_security_group': SERVICE_GROUP}) as network, \
-                patch('database.postgres.AwsPostgresProvisioner.inspect_current',
+                patch('adapters.aws.postgres.AwsPostgresProvisioner.inspect_current',
                       return_value=verified) as inspect:
             result = discover_existing_postgres('demo-app', settings)
         self.assertEqual(network.call_args.args, ())
@@ -477,9 +477,9 @@ class PostgresTests(unittest.TestCase):
         arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
                      '--vpc-id', VPC, '--subnet-id', SUBNETS[0], '--subnet-id', SUBNETS[1],
                      '--service-security-group', SERVICE_GROUP]
-        with patch('database.postgres.AwsPostgresProvisioner.preflight',
+        with patch('adapters.aws.postgres.AwsPostgresProvisioner.preflight',
                    return_value={'account': ACCOUNT}), \
-                patch('database.postgres.AwsPostgresProvisioner.create') as create:
+                patch('adapters.aws.postgres.AwsPostgresProvisioner.create') as create:
             main(arguments)
             create.assert_not_called()
 
@@ -487,10 +487,10 @@ class PostgresTests(unittest.TestCase):
         arguments = ['--application', 'demo-app', '--account', ACCOUNT, '--region', REGION,
                      '--vpc-id', VPC, '--subnet-id', SUBNETS[0], '--subnet-id', SUBNETS[1],
                      '--service-security-group', SERVICE_GROUP, '--inspect']
-        with patch('database.postgres.AwsPostgresProvisioner.inspect_current',
+        with patch('adapters.aws.postgres.AwsPostgresProvisioner.inspect_current',
                    return_value={'status': 'available'}) as inspect, \
-                patch('database.postgres.AwsPostgresProvisioner.preflight') as preflight, \
-                patch('database.postgres.AwsPostgresProvisioner.create') as create:
+                patch('adapters.aws.postgres.AwsPostgresProvisioner.preflight') as preflight, \
+                patch('adapters.aws.postgres.AwsPostgresProvisioner.create') as create:
             main(arguments)
         inspect.assert_called_once_with()
         preflight.assert_not_called()

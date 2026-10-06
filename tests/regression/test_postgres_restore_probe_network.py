@@ -2,9 +2,9 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError
-from database.postgres_restore_network import RestoreNetworkRequest
-from database.postgres_restore_probe_network import RestoreProbeNetwork
+from adapters.aws.ecs import AwsConfigurationError
+from adapters.aws.postgres_restore_network import RestoreNetworkRequest
+from adapters.aws.postgres_restore_probe_network import RestoreProbeNetwork
 
 
 ACCOUNT = '123456789012'

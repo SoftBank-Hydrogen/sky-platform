@@ -12,11 +12,11 @@ import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from deployment.aws_network import (AwsServiceNetworkProvisioner,
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from adapters.aws.network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from api.server import App, handler_for
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_network import retire_probe
 
 

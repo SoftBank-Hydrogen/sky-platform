@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from database.postgres_restore_credentials import plan_restore_credentials
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.postgres_restore_credentials import plan_restore_credentials
 
 
 APP = 'demo-app'
@@ -39,11 +39,11 @@ class RestoreCredentialTests(unittest.TestCase):
         def aws(_adapter, args, **_kwargs):
             calls.append(args[:2])
             return json.dumps(replies.pop(0))
-        with patch('database.postgres_restore_credentials.inspect_snapshot',
+        with patch('adapters.aws.postgres_restore_credentials.inspect_snapshot',
                    return_value={'snapshot_arn': SNAPSHOT_ARN, 'status': 'available'}), \
-                patch('database.postgres_restore_credentials.discover_existing_postgres',
+                patch('adapters.aws.postgres_restore_credentials.discover_existing_postgres',
                       return_value={'database_id': SOURCE, 'vpc_id': 'vpc-12345678'}), \
-                patch('database.postgres_restore_credentials.AwsExpressAdapter.aws',
+                patch('adapters.aws.postgres_restore_credentials.AwsExpressAdapter.aws',
                       autospec=True, side_effect=aws):
             result = plan_restore_credentials(APP, SNAPSHOT, TARGET, self.settings)
         return result, calls

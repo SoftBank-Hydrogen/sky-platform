@@ -6,8 +6,8 @@ import json
 import re
 from pathlib import Path
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from database.postgres import AwsPostgresProvisioner, PostgresRequest
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.postgres import AwsPostgresProvisioner, PostgresRequest
 from tests.live.smoke_aws_restore_marker_source import save, save_new
 
 

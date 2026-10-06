@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from database.postgres_restore import plan_restore_drill
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.postgres_restore import plan_restore_drill
 
 
 APP = 'demo-app'
@@ -43,12 +43,12 @@ class RestorePlanTests(unittest.TestCase):
         def aws(_adapter, args, **_kwargs):
             calls.append(args[:2])
             return json.dumps(responses.pop(0))
-        with patch('database.postgres_restore.inspect_snapshot', return_value=self.owned), \
-                patch('database.postgres_restore.discover_existing_postgres',
+        with patch('adapters.aws.postgres_restore.inspect_snapshot', return_value=self.owned), \
+                patch('adapters.aws.postgres_restore.discover_existing_postgres',
                       return_value=self.source), \
-                patch('database.postgres_restore.AwsExpressAdapter.aws', autospec=True,
+                patch('adapters.aws.postgres_restore.AwsExpressAdapter.aws', autospec=True,
                       side_effect=aws), \
-                patch('database.postgres_restore.estimate_postgres_base_capacity',
+                patch('adapters.aws.postgres_restore.estimate_postgres_base_capacity',
                       return_value={'baseline_730h_usd': '20.87'}):
             result = plan_restore_drill(APP, SNAPSHOT, TARGET, self.settings)
         self.assertEqual(result['target_database_id'], TARGET)
@@ -61,17 +61,17 @@ class RestorePlanTests(unittest.TestCase):
                                  ['rds', 'describe-db-instances']])
 
     def test_existing_target_or_wrong_snapshot_network_blocks_plan(self):
-        with patch('database.postgres_restore.inspect_snapshot', return_value=self.owned), \
-                patch('database.postgres_restore.discover_existing_postgres',
+        with patch('adapters.aws.postgres_restore.inspect_snapshot', return_value=self.owned), \
+                patch('adapters.aws.postgres_restore.discover_existing_postgres',
                       return_value=self.source), \
-                patch('database.postgres_restore.AwsExpressAdapter.aws', side_effect=[
+                patch('adapters.aws.postgres_restore.AwsExpressAdapter.aws', side_effect=[
                     json.dumps({'DBSnapshots': [{**self.snapshot, 'VpcId': 'vpc-99999999'}]})]):
             with self.assertRaisesRegex(AwsConfigurationError, '스냅샷'):
                 plan_restore_drill(APP, SNAPSHOT, TARGET, self.settings)
-        with patch('database.postgres_restore.inspect_snapshot', return_value=self.owned), \
-                patch('database.postgres_restore.discover_existing_postgres',
+        with patch('adapters.aws.postgres_restore.inspect_snapshot', return_value=self.owned), \
+                patch('adapters.aws.postgres_restore.discover_existing_postgres',
                       return_value=self.source), \
-                patch('database.postgres_restore.AwsExpressAdapter.aws', side_effect=[
+                patch('adapters.aws.postgres_restore.AwsExpressAdapter.aws', side_effect=[
                     json.dumps({'DBSnapshots': [self.snapshot]}),
                     json.dumps({'DBInstances': [self.instance]}),
                     json.dumps({'DBInstances': [self.instance,
@@ -80,7 +80,7 @@ class RestorePlanTests(unittest.TestCase):
                 plan_restore_drill(APP, SNAPSHOT, TARGET, self.settings)
 
     def test_target_name_is_constrained_before_aws_calls(self):
-        with patch('database.postgres_restore.inspect_snapshot') as inspect:
+        with patch('adapters.aws.postgres_restore.inspect_snapshot') as inspect:
             with self.assertRaisesRegex(ValueError, '복원 대상 ID'):
                 plan_restore_drill(APP, SNAPSHOT, SOURCE_ID, self.settings)
         inspect.assert_not_called()

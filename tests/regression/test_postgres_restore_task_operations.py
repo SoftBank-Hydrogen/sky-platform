@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from database.migrations import collect_sql_migrations
-from database.postgres_restore_task_operations import RestoreVerificationOperations
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.database.migrations import collect_sql_migrations
+from application.postgres_restore_task_operations import RestoreVerificationOperations
 
 
 ACCOUNT = '123456789012'
@@ -50,9 +50,9 @@ class RestoreVerificationOperationTests(unittest.TestCase):
             runner.checkpoint('launched', task_arn=TASK)
             runner.checkpoint('cleaned')
             return {'cleanup': {'status': 'cleaned'}}
-        with patch('database.postgres_restore_task_operations.secrets.token_hex',
+        with patch('application.postgres_restore_task_operations.secrets.token_hex',
                    return_value='a' * 16), \
-                patch('database.postgres_restore_task_operations.RestoreVerifierRunner.execute',
+                patch('application.postgres_restore_task_operations.RestoreVerifierRunner.execute',
                       autospec=True, side_effect=execute):
             result = operations.start(self.plan, self.bundle)
         self.assertEqual(result['status'], 'succeeded')
@@ -69,9 +69,9 @@ class RestoreVerificationOperationTests(unittest.TestCase):
             runner.checkpoint('registered', task_definition_arn=DEFINITION)
             runner.checkpoint('launching')
             raise AwsConfigurationError('unknown')
-        with patch('database.postgres_restore_task_operations.secrets.token_hex',
+        with patch('application.postgres_restore_task_operations.secrets.token_hex',
                    return_value='a' * 16), \
-                patch('database.postgres_restore_task_operations.RestoreVerifierRunner.execute',
+                patch('application.postgres_restore_task_operations.RestoreVerifierRunner.execute',
                       autospec=True, side_effect=fail):
             with self.assertRaisesRegex(AwsConfigurationError, 'unknown'):
                 operations.start(self.plan, self.bundle)
@@ -85,7 +85,7 @@ class RestoreVerificationOperationTests(unittest.TestCase):
             if args[:2] == ['ecr', 'list-images']:
                 return json.dumps({'imageIds': [{'imageTag': 'restore-verify-' + 'a' * 16}]})
             return json.dumps({'taskDefinitionArns': [DEFINITION]})
-        with patch('database.postgres_restore_task_operations.AwsExpressAdapter.aws',
+        with patch('application.postgres_restore_task_operations.AwsExpressAdapter.aws',
                    autospec=True, side_effect=aws):
             result = restarted.reconcile(TARGET)
         self.assertEqual(result['status'], 'needs_attention')
@@ -102,9 +102,9 @@ class RestoreVerificationOperationTests(unittest.TestCase):
             runner.checkpoint('registered', task_definition_arn=DEFINITION)
             runner.checkpoint('launched', task_arn=TASK)
             raise AwsConfigurationError('unknown')
-        with patch('database.postgres_restore_task_operations.secrets.token_hex',
+        with patch('application.postgres_restore_task_operations.secrets.token_hex',
                    return_value='a' * 16), \
-                patch('database.postgres_restore_task_operations.RestoreVerifierRunner.execute',
+                patch('application.postgres_restore_task_operations.RestoreVerifierRunner.execute',
                       autospec=True, side_effect=fail):
             with self.assertRaises(AwsConfigurationError):
                 operations.start(self.plan, self.bundle)
@@ -119,9 +119,9 @@ class RestoreVerificationOperationTests(unittest.TestCase):
                 return json.dumps({'taskDefinitionArns': []})
             return json.dumps({'taskDefinition': {'taskDefinitionArn': DEFINITION,
                                                    'status': 'INACTIVE'}})
-        with patch('database.postgres_restore_task_operations.AwsExpressAdapter.aws',
+        with patch('application.postgres_restore_task_operations.AwsExpressAdapter.aws',
                    autospec=True, side_effect=aws), \
-                patch('database.postgres_restore_task_operations.RestoreVerifierRunner.inspect_result',
+                patch('application.postgres_restore_task_operations.RestoreVerifierRunner.inspect_result',
                       return_value={'status': 'succeeded', 'log_stream': 'verified'}):
             result = operations.reconcile(TARGET)
         self.assertEqual(result['status'], 'succeeded')

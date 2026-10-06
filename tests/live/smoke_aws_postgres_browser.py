@@ -17,11 +17,11 @@ from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from database.postgres import discover_existing_postgres
-from database.postgres_snapshot import inspect_snapshot, plan_snapshot
-from api.server import App, handler_for
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from adapters.aws.postgres import discover_existing_postgres
+from adapters.aws.postgres_snapshot import inspect_snapshot, plan_snapshot
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_postgres_api import PostgresFixture, archive
 from tests.live.smoke_aws_postgres import probe, probe_version
 

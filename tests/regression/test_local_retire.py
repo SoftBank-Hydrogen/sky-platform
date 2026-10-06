@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from deployment.core import LocalDockerAdapter
-from api.server import App, handler_for
+from application.deployment_core import LocalDockerAdapter
+from interfaces.http.server import App, handler_for
 
 
 JOB_ID = 'd' * 16
@@ -63,14 +63,14 @@ class LocalRetireTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_retire_api_and_restart_retry(self):
-        with patch('api.server.threading.Thread') as thread:
+        with patch('interfaces.http.server.threading.Thread') as thread:
             self.handler.do_POST()
             self.handler.json_response.assert_called_once_with(
                 202, {'id': JOB_ID, 'deployment_state': 'deleting'})
             thread.assert_called_once()
         recovered = App(self.app.root)
         self.assertEqual(recovered.jobs[JOB_ID]['deployment_state'], 'delete_failed')
-        with patch('api.server.LocalDockerAdapter.retire') as retire:
+        with patch('interfaces.http.server.LocalDockerAdapter.retire') as retire:
             recovered.retire_local(JOB_ID)
             retire.assert_called_once()
         self.assertEqual(recovered.jobs[JOB_ID]['deployment_state'], 'deleted')
@@ -89,12 +89,12 @@ class LocalRetireTests(unittest.TestCase):
         self.handler.path = f'/api/jobs/{JOB_ID}/retire'
         self.handler.headers = {'X-Sky-Token': recovered.token, 'Content-Length': '0'}
         self.handler.json_response = Mock()
-        with patch('api.server.threading.Thread') as thread:
+        with patch('interfaces.http.server.threading.Thread') as thread:
             self.handler.do_POST()
         self.handler.json_response.assert_called_once_with(
             202, {'id': JOB_ID, 'deployment_state': 'deleting'})
         thread.assert_called_once()
-        with patch('api.server.LocalDockerAdapter.retire') as retire:
+        with patch('interfaces.http.server.LocalDockerAdapter.retire') as retire:
             recovered.retire_local(JOB_ID)
         self.assertEqual([call.args[0]['container'] for call in retire.call_args_list],
                          [f'sky-{JOB_ID}-a1', f'sky-{JOB_ID}-a2'])
@@ -116,7 +116,7 @@ class LocalRetireTests(unittest.TestCase):
             command.assert_not_called()
         self.assertEqual(job['deployment_state'], 'delete_failed')
         self.assertIn('ownership changed', job['retire_error'])
-        with patch('api.server.threading.Thread') as thread:
+        with patch('interfaces.http.server.threading.Thread') as thread:
             self.handler.do_POST()
         self.assertEqual(job['deployment_state'], 'deleting')
         thread.assert_called_once()
@@ -125,7 +125,7 @@ class LocalRetireTests(unittest.TestCase):
         job = self.app.jobs[JOB_ID]
         job.update(status='interrupted', attempts=0)
         job.pop('result')
-        with patch('api.server.threading.Thread') as thread:
+        with patch('interfaces.http.server.threading.Thread') as thread:
             self.handler.do_POST()
         self.handler.json_response.assert_called_once_with(409, {'error': '종료할 수 있는 배포가 아닙니다.'})
         thread.assert_not_called()

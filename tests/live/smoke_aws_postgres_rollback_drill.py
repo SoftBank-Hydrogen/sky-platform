@@ -17,14 +17,14 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-import database.postgres as postgres
-from planning.analysis import AISettings
-from deployment.aws import AwsConfigurationError, AwsSettings
-from deployment.aws_network import (AwsServiceNetworkProvisioner,
+import adapters.aws.postgres as postgres
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from database.postgres import AwsPostgresProvisioner, PostgresRequest
-from database.postgres_operations import PostgresOperations
-from api.server import App, handler_for
+from adapters.aws.postgres import AwsPostgresProvisioner, PostgresRequest
+from application.postgres_operations import PostgresOperations
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_network import retire_probe
 from tests.live.smoke_aws_restore_marker_source import save, save_new
 

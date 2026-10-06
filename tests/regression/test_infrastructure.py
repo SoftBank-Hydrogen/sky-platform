@@ -7,17 +7,17 @@ import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from planning.agent import DeploymentTools
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from planning.infrastructure import (InfrastructureProfile, deployment_access_mode,
+from application.agent import DeploymentTools
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from application.infrastructure import (InfrastructureProfile, deployment_access_mode,
                                       explicit_infrastructure_plan,
                                       infrastructure_compatibility, inspect_infrastructure,
                                       validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
-from api.server import App, handler_for
-from deployment.core import analyze
-from database.migrations import collect_sql_migrations
+from interfaces.http.server import App, handler_for
+from application.deployment_core import analyze
+from adapters.database.migrations import collect_sql_migrations
 
 
 class InfrastructureTests(unittest.TestCase):
@@ -87,7 +87,7 @@ class InfrastructureTests(unittest.TestCase):
                                'X-Deploy-Target': 'aws-ecs-express', 'X-Public-Access': 'true'}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.AwsSettings.unavailable_reason', return_value=None):
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value=None):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 400)
             self.assertIn('linux/arm64', handler.json_response.call_args.args[1]['error'])
@@ -108,7 +108,7 @@ class InfrastructureTests(unittest.TestCase):
                                'X-Deploy-Target': 'local-docker', 'X-Public-Access': 'true'}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.threading.Thread'):
+            with patch('interfaces.http.server.threading.Thread'):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 202)
             job = app.jobs[handler.json_response.call_args.args[1]['id']]
@@ -155,7 +155,7 @@ class InfrastructureTests(unittest.TestCase):
                     'rationale': '로컬 검증', 'evidence': [{'file': 'package.json', 'quote': 'start'}]}
         response = {'status': 'completed', 'output': [{'type': 'message', 'content': [
             {'type': 'output_text', 'text': json.dumps(proposal)}]}]}
-        with patch('planning.infrastructure.urllib.request.build_opener') as opener:
+        with patch('application.infrastructure.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(json.dumps(response).encode())
             result = OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
                 {'package.json': 'start'}, ['local-docker'], False)
@@ -166,7 +166,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(json.loads(payload['input'])['available_targets'], ['local-docker'])
 
     def test_planner_keeps_response_size_limit_error(self):
-        with patch('planning.infrastructure.urllib.request.build_opener') as opener:
+        with patch('application.infrastructure.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'x' * (1024 * 1024 + 1))
             with self.assertRaisesRegex(ValueError, '응답 크기 제한'):
                 OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
@@ -179,9 +179,9 @@ class InfrastructureTests(unittest.TestCase):
             {'type': 'output_text', 'text': json.dumps(proposal)}]}]}
         failure = urllib.error.HTTPError('https://api.openai.com/v1/responses', 500,
             'server error', {}, io.BytesIO(b'{}'))
-        with patch('planning.infrastructure.urllib.request.build_opener') as opener, \
-                patch('planning.openai_http.time.sleep'), \
-                patch('planning.openai_http.random.uniform', return_value=0):
+        with patch('application.infrastructure.urllib.request.build_opener') as opener, \
+                patch('adapters.ai.openai_http.time.sleep'), \
+                patch('adapters.ai.openai_http.random.uniform', return_value=0):
             opener.return_value.open.side_effect = [failure, io.BytesIO(json.dumps(response).encode())]
             result = OpenAIInfrastructurePlanner(AISettings('fixture-key', 'fixture-model')).propose(
                 {'package.json': 'start'}, ['local-docker'], False)
@@ -373,8 +373,8 @@ class InfrastructureTests(unittest.TestCase):
                                'Content-Length': str(len(archive.getvalue()))}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.uuid.uuid4') as uuid4, \
-                    patch('api.server.plan_infrastructure', side_effect=ValueError('AI 계획 실패')):
+            with patch('interfaces.http.server.uuid.uuid4') as uuid4, \
+                    patch('interfaces.http.server.plan_infrastructure', side_effect=ValueError('AI 계획 실패')):
                 uuid4.return_value.hex = 'a' * 32
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 400)
@@ -395,9 +395,9 @@ class InfrastructureTests(unittest.TestCase):
                                'Content-Length': str(len(archive.getvalue()))}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.uuid.uuid4') as uuid4, \
+            with patch('interfaces.http.server.uuid.uuid4') as uuid4, \
                     patch.object(app, 'save', side_effect=RuntimeError('기록 저장 실패')), \
-                    patch('api.server.threading.Thread.start') as worker:
+                    patch('interfaces.http.server.threading.Thread.start') as worker:
                 uuid4.return_value.hex = 'b' * 32
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 400)
@@ -419,7 +419,7 @@ class InfrastructureTests(unittest.TestCase):
                                'Content-Length': str(len(archive.getvalue()))}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.threading.Thread.start', side_effect=RuntimeError('no thread')):
+            with patch('interfaces.http.server.threading.Thread.start', side_effect=RuntimeError('no thread')):
                 handler.do_POST()
             status, payload = handler.json_response.call_args.args
             self.assertEqual((status, payload['status']), (202, 'interrupted'))
@@ -432,7 +432,7 @@ class InfrastructureTests(unittest.TestCase):
             source = Path(stored['project']) / 'server.js'
             original = source.read_text()
             source.write_text('changed after upload')
-            with patch('api.server.threading.Thread.start') as worker:
+            with patch('interfaces.http.server.threading.Thread.start') as worker:
                 with self.assertRaisesRegex(ValueError, '소스가 변경'):
                     restored.resume_unstarted_deployment(payload['id'])
                 worker.assert_not_called()
@@ -445,7 +445,7 @@ class InfrastructureTests(unittest.TestCase):
                 restored.resume_unstarted_deployment(payload['id'])
             restored.jobs[payload['id']].update(status='interrupted', steps=1)
             restored.save(payload['id'])
-            with patch('api.server.threading.Thread.start') as worker:
+            with patch('interfaces.http.server.threading.Thread.start') as worker:
                 with self.assertRaisesRegex(ValueError, '안전하게 재개'):
                     restored.resume_unstarted_deployment(payload['id'])
                 worker.assert_not_called()
@@ -491,8 +491,8 @@ class InfrastructureTests(unittest.TestCase):
                                'Content-Length': str(len(archive.getvalue()))}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.uuid.uuid4') as uuid4, \
-                    patch('api.server.analyze_project', side_effect=ValueError('분석 실패')):
+            with patch('interfaces.http.server.uuid.uuid4') as uuid4, \
+                    patch('interfaces.http.server.analyze_project', side_effect=ValueError('분석 실패')):
                 uuid4.return_value.hex = 'e' * 32
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 400)
@@ -571,8 +571,8 @@ class InfrastructureTests(unittest.TestCase):
                                'X-Deploy-Target': 'auto', 'X-Public-Access': 'true'}
             handler.rfile = io.BytesIO(archive.getvalue())
             handler.json_response = Mock()
-            with patch('api.server.AwsSettings.unavailable_reason', return_value=None), \
-                    patch('api.server.threading.Thread'):
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value=None), \
+                    patch('interfaces.http.server.threading.Thread'):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 202)
             job = app.jobs[handler.json_response.call_args.args[1]['id']]
@@ -590,7 +590,7 @@ class InfrastructureTests(unittest.TestCase):
             private_handler.headers = {**handler.headers, 'X-Public-Access': 'false'}
             private_handler.rfile = io.BytesIO(archive.getvalue())
             private_handler.json_response = Mock()
-            with patch('api.server.AwsSettings.unavailable_reason', return_value=None):
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value=None):
                 private_handler.do_POST()
             self.assertEqual(private_handler.json_response.call_args.args[0], 400)
             self.assertIn('사용할 수 없는', private_handler.json_response.call_args.args[1]['error'])

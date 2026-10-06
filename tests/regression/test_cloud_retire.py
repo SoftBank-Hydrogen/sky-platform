@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from deployment.cloud import CloudRunAdapter, CloudRunSettings
-from api.server import App, handler_for
+from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
+from interfaces.http.server import App, handler_for
 
 
 JOB_ID = 'e' * 16
@@ -107,14 +107,14 @@ class CloudRetireTests(unittest.TestCase):
             handler.path = f'/api/jobs/{JOB_ID}/retire'
             handler.headers = {'X-Sky-Token': app.token, 'Content-Length': '0'}
             handler.json_response = Mock()
-            with patch('api.server.threading.Thread') as thread:
+            with patch('interfaces.http.server.threading.Thread') as thread:
                 handler.do_POST()
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'deleting')
             self.assertEqual(thread.call_args.kwargs['target'], app.retire_cloud)
-            with patch('api.server.CloudRunAdapter.retire', side_effect=RuntimeError('gcloud failed')):
+            with patch('interfaces.http.server.CloudRunAdapter.retire', side_effect=RuntimeError('gcloud failed')):
                 app.retire_cloud(JOB_ID)
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'delete_failed')
-            with patch('api.server.CloudRunAdapter.retire'):
+            with patch('interfaces.http.server.CloudRunAdapter.retire'):
                 app.retire_cloud(JOB_ID)
             self.assertEqual(app.jobs[JOB_ID]['deployment_state'], 'deleted')
 

@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.support.agent_fixture import call
-from planning.analysis import AISettings
-from deployment.core import LocalDockerAdapter, source_digest
-from api.server import App, handler_for
+from application.analysis import AISettings
+from application.deployment_core import LocalDockerAdapter, source_digest
+from interfaces.http.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
@@ -136,7 +136,7 @@ class AgentResumeTests(unittest.TestCase):
                                'Content-Length': str(len(payload))}
             handler.rfile = io.BytesIO(payload)
             handler.json_response = Mock()
-            with patch('api.server.threading.Thread.start') as start:
+            with patch('interfaces.http.server.threading.Thread.start') as start:
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 409)
             self.assertEqual(app.jobs[job_id]['status'], 'waiting_input')
@@ -177,7 +177,7 @@ class AgentResumeTests(unittest.TestCase):
             def fail_start(thread):
                 captured.append(thread._args[1])
                 raise RuntimeError('no thread')
-            with patch('api.server.threading.Thread.start', autospec=True,
+            with patch('interfaces.http.server.threading.Thread.start', autospec=True,
                        side_effect=fail_start):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args,

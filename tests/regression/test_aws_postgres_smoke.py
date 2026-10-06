@@ -5,7 +5,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from deployment.core import source_digest
+from application.deployment_core import source_digest
 from tests.live.smoke_aws_postgres import main
 
 

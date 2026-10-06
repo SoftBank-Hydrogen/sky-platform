@@ -15,10 +15,10 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from deployment.aws import AwsExpressAdapter, AwsSettings
-from deployment.core import analyze
-from database.migrations import collect_sql_migrations
-from database.postgres import AwsPostgresProvisioner, PostgresRequest
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from application.deployment_core import analyze
+from adapters.database.migrations import collect_sql_migrations
+from adapters.aws.postgres import AwsPostgresProvisioner, PostgresRequest
 
 
 def probe(url: str, key: str, record_id: str, method: str) -> dict:

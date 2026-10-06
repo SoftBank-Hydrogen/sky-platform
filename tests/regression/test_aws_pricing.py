@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from deployment.aws_pricing import estimate_postgres_base_capacity
+from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from adapters.aws.pricing import estimate_postgres_base_capacity
 
 
 REGION = 'ap-northeast-2'

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from api.server import App
+from interfaces.http.server import App
 
 
 JOB_ID = 'f' * 16
@@ -28,7 +28,7 @@ class MonitorTests(unittest.TestCase):
     def test_automatic_failure_is_persisted_without_changing_deployment_result(self):
         finding = {'healthy': False, 'checked_at': '2026-09-30T00:00:00+00:00',
                    'reason': 'Service did not return HTTP 200'}
-        with patch('api.server.check_deployment', return_value=finding) as check:
+        with patch('interfaces.http.server.check_deployment', return_value=finding) as check:
             self.app.monitor_once()
             check.assert_called_once()
         self.assertEqual(self.app.jobs[JOB_ID]['status'], 'succeeded')
@@ -45,7 +45,7 @@ class MonitorTests(unittest.TestCase):
         self.app.jobs[other_id] = {'id': other_id, 'mode': 'agent', 'project': str(source),
                                    'status': 'running', 'target': 'local-docker',
                                    'application_id': 'monitor-app', 'events': []}
-        with patch('api.server.check_deployment') as check:
+        with patch('interfaces.http.server.check_deployment') as check:
             self.app.monitor_once()
             check.assert_not_called()
             self.app.jobs.pop(other_id)
@@ -56,8 +56,8 @@ class MonitorTests(unittest.TestCase):
     def test_monitor_record_failure_does_not_downgrade_successful_job(self):
         finding = {'healthy': True, 'checked_at': '2026-09-30T00:00:00+00:00',
                    'reason': 'HTTP 200 confirmed'}
-        with patch('api.server.check_deployment', return_value=finding), \
-                patch('api.server.tempfile.mkstemp', side_effect=OSError('disk full')):
+        with patch('interfaces.http.server.check_deployment', return_value=finding), \
+                patch('interfaces.http.server.tempfile.mkstemp', side_effect=OSError('disk full')):
             self.assertEqual(self.app.check_and_record_health(JOB_ID), finding)
         self.assertEqual(self.app.jobs[JOB_ID]['status'], 'succeeded')
         self.assertNotIn(JOB_ID, self.app.health_history)
@@ -69,7 +69,7 @@ class MonitorTests(unittest.TestCase):
         def check(_snapshot):
             self.app.jobs[JOB_ID]['deployment_state'] = 'deleted'
             return finding
-        with patch('api.server.check_deployment', side_effect=check):
+        with patch('interfaces.http.server.check_deployment', side_effect=check):
             self.assertEqual(self.app.check_and_record_health(JOB_ID), finding)
         self.assertNotIn(JOB_ID, self.app.health_history)
 
@@ -81,7 +81,7 @@ class MonitorTests(unittest.TestCase):
             self.app.jobs[other_id] = {'id': other_id, 'application_id': 'monitor-app',
                                        'target': 'local-docker', 'status': 'running'}
             return finding
-        with patch('api.server.check_deployment', side_effect=check):
+        with patch('interfaces.http.server.check_deployment', side_effect=check):
             self.assertEqual(self.app.check_and_record_health(JOB_ID, 'automatic'), finding)
         self.assertNotIn(JOB_ID, self.app.health_history)
 

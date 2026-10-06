@@ -15,13 +15,13 @@ import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from deployment.aws_network import (AwsServiceNetworkProvisioner,
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from adapters.aws.network import (AwsServiceNetworkProvisioner,
                                    ServiceNetworkRequest, discover_default_network)
-from database.postgres import AwsPostgresProvisioner, PostgresRequest
-from database.postgres_snapshot import inspect_snapshot
-from api.server import App, handler_for
+from adapters.aws.postgres import AwsPostgresProvisioner, PostgresRequest
+from adapters.aws.postgres_snapshot import inspect_snapshot
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_network import retire_probe
 from tests.live.smoke_aws_postgres import probe
 from tests.live.smoke_aws_postgres_api import PostgresFixture, archive

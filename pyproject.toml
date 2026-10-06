@@ -34,5 +34,5 @@ norecursedirs = ["tests/live", "fixtures"]
 [tool.ruff]
 line-length = 110
 target-version = "py312"
-# 가져온 런타임과 회귀 테스트는 단계적으로 포맷 규칙을 적용한다.
-extend-exclude = ["src/api", "src/planning", "src/deployment", "src/database", "tests/regression", "tests/live", "tests/support", "tests/fixtures"]
+# 기존 런타임은 동작을 유지하며 옮겼다. 새 순수 계층에는 포맷 규칙을 적용한다.
+extend-exclude = ["src/application", "src/adapters", "src/interfaces/http", "tests/regression", "tests/live", "tests/support", "tests/fixtures"]

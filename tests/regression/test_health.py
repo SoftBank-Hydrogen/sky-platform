@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from api.health import check_deployment
-from api.server import App, handler_for
+from application.health import check_deployment
+from interfaces.http.server import App, handler_for
 
 
 JOB_ID = 'a' * 16
@@ -24,8 +24,8 @@ class HealthTests(unittest.TestCase):
         job = self.local_job()
         inspect = [{'State': {'Running': True}, 'Config': {'Labels': {'app': 'sky'},
                                                           'Image': job['result']['image']}}]
-        with patch('api.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')) as command, \
-                patch('api.health.probe', return_value=True) as probe:
+        with patch('application.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')) as command, \
+                patch('application.health.probe', return_value=True) as probe:
             self.assertTrue(check_deployment(job)['healthy'])
         command.assert_called_once_with(['docker', 'inspect', job['result']['container']],
                                         capture_output=True, text=True, timeout=10)
@@ -35,14 +35,14 @@ class HealthTests(unittest.TestCase):
         job = self.local_job()
         inspect = [{'State': {'Running': True}, 'Config': {'Labels': {'app': 'other'},
                                                           'Image': job['result']['image']}}]
-        with patch('api.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')), \
-                patch('api.health.probe') as probe:
+        with patch('application.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')), \
+                patch('application.health.probe') as probe:
             self.assertFalse(check_deployment(job)['healthy'])
             probe.assert_not_called()
         job['result']['url'] = 'http://example.com:49152'
         inspect[0]['Config']['Labels']['app'] = 'sky'
-        with patch('api.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')), \
-                patch('api.health.probe') as probe:
+        with patch('application.health.subprocess.run', return_value=subprocess.CompletedProcess([], 0, json.dumps(inspect), '')), \
+                patch('application.health.probe') as probe:
             self.assertFalse(check_deployment(job)['healthy'])
             probe.assert_not_called()
 
@@ -60,8 +60,8 @@ class HealthTests(unittest.TestCase):
                         'status': {'url': url}}
         def gcloud(_, args, **kwargs):
             return json.dumps(service_data) if args[1] == 'services' else 'identity-token'
-        with patch('api.health.CloudRunAdapter.gcloud', autospec=True, side_effect=gcloud), \
-                patch('api.health.probe', return_value=True) as probe:
+        with patch('application.health.CloudRunAdapter.gcloud', autospec=True, side_effect=gcloud), \
+                patch('application.health.probe', return_value=True) as probe:
             self.assertTrue(check_deployment(job)['healthy'])
             probe.assert_called_once_with(url + '/health', 'identity-token')
             service_data['metadata']['labels']['sky-managed'] = 'false'
@@ -78,7 +78,7 @@ class HealthTests(unittest.TestCase):
             handler.path = f'/api/jobs/{JOB_ID}/health'
             handler.headers = {'X-Sky-Token': app.token}
             handler.json_response = Mock()
-            with patch('api.server.check_deployment', return_value={'healthy': True}) as check:
+            with patch('interfaces.http.server.check_deployment', return_value={'healthy': True}) as check:
                 handler.do_GET()
                 handler.json_response.assert_called_once_with(200, {'healthy': True})
                 check.assert_called_once()
@@ -101,8 +101,8 @@ class HealthTests(unittest.TestCase):
                                              {'key': 'sky-attempt', 'value': JOB_ID + '-a1'}],
                                     'activeConfigurations': [{'primaryContainer': {'image': image},
                                         'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}]}}
-        with patch('api.health.AwsExpressAdapter.aws', side_effect=lambda *_, **__: json.dumps(service_data)), \
-                patch('api.health.probe', return_value=True) as probe:
+        with patch('application.health.AwsExpressAdapter.aws', side_effect=lambda *_, **__: json.dumps(service_data)), \
+                patch('application.health.probe', return_value=True) as probe:
             self.assertTrue(check_deployment(job)['healthy'])
             probe.assert_called_once_with(url + '/health')
             service_data['service']['tags'][0]['value'] = 'false'
@@ -128,9 +128,9 @@ class HealthTests(unittest.TestCase):
             'tags': [{'key': 'sky-managed', 'value': 'true'},
                      {'key': 'sky-attempt', 'value': JOB_ID + '-a1'}],
             'activeConfigurations': [active]}}
-        with patch('api.health.AwsExpressAdapter.aws',
+        with patch('application.health.AwsExpressAdapter.aws',
                    side_effect=lambda *_, **__: json.dumps(service_data)), \
-                patch('api.health.probe', return_value=True):
+                patch('application.health.probe', return_value=True):
             self.assertTrue(check_deployment(job)['healthy'])
             active['networkConfiguration']['securityGroups'] = []
             self.assertFalse(check_deployment(job)['healthy'])
@@ -152,8 +152,8 @@ class HealthTests(unittest.TestCase):
                      {'key': 'sky-attempt', 'value': owner_attempt}],
             'activeConfigurations': [{'primaryContainer': {'image': image},
                 'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}]}}
-        with patch('api.health.AwsExpressAdapter.aws', return_value=json.dumps(service_data)), \
-                patch('api.health.probe', return_value=True):
+        with patch('application.health.AwsExpressAdapter.aws', return_value=json.dumps(service_data)), \
+                patch('application.health.probe', return_value=True):
             self.assertTrue(check_deployment(job)['healthy'])
         job['deployment_state'] = 'superseded'
         self.assertFalse(check_deployment(job)['healthy'])
@@ -177,9 +177,9 @@ class HealthTests(unittest.TestCase):
             'tags': [{'key': 'sky-managed', 'value': 'true'},
                      {'key': 'sky-attempt', 'value': JOB_ID + '-a1'}],
             'activeConfigurations': [active]}}
-        with patch('api.health.AwsExpressAdapter.aws',
+        with patch('application.health.AwsExpressAdapter.aws',
                    side_effect=lambda *_, **__: json.dumps(service_data)), \
-                patch('api.health.probe', return_value=True) as probe:
+                patch('application.health.probe', return_value=True) as probe:
             self.assertTrue(check_deployment(job)['healthy'])
             service_data['service']['currentDeployment'] = 'in-progress'
             self.assertFalse(check_deployment(job)['healthy'])
@@ -206,9 +206,9 @@ class HealthTests(unittest.TestCase):
             'activeConfigurations': [{'primaryContainer': {'image': image},
                 'ingressPaths': [{'accessType': 'PUBLIC',
                                   'endpoint': f'other.ecs.ap-northeast-2.on.aws'}]}]}}
-        with patch('api.health.AwsExpressAdapter.aws',
+        with patch('application.health.AwsExpressAdapter.aws',
                    side_effect=lambda *_, **__: json.dumps(service_data)), \
-                patch('api.health.probe', return_value=True) as probe:
+                patch('application.health.probe', return_value=True) as probe:
             self.assertFalse(check_deployment(job)['healthy'])
             probe.assert_not_called()
             service_data['service']['activeConfigurations'][0]['ingressPaths'] = [

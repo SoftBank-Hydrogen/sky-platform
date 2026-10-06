@@ -10,16 +10,16 @@ import uuid
 
 import pytest
 
-from contract import (
+from domain import (
     AppRequirements,
     Artifact,
     ArtifactKind,
     DataRequirement,
     DeployRequest,
     ExecutionMode,
-    TargetAdapter,
     VerificationStatus,
 )
+from ports import TargetAdapter
 
 DIGEST = "sha256:" + "a" * 64
 

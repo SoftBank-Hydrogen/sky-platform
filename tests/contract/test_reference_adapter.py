@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import pytest
 
-from contract import (
+from domain import (
     AppRequirements,
     Blocker,
     DataRequirement,

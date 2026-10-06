@@ -1,6 +1,6 @@
 import pytest
 
-from contract import (
+from domain import (
     AppRequirements,
     Artifact,
     ArtifactKind,

@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from planning.analysis import AISettings
-from deployment.core import extract_project, folder_upload_to_zip
-from api.server import App, handler_for
+from application.analysis import AISettings
+from application.deployment_core import extract_project, folder_upload_to_zip
+from interfaces.http.server import App, handler_for
 
 
 BOUNDARY = 'sky-test-boundary'
@@ -61,7 +61,7 @@ class FolderUploadTests(unittest.TestCase):
                                'Content-Length': str(len(body)), 'X-Application-Id': 'my-app'}
             handler.rfile = io.BytesIO(body)
             handler.json_response = Mock()
-            with patch('api.server.threading.Thread'):
+            with patch('interfaces.http.server.threading.Thread'):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 202)
             job_id = handler.json_response.call_args.args[1]['id']

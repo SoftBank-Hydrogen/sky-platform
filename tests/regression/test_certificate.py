@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from planning.analysis import AISettings
-from api.certificate import deployment_certificate
-from api.server import App, handler_for
+from application.analysis import AISettings
+from application.certificate import deployment_certificate
+from interfaces.http.server import App, handler_for
 
 
 class CertificateTests(unittest.TestCase):

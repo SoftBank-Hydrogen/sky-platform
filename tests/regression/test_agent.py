@@ -10,10 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.support.agent_fixture import RepairFixture, call
-from planning.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES, COMPACT_AGENT_REQUEST_BYTES
-from planning.analysis import AISettings
-from deployment.core import LocalDockerAdapter
-from api.server import App
+from application.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES, COMPACT_AGENT_REQUEST_BYTES
+from application.analysis import AISettings
+from application.deployment_core import LocalDockerAdapter
+from interfaces.http.server import App
 
 
 class AgentTests(unittest.TestCase):
@@ -63,7 +63,7 @@ class AgentTests(unittest.TestCase):
         self.tools.read_project_files(['server.js'])
         plan = object()
         self.tools.plan = plan
-        with patch('planning.agent.os.replace', side_effect=OSError('write failed')):
+        with patch('application.agent.os.replace', side_effect=OSError('write failed')):
             with self.assertRaisesRegex(OSError, 'write failed'):
                 self.tools.apply_project_patch('server.js', "'127.0.0.1'", "'0.0.0.0'")
         self.assertEqual(target.read_bytes(), before)
@@ -107,7 +107,7 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn('large.js', self.tools.read_versions)
 
     def test_oversized_agent_history_is_rejected_before_api_call(self):
-        with patch('planning.agent.urllib.request.build_opener') as opener:
+        with patch('application.agent.urllib.request.build_opener') as opener:
             with self.assertRaisesRegex(AgentError, '1 MiB'):
                 OpenAIDeployAgent(AISettings('fake', 'model')).next([
                     {'role': 'user', 'content': 'x' * MAX_AGENT_REQUEST_BYTES}])
@@ -117,7 +117,7 @@ class AgentTests(unittest.TestCase):
         history = [{'role': 'user', 'content': 'x' * COMPACT_AGENT_REQUEST_BYTES}]
         compacted = [{'type': 'compaction', 'id': 'cmp_1', 'encrypted_content': 'opaque-state'}]
         completion = {'status': 'completed', 'output': call('read_runtime_logs', {})}
-        with patch('planning.agent.urllib.request.build_opener') as opener:
+        with patch('application.agent.urllib.request.build_opener') as opener:
             opener.return_value.open.side_effect = [
                 io.BytesIO(json.dumps({'object': 'response.compaction', 'output': compacted}).encode()),
                 io.BytesIO(json.dumps(completion).encode()),
@@ -135,7 +135,7 @@ class AgentTests(unittest.TestCase):
 
     def test_invalid_compaction_keeps_history_and_stops_before_next_model_call(self):
         history = [{'role': 'user', 'content': 'x' * COMPACT_AGENT_REQUEST_BYTES}]
-        with patch('planning.agent.urllib.request.build_opener') as opener:
+        with patch('application.agent.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'{"output": []}')
             with self.assertRaisesRegex(AgentError, '압축 응답 형식'):
                 OpenAIDeployAgent(AISettings('fake', 'model')).next(history)
@@ -147,7 +147,7 @@ class AgentTests(unittest.TestCase):
         unsupported = urllib.error.HTTPError('https://api.openai.com/v1/responses/compact',
             400, 'unsupported', {}, io.BytesIO(b'{}'))
         completion = {'status': 'completed', 'output': call('read_runtime_logs', {})}
-        with patch('planning.agent.urllib.request.build_opener') as opener:
+        with patch('application.agent.urllib.request.build_opener') as opener:
             opener.return_value.open.side_effect = [
                 unsupported, io.BytesIO(json.dumps(completion).encode()),
                 io.BytesIO(json.dumps(completion).encode())]
@@ -284,7 +284,7 @@ class AgentTests(unittest.TestCase):
 
     def test_tool_protocol_preserves_reasoning_items(self):
         output = [{'type': 'reasoning', 'encrypted_content': 'opaque'}, *call('read_runtime_logs', {})]
-        with patch('planning.agent.urllib.request.build_opener') as opener:
+        with patch('application.agent.urllib.request.build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(json.dumps({'status': 'completed', 'output': output}).encode())
             result = OpenAIDeployAgent(AISettings('fake', 'model')).next([{'role': 'user', 'content': 'deploy'}])
             payload = json.loads(opener.return_value.open.call_args.args[0].data)
@@ -297,7 +297,7 @@ class AgentTests(unittest.TestCase):
         body = {'status': 'incomplete',
                 'incomplete_details': {'reason': 'max_output_tokens'},
                 'output': call('deploy_application', {})}
-        with patch('planning.agent.urllib.request.build_opener') as opener, \
+        with patch('application.agent.urllib.request.build_opener') as opener, \
                 patch.object(LocalDockerAdapter, 'deploy') as deploy:
             opener.return_value.open.return_value = io.BytesIO(json.dumps(body).encode())
             with self.assertRaisesRegex(AgentError, '토큰 한도'):
@@ -311,9 +311,9 @@ class AgentTests(unittest.TestCase):
                                              'error': {'code': 'slow_down'}}).encode()))
         output = call('read_runtime_logs', {})
         success = io.BytesIO(json.dumps({'status': 'completed', 'output': output}).encode())
-        with patch('planning.agent.urllib.request.build_opener') as opener, \
-                patch('planning.openai_http.time.sleep') as sleep, \
-                patch('planning.openai_http.random.uniform', return_value=0.1):
+        with patch('application.agent.urllib.request.build_opener') as opener, \
+                patch('adapters.ai.openai_http.time.sleep') as sleep, \
+                patch('adapters.ai.openai_http.random.uniform', return_value=0.1):
             opener.return_value.open.side_effect = [failure, success]
             result = OpenAIDeployAgent(AISettings('fake', 'model')).next(
                 [{'role': 'user', 'content': 'deploy'}])
@@ -329,8 +329,8 @@ class AgentTests(unittest.TestCase):
                 failure = urllib.error.HTTPError('https://api.openai.com/v1/responses',
                     status, 'unavailable', headers,
                     io.BytesIO(json.dumps({'error': {'code': code}}).encode()))
-                with patch('planning.agent.urllib.request.build_opener') as opener, \
-                        patch('planning.openai_http.time.sleep') as sleep:
+                with patch('application.agent.urllib.request.build_opener') as opener, \
+                        patch('adapters.ai.openai_http.time.sleep') as sleep:
                     opener.return_value.open.side_effect = failure
                     with self.assertRaisesRegex(AgentError, f'HTTP {status}'):
                         OpenAIDeployAgent(AISettings('fake', 'model')).next(
@@ -341,8 +341,8 @@ class AgentTests(unittest.TestCase):
     def test_server_error_retries_only_once(self):
         failures = [urllib.error.HTTPError('https://api.openai.com/v1/responses',
                     500, 'server error', {}, io.BytesIO(b'{}')) for _ in range(2)]
-        with patch('planning.agent.urllib.request.build_opener') as opener, \
-                patch('planning.openai_http.time.sleep') as sleep:
+        with patch('application.agent.urllib.request.build_opener') as opener, \
+                patch('adapters.ai.openai_http.time.sleep') as sleep:
             opener.return_value.open.side_effect = failures
             with self.assertRaisesRegex(AgentError, '일시 오류 HTTP 500'):
                 OpenAIDeployAgent(AISettings('fake', 'model')).next(

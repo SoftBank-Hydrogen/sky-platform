@@ -5,8 +5,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import Mock
 
-from planning.analysis import AISettings
-from api.server import App, handler_for
+from application.analysis import AISettings
+from interfaces.http.server import App, handler_for
 
 
 def archive(files):

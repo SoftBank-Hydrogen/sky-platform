@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database.migrations import collect_sql_migrations
-from database.postgres_restore_verifier import stage_restore_verifier_context
+from adapters.database.migrations import collect_sql_migrations
+from adapters.aws.postgres_restore_verifier import stage_restore_verifier_context
 
 
 class RestoreVerifierContextTests(unittest.TestCase):

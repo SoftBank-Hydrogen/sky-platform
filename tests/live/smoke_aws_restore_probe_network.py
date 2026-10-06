@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import secrets
 
-from database.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
-from database.postgres_restore_probe_network import RestoreProbeNetwork
+from adapters.aws.postgres_restore_network import RestoreNetworkRequest, RestoreSecurityGroup
+from adapters.aws.postgres_restore_probe_network import RestoreProbeNetwork
 
 
 def main(argv=None) -> None:

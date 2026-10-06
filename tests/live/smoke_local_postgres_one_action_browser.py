@@ -12,10 +12,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from planning.analysis import AISettings
-from deployment.aws import AwsSettings
-from database.postgres import PostgresRequest
-from api.server import App, handler_for
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsSettings
+from adapters.aws.postgres import PostgresRequest
+from interfaces.http.server import App, handler_for
 from tests.live.smoke_aws_postgres_api import archive
 
 
@@ -55,18 +55,18 @@ def run(*, fail_create: bool = False, wait_input: bool = False,
         raise AssertionError('Unexpected AWS command in local drill: ' + repr(args))
 
     with tempfile.TemporaryDirectory(prefix='sky-one-action-browser-') as directory, \
-            patch('database.postgres.AwsExpressAdapter.aws', autospec=True,
+            patch('adapters.aws.postgres.AwsExpressAdapter.aws', autospec=True,
                   side_effect=reject_aws), \
-            patch('database.postgres_operations.AwsPostgresProvisioner.preflight',
+            patch('application.postgres_operations.AwsPostgresProvisioner.preflight',
                   side_effect=[quote, changed_quote] if reject_plan else None,
                   return_value=quote) as preflight, \
-            patch('database.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
-            patch('database.postgres_operations.AwsPostgresProvisioner.create',
+            patch('application.postgres_operations.AwsPostgresProvisioner.assert_stack_available'), \
+            patch('application.postgres_operations.AwsPostgresProvisioner.create',
                   side_effect=ValueError('simulated RDS creation failure') if fail_create else None,
                   return_value=database) as create, \
-            patch('api.server.AwsPostgresProvisioner.inspect_current',
+            patch('interfaces.http.server.AwsPostgresProvisioner.inspect_current',
                   return_value=database) as inspect, \
-            patch('api.server.discover_default_network',
+            patch('interfaces.http.server.discover_default_network',
                   return_value=network), \
             patch.object(AwsSettings, 'unavailable_reason', return_value=None):
         root = Path(directory)

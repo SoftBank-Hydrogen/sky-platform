@@ -3,8 +3,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsSettings
-from database.postgres import PostgresRequest
+from adapters.aws.ecs import AwsSettings
+from adapters.aws.postgres import PostgresRequest
 from tests.live.smoke_aws_postgres_create_browser import (
     deployment_cleanup_blocker, main, retire_final_snapshot)
 

@@ -12,8 +12,8 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from deployment.aws import AwsExpressAdapter, AwsSettings
-from deployment.core import analyze
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from application.deployment_core import analyze
 
 
 def assert_version(url, version):

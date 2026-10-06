@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
-from deployment.aws import AwsExpressAdapter, AwsSettings
-from deployment.core import analyze
-from deployment.rehearsal import rehearse_image
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from application.deployment_core import analyze
+from adapters.local.rehearsal import rehearse_image
 
 
 ATTEMPT = 'a' * 16 + '-a1'
@@ -34,7 +34,7 @@ class RehearsalTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
         opener = Mock()
         opener.open.return_value = response
-        with patch('deployment.rehearsal.urllib.request.build_opener', return_value=opener):
+        with patch('adapters.local.rehearsal.urllib.request.build_opener', return_value=opener):
             result = rehearse_image(command, lambda *_: None, IMAGE, self.plan, ATTEMPT,
                                     {'APP_SECRET': 'synthetic-private-value'})
         self.assertEqual(result['status'], 'passed')
@@ -52,8 +52,8 @@ class RehearsalTests(unittest.TestCase):
         with patch.object(adapter, 'prepare_infrastructure', return_value=(
                 '123456789012', '123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/sky-managed',
                 'execution', 'infrastructure')) as prepare, \
-                patch('deployment.aws.ImageBuilder.build'), \
-                patch('deployment.aws.rehearse_image', side_effect=RuntimeError('HTTP failed')), \
+                patch('adapters.aws.ecs.ImageBuilder.build'), \
+                patch('adapters.aws.ecs.rehearse_image', side_effect=RuntimeError('HTTP failed')), \
                 patch.object(adapter, 'aws') as aws:
             with self.assertRaisesRegex(RuntimeError, 'HTTP failed'):
                 adapter.deploy(self.project, self.plan, ATTEMPT)
@@ -117,8 +117,8 @@ class RehearsalTests(unittest.TestCase):
                                     AwsSettings(region, expected_account=account), rehearsal=True)
         with patch.object(adapter, 'prepare_infrastructure', return_value=(
                 account, repository, 'execution', 'infrastructure')), \
-                patch('deployment.aws.ImageBuilder.build') as build, \
-                patch('deployment.aws.rehearse_image', return_value={
+                patch('adapters.aws.ecs.ImageBuilder.build') as build, \
+                patch('adapters.aws.ecs.rehearse_image', return_value={
                     'status': 'passed', 'image_id': IMAGE_ID,
                     'platform': 'linux/amd64', 'health_path': self.plan.health_path}) as rehearse, \
                 patch.object(adapter, 'command', side_effect=command), \

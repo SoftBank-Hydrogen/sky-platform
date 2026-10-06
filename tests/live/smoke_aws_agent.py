@@ -14,9 +14,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from tests.support.agent_fixture import call
-from planning.analysis import AISettings
-from deployment.aws import AwsExpressAdapter, AwsSettings
-from api.server import App, handler_for
+from application.analysis import AISettings
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from interfaces.http.server import App, handler_for
 
 
 class AwsRepairFixture:

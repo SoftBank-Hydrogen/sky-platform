@@ -12,11 +12,11 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from deployment.aws import AwsConfigurationError, AwsExpressAdapter, AwsSettings
-from deployment.core import analyze
-from database.migrations import collect_sql_migrations
-from database.postgres import AwsPostgresProvisioner, PostgresRequest
-from database.postgres_snapshot import create_snapshot, inspect_snapshot, plan_snapshot
+from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from application.deployment_core import analyze
+from adapters.database.migrations import collect_sql_migrations
+from adapters.aws.postgres import AwsPostgresProvisioner, PostgresRequest
+from adapters.aws.postgres_snapshot import create_snapshot, inspect_snapshot, plan_snapshot
 from tests.live.smoke_aws_postgres import probe
 
 

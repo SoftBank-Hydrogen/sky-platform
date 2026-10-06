@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from deployment.aws import AwsConfigurationError, AwsSettings
-from deployment.aws_network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
+from adapters.aws.ecs import AwsConfigurationError, AwsSettings
+from adapters.aws.network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
 from tests.live.smoke_aws_network import main, retire_probe
 
 

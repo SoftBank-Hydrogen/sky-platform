@@ -8,10 +8,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.support.openai_wire_fixture import ResponsesWireFixture
-from planning.agent import DeploymentAgent, DeploymentTools, OpenAIDeployAgent
-from planning.analysis import AISettings, DEFAULT_AI_MODEL
-from deployment.core import LocalDockerAdapter
-from api.server import App, handler_for
+from application.agent import DeploymentAgent, DeploymentTools, OpenAIDeployAgent
+from application.analysis import AISettings, DEFAULT_AI_MODEL
+from application.deployment_core import LocalDockerAdapter
+from interfaces.http.server import App, handler_for
 
 
 class OpenAIWireTests(unittest.TestCase):
@@ -107,7 +107,7 @@ class OpenAIWireTests(unittest.TestCase):
             fixture = ResponsesWireFixture(expected_model=DEFAULT_AI_MODEL)
             with patch('urllib.request.build_opener', return_value=fixture), \
                     patch.object(LocalDockerAdapter, 'deploy', return_value={'url': 'http://127.0.0.1:12345'}) as deploy, \
-                    patch('api.server.threading.Thread') as worker, \
+                    patch('interfaces.http.server.threading.Thread') as worker, \
                     patch.dict('os.environ', {'OPENAI_API_KEY': 'wire-fixture-key',
                                               'SKY_AI_MODEL': ''}):
                 app = App(state, monitor_interval=0)
