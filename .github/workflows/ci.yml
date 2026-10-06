@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: sky-platform --help
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: UI and PostgreSQL JavaScript tests
+        run: |
+          node tests/test_postgres_ui.mjs
+          node tests/test_postgres_migrator.js
+          node tests/test_postgres_restore_verifier.mjs
