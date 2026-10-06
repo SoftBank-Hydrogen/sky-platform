@@ -17,6 +17,25 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[dev]'
+      - name: Check distribution contents
+        run: |
+          python -m pip wheel --no-deps --wheel-dir /tmp/sky-wheels .
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path('/tmp/sky-wheels').glob('sky_platform-*.whl'))
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as wheel:
+              files = set(wheel.namelist())
+          required = {
+              'sky_platform.py', 'interfaces/http/server.py', 'application/agent.py',
+              'domain/models.py', 'engine/compatibility.py', 'ports/target.py',
+              'adapters/aws/ecs.py', 'adapters/gcp/cloud_run.py',
+              'assets/static/index.html', 'assets/infra/postgres-migrator.js',
+          }
+          assert required <= files, sorted(required - files)
+          PY
       - run: sky-platform --help
       - run: ruff check .
       - run: ruff format --check .
