@@ -136,6 +136,7 @@ class App(StateRecoveryMixin):
                     'status': status, 'source_digest': children[0]['source_digest'],
                     'targets': [{'target': job['target'], 'job_id': job['id'],
                                  'status': job['status'],
+                                 'promoted_from': (job.get('result') or {}).get('promotion', {}).get('source_job_id'),
                                  'deployment_state': job.get('deployment_state'),
                                  'url': (job.get('result') or {}).get('url')
                                  if job.get('deployment_state', 'active') == 'active' else None}
@@ -177,7 +178,16 @@ class App(StateRecoveryMixin):
                 current['status'] = 'running'
                 self.save(current['id'])
             try:
-                self.run_agent(child['id'])
+                prior_local = next((job for job in children
+                                    if job['group_order'] < child['group_order']
+                                    and job['target'] == 'local-docker'
+                                    and job['status'] == 'succeeded'), None)
+                if (child['target'] == 'aws-ecs-express' and prior_local
+                        and (prior_local.get('result') or {}).get('image_id')
+                        and not (prior_local.get('plan') or {}).get('required_env')):
+                    self.run_promoted_aws(child['id'], prior_local['id'])
+                else:
+                    self.run_agent(child['id'])
             except Exception as exc:
                 with self.lock:
                     current = self.jobs[child['id']]
@@ -191,6 +201,88 @@ class App(StateRecoveryMixin):
             with self.lock:
                 if self.jobs[child['id']]['status'] == 'waiting_input':
                     return
+
+    def run_promoted_aws(self, job_id: str, local_job_id: str) -> None:
+        """Deploy a verified Local image to AWS without editing or rebuilding it."""
+        job = self.jobs[job_id]
+        local = self.jobs[local_job_id]
+        attempt_id = f'{job_id}-a1'
+        adapter = None
+        try:
+            if self.cancel_requested(job_id):
+                raise DeploymentCancelled()
+            project = Path(job['project'])
+            work = self.root / job_id / 'work'
+            local_work = self.root / local_job_id / 'work'
+            local_plan = local.get('plan') or {}
+            result = local.get('result') or {}
+            local_attempt = result.get('image', '').removeprefix('sky/').removesuffix(':latest')
+            if (source_digest(project) != job['source_digest']
+                    or not local_plan.get('source_digest')
+                    or source_digest(local_work) != local_plan['source_digest']
+                    or result.get('platform') != 'linux/amd64'
+                    or local_attempt != f"{local_job_id}-a{local.get('attempts')}"):
+                raise ValueError('로컬 검증 산출물의 소스 또는 이미지 출처를 확인할 수 없습니다.')
+            if work.exists():
+                raise ValueError('AWS 작업용 소스가 이미 존재합니다. 자동으로 덮어쓰지 않습니다.')
+            validate_infrastructure(inspect_infrastructure(local_work), 'aws-ecs-express')
+            shutil.copytree(local_work, work)
+            if source_digest(work) != local_plan['source_digest']:
+                raise ValueError('AWS로 복사한 작업용 소스가 로컬 검증 소스와 다릅니다.')
+            plan = DeploymentPlan(**{**local_plan, 'target': 'aws-ecs-express'})
+            promotion = {'source_job_id': local_job_id, 'attempt_id': local_attempt,
+                         'image': result['image'], 'image_id': result['image_id'],
+                         'platform': result['platform']}
+            with self.lock:
+                if job.get('cancel_requested'):
+                    raise DeploymentCancelled()
+                job['plan'] = asdict(plan)
+                job['diff'] = dockerfile_diff(project, job['plan'])
+                job['attempts'] = 1
+                self.save(job_id)
+            self.event(job_id, 'promotion', '로컬 HTTP 검증을 통과한 이미지를 AWS로 승격합니다.')
+            context = self.root / job_id / 'attempt-1'
+            shutil.copytree(work, context)
+            def checkpoint(**updates):
+                with self.lock:
+                    job.update(updates)
+                    self.save(job_id)
+            adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
+                                        AwsSettings(**job['aws']), existing=job.get('prior_result'),
+                                        checkpoint=checkpoint, promoted_image=promotion)
+            result = adapter.deploy(context, plan, attempt_id)
+            with self.lock:
+                job.update(status='succeeded', result=result, deployment_state='active')
+                self.save(job_id)
+                previous = self.jobs.get(job.get('replaces_job_id'))
+                if previous and previous.get('deployment_state', 'active') == 'active':
+                    if result.get('previous_task_definition_arn') and previous.get('result'):
+                        previous['result']['task_definition_arn'] = result['previous_task_definition_arn']
+                    previous['deployment_state'] = 'superseded'
+                    self.save(previous['id'])
+            self.event(job_id, 'succeeded', '동일 이미지 승격 및 AWS HTTP 응답 확인 완료')
+        except DeploymentCancelled:
+            with self.lock:
+                job.update(status='cancelled', cancel_requested=False)
+                self.save(job_id)
+            self.event(job_id, 'cancelled', 'AWS 승격 시작 전에 취소됐습니다.')
+        except Exception as exc:
+            self.event(job_id, 'error', redact(str(exc))[:500])
+            if adapter is not None:
+                try:
+                    adapter.cleanup_failure(attempt_id)
+                except Exception:
+                    self.event(job_id, 'cleanup', 'AWS 실패 리소스 정리 결과를 확인하지 못했습니다.')
+            with self.lock:
+                job['status'] = 'failed'
+                if adapter is not None and adapter.updated_existing:
+                    job['aws_update_submitted'] = True
+                    job['aws_update_failed_at'] = datetime.now(timezone.utc).isoformat()
+                    previous = self.jobs.get(job.get('replaces_job_id'))
+                    if previous:
+                        previous['deployment_state'] = 'needs_attention'
+                        self.save(previous['id'])
+                self.save(job_id)
 
     def create_deployment_group(self, project, application_id, targets, public):
         """Reserve stateless target jobs from one checked upload before starting any adapter."""
@@ -412,6 +504,14 @@ class App(StateRecoveryMixin):
                 raise ValueError('업로드한 앱 소스가 변경됐습니다. 새 배포를 시작하세요.')
             target = job.get("target", "local-docker")
             adapter_factory = LocalDockerAdapter
+            if target == 'local-docker' and job.get('group_id'):
+                with self.lock:
+                    aws_in_group = any(other.get('group_id') == job['group_id']
+                                       and other.get('target') == 'aws-ecs-express'
+                                       and other.get('group_order', -1) > job.get('group_order', -1)
+                                       for other in self.jobs.values())
+                if aws_in_group:
+                    adapter_factory = lambda event: LocalDockerAdapter(event, platform='linux/amd64')
             if target == "cloud-run":
                 settings = CloudRunSettings(**job["cloud"])
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))

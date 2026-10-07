@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from adapters.aws.ecs import AwsSettings
 from application.analysis import AISettings
+from application.deployment_core import analyze
 from interfaces.http.server import App, handler_for
 
 
@@ -65,6 +67,34 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(result['targets'][1]['url'], 'https://example.test')
         self.app.jobs[second['job_id']]['deployment_state'] = 'deleted'
         self.assertIsNone(self.app.deployment_group(group['id'])['targets'][1]['url'])
+
+    def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        image_id = 'sha256:' + 'a' * 64
+        calls = []
+        def run_local(job_id):
+            calls.append(job_id)
+            self.assertEqual(job_id, local_id)
+            job = self.app.jobs[job_id]
+            work = self.app.root / job_id / 'work'
+            shutil.copytree(Path(job['project']), work)
+            plan = analyze(work)
+            job.update(status='succeeded', plan=plan.__dict__, attempts=1,
+                       result={'image': f'sky/{local_id}-a1:latest', 'image_id': image_id,
+                               'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+            self.app.save(job_id)
+        with patch.object(self.app, 'run_agent', side_effect=run_local), \
+                patch('interfaces.http.server.AwsExpressAdapter.deploy',
+                      return_value={'url': 'https://example.test',
+                                    'promotion': {'image_id': image_id}}) as deploy:
+            self.app.run_group(group['id'])
+        self.assertEqual(calls, [local_id])
+        self.assertEqual(deploy.call_count, 1)
+        self.assertEqual(deploy.call_args.args[1].target, 'aws-ecs-express')
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'succeeded')
+        self.assertEqual(self.app.jobs[aws_id]['attempts'], 1)
+        self.assertEqual(self.app.deployment_group(group['id'])['status'], 'succeeded')
 
     def test_waiting_for_environment_pauses_next_target(self):
         group = self.create()

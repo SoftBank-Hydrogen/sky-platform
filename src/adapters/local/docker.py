@@ -11,19 +11,22 @@ import urllib.request
 from pathlib import Path
 
 from adapters.build.image import ImageBuilder
+from adapters.local.rehearsal import inspect_image_id
 from application.deployment_core import DeploymentPlan, source_digest, validate_environment
 
 
 class LocalDockerAdapter:
-    def __init__(self, event):
+    def __init__(self, event, *, platform: str | None = None):
         self.event = event
+        self.platform = platform
 
-    def command(self, args: list[str], timeout: int = 300) -> str:
-        self.event("command", " ".join(args))
+    def command(self, args: list[str], timeout: int = 300, quiet: bool = False) -> str:
+        if not quiet:
+            self.event("command", " ".join(args))
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        if result.stdout:
+        if result.stdout and not quiet:
             self.event("output", result.stdout[-12000:])
-        if result.stderr:
+        if result.stderr and not quiet:
             self.event("output", result.stderr[-12000:])
         if result.returncode:
             raise RuntimeError(f"{args[0]} {args[1]} failed (exit {result.returncode}); see logs")
@@ -43,7 +46,8 @@ class LocalDockerAdapter:
         self.event = masked_event
         name = f"sky-{job_id}"
         image = f"sky/{job_id}:latest"
-        ImageBuilder(self.command, self.event).build(project, plan, image)
+        ImageBuilder(self.command, self.event).build(project, plan, image, platform=self.platform)
+        image_id = inspect_image_id(self.command, image) if self.platform else None
         created = False
         try:
             self.event("starting", "Starting container on a loopback-only random port")
@@ -72,8 +76,14 @@ class LocalDockerAdapter:
                 try:
                     with opener.open(url + plan.health_path, timeout=1) as response:
                         if response.status == 200:
+                            if image_id:
+                                container = self.inspect_resource('container', name)
+                                if (container is None or container.get('Image') != image_id
+                                        or inspect_image_id(self.command, image) != image_id):
+                                    raise RuntimeError('HTTP 검증 중 로컬 이미지 또는 컨테이너가 변경됐습니다.')
                             return {"url": url, "health_url": url + plan.health_path,
-                                    "container": name, "image": image}
+                                    "container": name, "image": image,
+                                    **({"image_id": image_id, "platform": self.platform} if image_id else {})}
                 except (OSError, urllib.error.URLError):
                     pass
                 time.sleep(1)

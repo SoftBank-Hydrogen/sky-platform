@@ -134,6 +134,81 @@ class RehearsalTests(unittest.TestCase):
         self.assertEqual(result['image_digest'], digest)
         self.assertEqual(sum(args[:2] == ['ecr', 'describe-images'] for args in requests), 2)
 
+    def test_group_promotion_rejects_changed_local_image_before_aws_calls(self):
+        local_attempt = 'd' * 16 + '-a1'
+        local_image = f'sky/{local_attempt}:latest'
+        candidate = {'attempt_id': local_attempt, 'image': local_image,
+                     'image_id': IMAGE_ID, 'platform': 'linux/amd64'}
+        adapter = AwsExpressAdapter(lambda *_: None,
+                                    AwsSettings('ap-northeast-2', expected_account='123456789012'),
+                                    promoted_image=candidate)
+        other_id = 'sha256:' + 'e' * 64
+        inspected = [{'Id': other_id, 'RepoTags': [local_image],
+                      'Config': {'Labels': {'app': 'sky'}}, 'Os': 'linux', 'Architecture': 'amd64'}]
+        with patch.object(adapter, 'command', return_value=json.dumps(inspected)), \
+                patch.object(adapter, 'aws') as aws, \
+                patch.object(adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(Exception, '변경됐거나'):
+                adapter.deploy(self.project, self.plan, ATTEMPT)
+        aws.assert_not_called()
+        prepare.assert_not_called()
+
+    def test_group_promotion_tags_the_local_image_without_rebuilding(self):
+        account = '123456789012'
+        region = 'ap-northeast-2'
+        repository = f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed'
+        image = repository + ':' + ATTEMPT
+        service = 'sky-' + ATTEMPT
+        arn = f'arn:aws:ecs:{region}:{account}:service/default/{service}'
+        local_attempt = 'd' * 16 + '-a1'
+        local_image = f'sky/{local_attempt}:latest'
+        candidate = {'attempt_id': local_attempt, 'image': local_image,
+                     'image_id': IMAGE_ID, 'platform': 'linux/amd64'}
+        commands = []
+        def command(args, **_kwargs):
+            commands.append(args)
+            if args[:3] == ['docker', 'image', 'inspect'] and '--format' not in args:
+                return json.dumps([{'Id': IMAGE_ID, 'RepoTags': [local_image],
+                                    'Config': {'Labels': {'app': 'sky'}},
+                                    'Os': 'linux', 'Architecture': 'amd64'}])
+            if args[:3] == ['docker', 'context', 'inspect']:
+                return 'unix:///var/run/docker.sock'
+            if args[1:3] == ['image', 'inspect']:
+                return IMAGE_ID
+            return ''
+        def aws(args, **_kwargs):
+            if args[:2] == ['ecr', 'get-login-password']:
+                return 'synthetic-password'
+            if args[:2] == ['ecr', 'describe-images']:
+                return json.dumps({'imageDetails': [{'imageDigest': 'sha256:' + 'c' * 64}]})
+            if args[:2] == ['ecs', 'create-express-gateway-service']:
+                return json.dumps({'service': {'serviceArn': arn,
+                                               'currentDeployment': 'deployment-1'}})
+            if args[:2] == ['ecs', 'describe-express-gateway-service']:
+                return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
+                    'activeConfigurations': [{'primaryContainer': {'image': image},
+                        'taskDefinitionArn': f'arn:aws:ecs:{region}:{account}:task-definition/{service}:1',
+                        'ingressPaths': [{'accessType': 'PUBLIC',
+                                          'endpoint': f'on-demo.ecs.{region}.on.aws'}]}]}})
+            if args[:2] == ['ecs', 'describe-service-deployments']:
+                return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
+            raise AssertionError(args)
+        adapter = AwsExpressAdapter(lambda *_: None,
+                                    AwsSettings(region, expected_account=account),
+                                    promoted_image=candidate)
+        with patch.object(adapter, 'prepare_infrastructure', return_value=(
+                account, repository, 'execution', 'infrastructure')), \
+                patch('adapters.aws.ecs.ImageBuilder.build') as build, \
+                patch.object(adapter, 'command', side_effect=command), \
+                patch.object(adapter, 'aws', side_effect=aws), \
+                patch.object(adapter, 'verify'):
+            result = adapter.deploy(self.project, self.plan, ATTEMPT)
+        build.assert_not_called()
+        self.assertIn(['docker', 'tag', local_image, image], commands)
+        self.assertNotIn(['docker', 'image', 'rm', local_image], commands)
+        self.assertEqual(result['promotion'], candidate)
+        self.assertEqual(result['image_digest'], 'sha256:' + 'c' * 64)
+
 
 if __name__ == '__main__':
     unittest.main()

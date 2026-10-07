@@ -23,12 +23,19 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}
     compatibility = infrastructure.get('compatibility') if isinstance(infrastructure.get('compatibility'), dict) else {}
     rehearsal = result.get('rehearsal') if isinstance(result.get('rehearsal'), dict) else {}
+    promotion = result.get('promotion') if isinstance(result.get('promotion'), dict) else {}
     image_digest = result.get('image_digest') if isinstance(result.get('image_digest'), str) else None
     registry_digest = image_digest if image_digest and re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest) else None
     completed = job.get('status') == 'succeeded' and bool(result.get('url'))
     rehearsal_passed = bool(completed and rehearsal.get('status') == 'passed'
                             and isinstance(rehearsal.get('image_id'), str)
                             and re.fullmatch(r'sha256:[a-f0-9]{64}', rehearsal['image_id']))
+    promoted = bool(completed and registry_digest
+                    and isinstance(promotion.get('source_job_id'), str)
+                    and re.fullmatch(r'[a-f0-9]{16}', promotion['source_job_id'])
+                    and isinstance(promotion.get('image_id'), str)
+                    and re.fullmatch(r'sha256:[a-f0-9]{64}', promotion['image_id'])
+                    and promotion.get('platform') == 'linux/amd64')
     history = health_history or []
     latest_health = history[-1] if history else None
     checks = [
@@ -38,6 +45,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         {'name': 'local_rehearsal', 'status': 'passed' if rehearsal_passed else 'unverified',
          'detail': ('클라우드 업로드 전에 같은 태그의 이미지를 로컬에서 실행해 HTTP 200을 확인했습니다.'
                     if rehearsal_passed else '같은 산출물의 로컬 리허설 결과가 기록되지 않았습니다.')},
+        {'name': 'cross_target_promotion', 'status': 'passed' if promoted else 'unverified',
+         'detail': ('별도 Local Docker 배포에서 HTTP 검증한 이미지 ID를 AWS 업로드 태그와 대조했습니다.'
+                    if promoted else '다른 배포 대상에서 검증한 이미지를 승격한 기록이 없습니다.')},
         {'name': 'registry_manifest', 'status': 'passed' if completed and registry_digest else 'unverified',
          'detail': ('ECR 이미지 태그의 매니페스트 다이제스트를 업로드 후와 배포 후에 확인했습니다.'
                     if completed and registry_digest else '레지스트리 매니페스트 다이제스트 확인 기록이 없습니다.')},
@@ -85,7 +95,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                         'service': result.get('service'), 'container': result.get('container'),
                         'planned_resources': infrastructure.get('resources') or []},
         'artifact': {'image_reference': result.get('image'),
-                     'local_image_id': rehearsal.get('image_id') if rehearsal_passed else None,
+                     'local_image_id': (promotion.get('image_id') if promoted else
+                                        rehearsal.get('image_id') if rehearsal_passed else None),
+                     'promoted_from_job_id': promotion.get('source_job_id') if promoted else None,
                      'registry_manifest_digest': registry_digest},
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],

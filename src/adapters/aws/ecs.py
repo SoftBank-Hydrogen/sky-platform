@@ -21,7 +21,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from application.analysis import redact
-from application.deployment_core import validate_environment
+from application.deployment_core import source_digest, validate_environment
 from adapters.build.image import ImageBuilder, RDS_CA_CONTAINER_PATH
 from adapters.local.rehearsal import inspect_image_id, rehearse_image
 
@@ -133,7 +133,9 @@ class AwsSettings:
 
 class AwsExpressAdapter:
     def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None,
-                 rehearsal=False):
+                 rehearsal=False, promoted_image=None):
+        if rehearsal and promoted_image is not None:
+            raise ValueError('로컬 이미지 승격과 AWS 자체 리허설을 동시에 실행할 수 없습니다.')
         self.output, self.settings = event, settings
         self.existing = existing
         self.checkpoint = checkpoint
@@ -146,6 +148,7 @@ class AwsExpressAdapter:
         self.updated_existing = False
         self.previous_deployment_arn = None
         self.rehearsal = rehearsal
+        self.promoted_image = promoted_image
         self.rehearsal_result = None
         self.rehearsal_image = None
         self.rehearsal_image_built = False
@@ -229,6 +232,25 @@ class AwsExpressAdapter:
             raise ValueError('Invalid deployment attempt ID')
         if plan.target != 'aws-ecs-express':
             raise ValueError('AWS ECS Express adapter requires an aws-ecs-express plan')
+        if self.promoted_image is not None:
+            candidate = self.promoted_image
+            owner = candidate.get('attempt_id') if isinstance(candidate, dict) else None
+            expected = f'sky/{owner}:latest'
+            if (not isinstance(owner, str) or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner)
+                    or candidate.get('image') != expected
+                    or candidate.get('platform') != 'linux/amd64'
+                    or not isinstance(candidate.get('image_id'), str)
+                    or not re.fullmatch(r'sha256:[a-f0-9]{64}', candidate['image_id'])
+                    or not plan.source_digest or source_digest(project) != plan.source_digest):
+                raise AwsConfigurationError('로컬 검증 이미지의 출처 또는 소스 무결성을 확인할 수 없습니다.')
+            inspected = json.loads(self.command(['docker', 'image', 'inspect', expected],
+                                                timeout=30, private=True))
+            if (len(inspected) != 1 or inspected[0].get('Id') != candidate['image_id']
+                    or expected not in (inspected[0].get('RepoTags') or [])
+                    or (inspected[0].get('Config', {}).get('Labels') or {}).get('app') != 'sky'
+                    or inspected[0].get('Os') != 'linux'
+                    or inspected[0].get('Architecture') != 'amd64'):
+                raise AwsConfigurationError('로컬 검증 이미지가 변경됐거나 linux/amd64 이미지가 아닙니다.')
         if migrations is not None and postgres is None:
             raise ValueError('SQL 마이그레이션에는 검증된 PostgreSQL 연결 요청이 필요합니다.')
         database = None
@@ -329,14 +351,17 @@ class AwsExpressAdapter:
         if database is not None:
             from adapters.database.migrations import trusted_rds_ca_bundle
             ca_bundle = trusted_rds_ca_bundle()
-        if self.rehearsal_result:
-            self.command(['docker', 'tag', self.rehearsal_image, self.image], timeout=30, quiet=True)
+        if self.rehearsal_result or self.promoted_image:
+            source_image = self.rehearsal_image if self.rehearsal_result else self.promoted_image['image']
+            expected_image_id = (self.rehearsal_result or self.promoted_image)['image_id']
+            self.command(['docker', 'tag', source_image, self.image], timeout=30, quiet=True)
             self.image_built = True
-            if inspect_image_id(self.command, self.image) != self.rehearsal_result['image_id']:
-                raise AwsConfigurationError('리허설 이미지와 ECR 업로드 이미지의 구성 ID가 다릅니다.')
-            self.command(['docker', 'image', 'rm', self.rehearsal_image], timeout=30, quiet=True)
-            self.rehearsal_image = None
-            self.event('rehearsal', '리허설한 동일 로컬 이미지를 ECR 태그로 승격했습니다.')
+            if inspect_image_id(self.command, self.image) != expected_image_id:
+                raise AwsConfigurationError('로컬 검증 이미지와 ECR 업로드 이미지의 구성 ID가 다릅니다.')
+            if self.rehearsal_result:
+                self.command(['docker', 'image', 'rm', self.rehearsal_image], timeout=30, quiet=True)
+                self.rehearsal_image = None
+            self.event('rehearsal', '로컬에서 검증한 동일 이미지를 ECR 태그로 승격했습니다.')
         else:
             ImageBuilder(self.command, self.event).build(project, plan, self.image,
                                                           platform='linux/amd64', extra_ca_bundle=ca_bundle)
@@ -361,7 +386,7 @@ class AwsExpressAdapter:
                         raise
                     self.event('retry', f'ECR 업로드 시간 초과, {push_attempt + 2}/3 재시도')
                     time.sleep(5)
-        if self.rehearsal_result:
+        if self.rehearsal_result or self.promoted_image:
             details = json.loads(self.aws(['ecr', 'describe-images', '--repository-name',
                                            'sky-managed', '--image-ids',
                                            'imageTag=' + attempt_id], private=True))
@@ -497,6 +522,7 @@ class AwsExpressAdapter:
                 'service_security_group': self.settings.service_security_group,
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
                 **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
+                **({'promotion': self.promoted_image} if self.promoted_image else {}),
                 **({'image_digest': self.image_digest} if self.image_digest else {}),
                 **({'database': database} if database is not None else {}),
                 **({'migration': migration_result} if migration_result is not None else {}),

@@ -62,6 +62,22 @@ class CertificateTests(unittest.TestCase):
         self.assertEqual(certificate['artifact']['local_image_id'], 'sha256:' + 'b' * 64)
         self.assertEqual(certificate['artifact']['registry_manifest_digest'], 'sha256:' + 'c' * 64)
 
+    def test_group_promotion_records_source_image_without_claiming_ecs_task_digest(self):
+        source_job_id = 'b' * 16
+        job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'aws-ecs-express',
+               'result': {'url': 'https://example.com', 'image': 'example:v1',
+                          'image_digest': 'sha256:' + 'c' * 64,
+                          'promotion': {'source_job_id': source_job_id,
+                                        'image_id': 'sha256:' + 'd' * 64,
+                                        'platform': 'linux/amd64'}}}
+        certificate = deployment_certificate(job)
+        checks = {item['name']: item['status'] for item in certificate['verification']}
+        self.assertEqual(checks['cross_target_promotion'], 'passed')
+        self.assertEqual(checks['local_rehearsal'], 'unverified')
+        self.assertEqual(checks['image_identity'], 'unverified')
+        self.assertEqual(certificate['artifact']['local_image_id'], 'sha256:' + 'd' * 64)
+        self.assertEqual(certificate['artifact']['promoted_from_job_id'], source_job_id)
+
     def test_certificate_api_requires_session_and_existing_job(self):
         with tempfile.TemporaryDirectory() as directory:
             app = App(Path(directory), AISettings(), monitor_interval=0)
