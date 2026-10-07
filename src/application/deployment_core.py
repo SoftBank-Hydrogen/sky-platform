@@ -266,7 +266,10 @@ def make_plan(project: Path, start_script: str, build_script: str | None,
         for script in [start_script] + ([build_script] if build_script is not None else []):
             if (not isinstance(script, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:_-]{0,63}", script)
                     or not isinstance(scripts.get(script), str) or not scripts[script].strip()):
-                raise ValueError("Plan must select an existing, valid npm script")
+                names = sorted(name for name, value in scripts.items()
+                               if isinstance(name, str) and isinstance(value, str) and value.strip())
+                raise ValueError("Plan must select an existing, valid npm script name, not a command. "
+                                 f"Available names: {names[:20]}. For npm start use start_script='start'.")
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError("Container port must be an integer between 1024 and 65535")
     if (not isinstance(health_path, str) or len(health_path) > 200

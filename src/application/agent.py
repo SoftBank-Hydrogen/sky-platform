@@ -40,7 +40,7 @@ TOOLS = [
     tool("apply_project_patch", "Apply one exact replacement in a previously read working-copy file. Use old_text='' to create a new file or fill a previously read empty file. Preserve app behavior; fix deployment problems only.",
          {"path": STRING, "old_text": STRING, "new_text": STRING}),
     tool("prepare_sqlite_migration", "For an explicitly approved SQLite-to-PostgreSQL job, turn the uploaded database snapshot into a PostgreSQL migration in the working copy. Call before editing database code. The original is preserved.", {}),
-    tool("configure_deployment", "Prepare the container. Use start_script='dockerfile' for an existing Dockerfile, an existing server.py/app.py/main.py for executable Python, 'asgi:<file>.py' for a root ASGI app with uvicorn, 'wsgi:<file>.py' for a root WSGI app with gunicorn, or an existing npm script. Python server dependencies must be explicit in requirements.txt. Use build_script=null except for Node. Call again after any file edit.",
+    tool("configure_deployment", "Prepare the container. Use start_script='dockerfile' for an existing Dockerfile, an existing server.py/app.py/main.py for executable Python, 'asgi:<file>.py' for a root ASGI app with uvicorn, 'wsgi:<file>.py' for a root WSGI app with gunicorn, or the name of an existing npm script (for example 'start', never 'npm start' or 'node server.js'). Python server dependencies must be explicit in requirements.txt. Use build_script=null except for Node. Call again after any file edit.",
          {"start_script": STRING, "build_script": {"type": ["string", "null"]},
           "port": {"type": "integer"}, "health_path": STRING,
           "required_env": {"type": "array", "items": STRING}}),

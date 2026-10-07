@@ -38,6 +38,14 @@ class AgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Configure'):
             self.tools.deploy_application()
 
+    def test_invalid_npm_command_explains_available_script_names(self):
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        with self.assertRaisesRegex(ValueError, "Available names: \\['start'\\].*start_script='start'"):
+            self.tools.configure_deployment('npm start', None, 3000, '/', [])
+        self.tools.configure_deployment('start', None, 3000, '/', [])
+
     def test_external_source_change_requires_new_plan_before_attempt(self):
         self.tools.read_project_files(['package.json'])
         self.tools.apply_project_patch('package.json', '"scripts": {}',
