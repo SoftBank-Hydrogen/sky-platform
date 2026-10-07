@@ -24,8 +24,8 @@ test('applies a migration once and rejects checksum drift', async () => {
       if (statement.startsWith('INSERT INTO')) applied.set(params[0], params[1]);
       return {rows: []};
     }};
-    await applyMigrations(client, [entry], directory);
-    await applyMigrations(client, [entry], directory);
+    assert.equal(await applyMigrations(client, [entry], directory), 1);
+    assert.equal(await applyMigrations(client, [entry], directory), 0);
     assert.equal(calls.filter(item => item === sql).length, 1);
     applied.set(entry.name, 'f'.repeat(64));
     await assert.rejects(applyMigrations(client, [entry], directory), /checksum drift/);

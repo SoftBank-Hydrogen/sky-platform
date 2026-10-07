@@ -14,6 +14,7 @@ async function applyMigrations(client, entries, directory) {
   }
   const names = new Set();
   const versions = new Set();
+  let applied = 0;
   for (const entry of entries) {
     if (!entry || !NAME.test(entry.name) || !CHECKSUM.test(entry.sha256)
         || names.has(entry.name) || versions.has(entry.name.slice(0, 4))) {
@@ -38,6 +39,7 @@ async function applyMigrations(client, entries, directory) {
       throw new Error('SQL migration changed or contains transaction control');
     }
     await client.query('BEGIN');
+    let migrated = false;
     try {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('sky_schema_migrations'))");
       await client.query('CREATE TABLE IF NOT EXISTS sky_schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())');
@@ -46,15 +48,18 @@ async function applyMigrations(client, entries, directory) {
         await client.query(content.toString('utf8'));
         await client.query('INSERT INTO sky_schema_migrations (name, sha256) VALUES ($1, $2)',
           [entry.name, checksum]);
+        migrated = true;
       } else if (previous.rows.length !== 1 || previous.rows[0].sha256 !== checksum) {
         throw new Error(`SQL migration checksum drift: ${entry.name}`);
       }
       await client.query('COMMIT');
+      if (migrated) applied += 1;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     }
   }
+  return applied;
 }
 
 if (require.main === module) {
@@ -65,8 +70,8 @@ if (require.main === module) {
   (async () => {
     await client.connect();
     try {
-      await applyMigrations(client, manifest.migrations, directory);
-      process.stdout.write(JSON.stringify({applied: manifest.migrations.length}) + '\n');
+      const applied = await applyMigrations(client, manifest.migrations, directory);
+      process.stdout.write(JSON.stringify({applied}) + '\n');
     } finally {
       await client.end();
     }
