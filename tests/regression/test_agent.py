@@ -57,6 +57,21 @@ class AgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exactly once'):
             self.tools.apply_project_patch('server.js', 'not-found', 'new')
 
+    def test_patch_can_fill_previously_read_empty_requirements(self):
+        original_requirements = self.original / 'requirements.txt'
+        work_requirements = self.tools.work / 'requirements.txt'
+        original_requirements.write_text('')
+        work_requirements.write_text('')
+        with self.assertRaisesRegex(ValueError, 'Read'):
+            self.tools.apply_project_patch('requirements.txt', '', 'psycopg[binary]\n')
+        self.assertEqual(self.tools.read_project_files(['requirements.txt'])['files']['requirements.txt'], '')
+        self.tools.apply_project_patch('requirements.txt', '', 'psycopg[binary]\n')
+        self.assertEqual(work_requirements.read_text(), 'psycopg[binary]\n')
+        self.assertEqual(original_requirements.read_text(), '')
+        self.tools.read_project_files(['requirements.txt'])
+        with self.assertRaisesRegex(ValueError, 'exactly once'):
+            self.tools.apply_project_patch('requirements.txt', '', 'another-package\n')
+
     def test_patch_write_failure_preserves_existing_file_and_plan(self):
         target = self.tools.work / 'server.js'
         before = target.read_bytes()

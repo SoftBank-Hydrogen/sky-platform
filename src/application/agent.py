@@ -37,7 +37,7 @@ STRING = {"type": "string"}
 TOOLS = [
     tool("read_project_files", "Read selected project files. Start with an existing Dockerfile, package.json, or Python entry point, and inspect the server source.",
          {"paths": {"type": "array", "items": STRING}}),
-    tool("apply_project_patch", "Apply one exact replacement in a previously read working-copy file. Use old_text='' only to create a new file. Preserve app behavior; fix deployment problems only.",
+    tool("apply_project_patch", "Apply one exact replacement in a previously read working-copy file. Use old_text='' to create a new file or fill a previously read empty file. Preserve app behavior; fix deployment problems only.",
          {"path": STRING, "old_text": STRING, "new_text": STRING}),
     tool("prepare_sqlite_migration", "For an explicitly approved SQLite-to-PostgreSQL job, turn the uploaded database snapshot into a PostgreSQL migration in the working copy. Call before editing database code. The original is preserved.", {}),
     tool("configure_deployment", "Prepare the container. Use start_script='dockerfile' for an existing Dockerfile, an existing server.py/app.py/main.py for executable Python, 'asgi:<file>.py' for a root ASGI app with uvicorn, 'wsgi:<file>.py' for a root WSGI app with gunicorn, or an existing npm script. Python server dependencies must be explicit in requirements.txt. Use build_script=null except for Node. Call again after any file edit.",
@@ -312,9 +312,11 @@ class DeploymentTools:
                 raise ValueError("File exceeds 40,000 character patch limit")
             if self.read_versions.get(path) != before:
                 raise ValueError("Read the current file before patching it")
-            if not old_text or before.count(old_text) != 1:
+            if not old_text and before:
                 raise ValueError("old_text must match exactly once")
-            after = before.replace(old_text, new_text, 1)
+            if old_text and before.count(old_text) != 1:
+                raise ValueError("old_text must match exactly once")
+            after = new_text if not before else before.replace(old_text, new_text, 1)
         else:
             before = ""
             if old_text:
