@@ -74,6 +74,31 @@ test('environment preview shows target differences before deployment', async () 
   assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
 });
 
+test('multi-target button uploads once and requests an ordered deployment group', async () => {
+  const start = html.indexOf("el('deploy').onclick=async()=>{");
+  const end = html.indexOf("el('file').onchange", start);
+  assert.ok(start >= 0 && end > start);
+  const elements = {deploy: {}, application: {value: 'demo-app'}, error: {textContent: ''},
+    multiMode: {checked: true}, multiLocal: {checked: true}, multiAws: {checked: true},
+    multiGcp: {checked: false}, public: {checked: true}, jobSection: {hidden: false}};
+  const calls = [];
+  const followed = [];
+  const context = {el: id => elements[id], Error, String,
+    selectedUploadBody: () => 'zip-bytes', lock() {}, history: async () => {},
+    followGroup: async id => followed.push(id),
+    api: async (path, options) => {
+      calls.push([path, options]);
+      return {id: 'a'.repeat(16)};
+    }};
+  runInNewContext(html.slice(start, end), context);
+  await elements.deploy.onclick();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], '/api/deployment-groups');
+  assert.equal(calls[0][1].headers['X-Deploy-Targets'], 'local-docker,aws-ecs-express');
+  assert.equal(calls[0][1].body, 'zip-bytes');
+  assert.deepEqual(followed, ['a'.repeat(16)]);
+});
+
 test('running deployment can be cancelled only before its first attempt', () => {
   assert.equal(cancelContext.canCancel({status: 'waiting_input'}), true);
   assert.equal(cancelContext.canCancel({status: 'running', attempts: 0}), true);

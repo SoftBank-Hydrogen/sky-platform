@@ -63,6 +63,7 @@ class App(StateRecoveryMixin):
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.jobs = {}
+        self.active_groups = set()
         self.health_history = {}
         self.monitor_errors = {}
         if type(monitor_interval) is not int or (monitor_interval != 0 and not 60 <= monitor_interval <= 3600):
@@ -110,12 +111,176 @@ class App(StateRecoveryMixin):
                     for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
                     if job.get("application_id", job["id"]) == application_id]
 
+    def deployment_group(self, group_id):
+        with self.lock:
+            children = sorted((job for job in self.jobs.values() if job.get('group_id') == group_id),
+                              key=lambda job: job['group_order'])
+            if not children:
+                raise ValueError('배포 묶음을 찾을 수 없습니다.')
+            states = [job['status'] for job in children]
+            if 'waiting_input' in states:
+                status = 'waiting_input'
+            elif 'running' in states:
+                status = 'running'
+            elif 'planned' in states:
+                status = 'interrupted' if 'interrupted' in states else 'running'
+            elif all(state == 'succeeded' for state in states):
+                status = 'succeeded'
+            elif 'succeeded' in states:
+                status = 'partial_success'
+            elif 'interrupted' in states:
+                status = 'interrupted'
+            else:
+                status = 'failed'
+            return {'id': group_id, 'application_id': children[0]['application_id'],
+                    'status': status, 'source_digest': children[0]['source_digest'],
+                    'targets': [{'target': job['target'], 'job_id': job['id'],
+                                 'status': job['status'],
+                                 'deployment_state': job.get('deployment_state'),
+                                 'url': (job.get('result') or {}).get('url')
+                                 if job.get('deployment_state', 'active') == 'active' else None}
+                                for job in children]}
+
+    def start_group_worker(self, group_id):
+        with self.lock:
+            if group_id in self.active_groups:
+                return False
+            self.active_groups.add(group_id)
+        try:
+            threading.Thread(target=self.run_group, args=(group_id,), daemon=True).start()
+        except Exception:
+            with self.lock:
+                self.active_groups.discard(group_id)
+            raise
+        return True
+
+    def run_group(self, group_id):
+        with self.lock:
+            self.active_groups.add(group_id)
+        try:
+            self._run_group(group_id)
+        finally:
+            with self.lock:
+                self.active_groups.discard(group_id)
+
+    def _run_group(self, group_id):
+        with self.lock:
+            children = sorted((job for job in self.jobs.values() if job.get('group_id') == group_id),
+                              key=lambda job: job['group_order'])
+        for child in children:
+            with self.lock:
+                current = self.jobs[child['id']]
+                if current['status'] == 'waiting_input':
+                    return
+                if current['status'] != 'planned':
+                    continue
+                current['status'] = 'running'
+                self.save(current['id'])
+            try:
+                self.run_agent(child['id'])
+            except Exception as exc:
+                with self.lock:
+                    current = self.jobs[child['id']]
+                    current['status'] = 'interrupted'
+                    current.setdefault('events', []).append({
+                        'time': datetime.now(timezone.utc).isoformat(), 'stage': 'interrupted',
+                        'message': '배포 실행기가 중단됐습니다. 대상 상태를 확인하세요: '
+                                   + redact(str(exc))[:200]})
+                    self.save(child['id'])
+                return
+            with self.lock:
+                if self.jobs[child['id']]['status'] == 'waiting_input':
+                    return
+
+    def create_deployment_group(self, project, application_id, targets, public):
+        """Reserve stateless target jobs from one checked upload before starting any adapter."""
+        if (not isinstance(targets, list) or len(targets) < 2 or len(targets) > 3
+                or len(set(targets)) != len(targets)
+                or any(target not in {'local-docker', 'aws-ecs-express', 'cloud-run'}
+                       for target in targets)):
+            raise ValueError('서로 다른 배포 대상 2~3개를 선택하세요.')
+        if not re.fullmatch(r'[a-z][a-z0-9-]{2,30}', application_id):
+            raise ValueError('올바른 앱 ID가 필요합니다.')
+        profile = inspect_infrastructure(project)
+        digest = source_digest(project)
+        plans = []
+        for target in targets:
+            reason = (self.cloud_settings.unavailable_reason() if target == 'cloud-run' else
+                      self.aws_settings.unavailable_reason() if target == 'aws-ecs-express' else None)
+            if reason:
+                raise ValueError(f'{target}: {reason}')
+            validate_infrastructure(profile, target)
+            plan = explicit_infrastructure_plan(target, profile)
+            plan['compatibility'] = infrastructure_compatibility(profile, target, public_access=public)
+            if plan['compatibility']['access_mode'] is None:
+                raise ValueError(f'{target}의 공개 접근 설정을 지원하지 않습니다.')
+            plans.append(plan)
+        group_id = uuid.uuid4().hex[:16]
+        jobs = []
+        created = []
+        try:
+            for order, (target, plan) in enumerate(zip(targets, plans)):
+                job_id = uuid.uuid4().hex[:16]
+                directory = self.root / job_id
+                directory.mkdir()
+                created.append(directory)
+                (directory / '.uncommitted-upload').touch(mode=0o600)
+                source = directory / 'source'
+                shutil.copytree(project, source)
+                if source_digest(source) != digest:
+                    raise ValueError('다중 대상 작업용 소스가 업로드 원본과 다릅니다.')
+                job = {'id': job_id, 'mode': 'agent', 'target': target,
+                       'requested_target': target, 'infrastructure_plan': plan,
+                       'application_id': application_id, 'public': plan['compatibility']['access_mode'] == 'public',
+                       'status': 'planned', 'created_at': datetime.now(timezone.utc).isoformat(),
+                       'plan': None, 'diff': '', 'changes': [], 'steps': 0, 'attempts': 0,
+                       'project': str(source), 'infrastructure_profile': profile.as_dict(),
+                       'events': [], 'source_digest': digest,
+                       'group_id': group_id, 'group_order': order}
+                if target == 'cloud-run':
+                    job['cloud'] = asdict(self.cloud_settings)
+                elif target == 'aws-ecs-express':
+                    job['aws'] = asdict(self.aws_settings)
+                jobs.append(job)
+            with self.lock:
+                for target in targets:
+                    self.ensure_application_available(application_id, target)
+                for job in jobs:
+                    if job['target'] == 'aws-ecs-express':
+                        previous = [old for old in self.jobs.values()
+                                    if old.get('application_id') == application_id
+                                    and old.get('target') == 'aws-ecs-express'
+                                    and old.get('status') == 'succeeded'
+                                    and old.get('deployment_state', 'active') == 'active'
+                                    and old.get('result')]
+                        if previous:
+                            latest = max(previous, key=lambda item: item.get('created_at', ''))
+                            if latest['result'].get('database') is not None:
+                                raise ValueError('기존 PostgreSQL AWS 서비스는 다중 대상 배포로 업데이트할 수 없습니다.')
+                            job['prior_result'] = latest['result']
+                            job['replaces_job_id'] = latest['id']
+                for job in jobs:
+                    self.jobs[job['id']] = job
+                    self.save(job['id'])
+            for directory in created:
+                self.clear_upload_marker(directory)
+            return self.deployment_group(group_id)
+        except Exception:
+            with self.lock:
+                for job in jobs:
+                    self.jobs.pop(job['id'], None)
+            for directory in created:
+                shutil.rmtree(directory, ignore_errors=True)
+                if directory.exists():
+                    self.recovery_warnings.append('다중 대상 접수 실패 파일 정리 필요: ' + directory.name)
+            raise
+
     def ensure_application_available(self, application_id, target):
         # The caller holds self.lock while reserving the new job.
         if target in {'auto', 'aws-ecs-express'} and self.postgres_retirement_operations.blocks_deployment(application_id):
             raise ValueError(f'{application_id}의 PostgreSQL 폐기 기록이 있어 AWS 배포를 시작할 수 없습니다.')
         if any(job.get("application_id") == application_id and job.get("target") == target
-               and job.get("status") in {"provisioning", "running", "waiting_input"} for job in self.jobs.values()):
+               and job.get("status") in {"planned", "provisioning", "running", "waiting_input"} for job in self.jobs.values()):
             raise ValueError(f"{application_id}의 {target} 배포가 이미 진행 중입니다.")
         if any(job.get("application_id") == application_id and job.get("target") == target
                and job.get("deployment_state") in {"deleting", "needs_attention"} for job in self.jobs.values()):
@@ -326,6 +491,9 @@ class App(StateRecoveryMixin):
             environment.clear()
             if tools is not None:
                 tools.environment.clear()
+            group_id = self.jobs.get(job_id, {}).get('group_id')
+            if group_id and self.jobs[job_id].get('status') != 'waiting_input':
+                self.start_group_worker(group_id)
 
     def cancel_requested(self, job_id):
         with self.lock:
@@ -1060,6 +1228,12 @@ def handler_for(app: App):
             if self.path == "/api/jobs":
                 self.json_response(200, app.summaries())
                 return
+            if re.fullmatch(r'/api/deployment-groups/[a-f0-9]{16}', self.path):
+                try:
+                    self.json_response(200, app.deployment_group(self.path.rsplit('/', 1)[-1]))
+                except ValueError as exc:
+                    self.json_response(404, {'error': str(exc)})
+                return
             if self.path == "/api/aws/default-network":
                 try:
                     self.json_response(200, discover_default_network(app.aws_settings))
@@ -1434,6 +1608,58 @@ def handler_for(app: App):
                                                  'scanned_files': profile.scanned_files,
                                              },
                                              'reports': reports})
+                    return
+                if self.path == '/api/deployment-groups':
+                    if not app.ai_settings.available:
+                        self.json_response(503, {'error': 'AI 배포를 사용하려면 OPENAI_API_KEY가 필요합니다.'})
+                        return
+                    targets = self.headers.get('X-Deploy-Targets', '').split(',')
+                    application_id = self.headers.get('X-Application-Id', '')
+                    public_flag = self.headers.get('X-Public-Access', 'false')
+                    if public_flag not in {'true', 'false'}:
+                        raise ValueError('공개 접근 선택이 올바르지 않습니다.')
+                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-')) for name in self.headers):
+                        raise ValueError('다중 대상 배포는 현재 데이터베이스 연결·이전을 지원하지 않습니다.')
+                    if 'aws-ecs-express' in targets and public_flag != 'true':
+                        raise ValueError('AWS ECS Express를 포함하려면 인터넷 공개를 허용하세요.')
+                    size = int(self.headers.get('Content-Length', '0'))
+                    content_type = self.headers.get('Content-Type', '')
+                    folder_upload = content_type.lower().startswith('multipart/form-data;')
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError('업로드 크기는 20 MiB 이하여야 합니다.')
+                    with tempfile.TemporaryDirectory(prefix='.group-upload-', dir=app.root) as folder:
+                        directory = Path(folder)
+                        archive = directory / 'source.zip'
+                        upload = self.rfile.read(size)
+                        if len(upload) != size:
+                            raise ValueError('업로드가 완료되지 않았습니다.')
+                        if folder_upload:
+                            folder_upload_to_zip(upload, content_type, archive)
+                        else:
+                            archive.write_bytes(upload)
+                        project = extract_project(archive, directory / 'source')
+                        group = app.create_deployment_group(
+                            project, application_id, targets, public_flag == 'true')
+                    try:
+                        app.start_group_worker(group['id'])
+                    except Exception:
+                        with app.lock:
+                            for child in group['targets']:
+                                job = app.jobs[child['job_id']]
+                                job['status'] = 'interrupted'
+                                app.save(job['id'])
+                    self.json_response(202, app.deployment_group(group['id']))
+                    return
+                if re.fullmatch(r'/api/deployment-groups/[a-f0-9]{16}/continue', self.path):
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('계속 요청에는 본문이 없어야 합니다.')
+                    group_id = self.path.split('/')[3]
+                    group = app.deployment_group(group_id)
+                    if (group['status'] != 'interrupted'
+                            or not any(child['status'] == 'planned' for child in group['targets'])):
+                        raise ValueError('대기 중인 대상이 있는 중단된 배포 묶음만 계속할 수 있습니다.')
+                    app.start_group_worker(group_id)
+                    self.json_response(202, app.deployment_group(group_id))
                     return
                 if self.path == "/api/deployments":
                     if not app.ai_settings.available:
