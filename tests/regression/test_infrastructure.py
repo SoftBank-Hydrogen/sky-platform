@@ -14,6 +14,7 @@ from adapters.aws.ecs import AwsSettings
 from application.infrastructure import (InfrastructureProfile, deployment_access_mode,
                                       explicit_infrastructure_plan,
                                       infrastructure_compatibility, inspect_infrastructure,
+                                      plan_infrastructure,
                                       validate_infrastructure,
                                       validate_infrastructure_proposal, OpenAIInfrastructurePlanner)
 from interfaces.http.server import App, handler_for
@@ -204,6 +205,31 @@ class InfrastructureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '지원하지 않는'):
             validate_infrastructure_proposal({**proposal, 'workload': 'requires-unsupported-resources'},
                                              files, ['aws-ecs-express'])
+
+    def test_auto_plan_retries_invalid_quote_once_and_still_requires_source_evidence(self):
+        class Planner:
+            def __init__(self, second_quote):
+                self.second_quote = second_quote
+                self.calls = []
+
+            def propose(self, files, available_targets, public_access, *, retry_invalid_evidence=False):
+                self.calls.append(retry_invalid_evidence)
+                return {'target': 'local-docker', 'workload': 'stateless-http',
+                        'rationale': 'HTTP 서버', 'evidence': [{'file': 'server.js',
+                        'quote': self.second_quote if retry_invalid_evidence else 'invented quote'}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'server.js').write_text('http.createServer(handler).listen(3000);')
+            planner = Planner('http.createServer(handler)')
+            result = plan_infrastructure(project, ['local-docker'], False, planner)
+            self.assertEqual(result['evidence'][0]['quote'], 'http.createServer(handler)')
+            self.assertEqual(planner.calls, [False, True])
+
+            planner = Planner('still invented')
+            with self.assertRaisesRegex(ValueError, '근거를 소스에서 확인'):
+                plan_infrastructure(project, ['local-docker'], False, planner)
+            self.assertEqual(planner.calls, [False, True])
 
     def test_detects_embedded_database_without_scanning_docs_or_tests(self):
         with tempfile.TemporaryDirectory() as directory:
