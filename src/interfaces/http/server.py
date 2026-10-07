@@ -23,6 +23,7 @@ from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettin
 from adapters.aws.network import ServiceNetworkRequest, discover_default_network
 from application.certificate import deployment_certificate
 from application.diagnosis import deployment_diagnosis
+from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from adapters.local.docker import LocalDockerAdapter
@@ -53,10 +54,11 @@ def dockerfile_diff(source: Path, plan: dict) -> str:
                                         tofile="Dockerfile"))
 
 
-class App(StateRecoveryMixin):
+class App(GitHubDeploymentsMixin, StateRecoveryMixin):
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
-                 monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner):
+                 monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
+                 github_poll_interval: int = 60):
         self.root = root.resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
@@ -69,6 +71,10 @@ class App(StateRecoveryMixin):
         if type(monitor_interval) is not int or (monitor_interval != 0 and not 60 <= monitor_interval <= 3600):
             raise ValueError('Monitoring interval must be 0 or 60–3600 seconds')
         self.monitor_interval = monitor_interval
+        if type(github_poll_interval) is not int or (github_poll_interval != 0 and
+                                                     not 60 <= github_poll_interval <= 3600):
+            raise ValueError('GitHub polling interval must be 0 or 60–3600 seconds')
+        self.github_poll_interval = github_poll_interval
         self.ai_settings = ai_settings if ai_settings is not None else AISettings.from_environment()
         self.agent_factory = agent_factory
         self.infrastructure_planner_factory = infrastructure_planner_factory
@@ -86,6 +92,7 @@ class App(StateRecoveryMixin):
         self.network_operations = NetworkOperations(self.root / 'network-operations', self.aws_settings)
         self.recovery_warnings.extend(self.network_operations.recovery_warnings)
         self.restore()
+        self.restore_github_sources()
 
 
 
@@ -337,7 +344,7 @@ class App(StateRecoveryMixin):
             if submitted_environment is not None:
                 submitted_environment.clear()
 
-    def create_deployment_group(self, project, application_id, targets, public):
+    def create_deployment_group(self, project, application_id, targets, public, source=None):
         """Reserve stateless target jobs from one checked upload before starting any adapter."""
         if (not isinstance(targets, list) or len(targets) < 2 or len(targets) > 3
                 or len(set(targets)) != len(targets)
@@ -370,27 +377,39 @@ class App(StateRecoveryMixin):
                 directory.mkdir()
                 created.append(directory)
                 (directory / '.uncommitted-upload').touch(mode=0o600)
-                source = directory / 'source'
-                shutil.copytree(project, source)
-                if source_digest(source) != digest:
+                copied_source = directory / 'source'
+                shutil.copytree(project, copied_source)
+                if source_digest(copied_source) != digest:
                     raise ValueError('다중 대상 작업용 소스가 업로드 원본과 다릅니다.')
                 job = {'id': job_id, 'mode': 'agent', 'target': target,
                        'requested_target': target, 'infrastructure_plan': plan,
                        'application_id': application_id, 'public': plan['compatibility']['access_mode'] == 'public',
                        'status': 'planned', 'created_at': datetime.now(timezone.utc).isoformat(),
                        'plan': None, 'diff': '', 'changes': [], 'steps': 0, 'attempts': 0,
-                       'project': str(source), 'infrastructure_profile': profile.as_dict(),
+                       'project': str(copied_source), 'infrastructure_profile': profile.as_dict(),
                        'events': [], 'source_digest': digest,
                        'group_id': group_id, 'group_order': order}
                 if target == 'cloud-run':
                     job['cloud'] = asdict(self.cloud_settings)
                 elif target == 'aws-ecs-express':
                     job['aws'] = asdict(self.aws_settings)
+                if source is not None:
+                    job['github_source'] = source
                 jobs.append(job)
             with self.lock:
                 for target in targets:
                     self.ensure_application_available(application_id, target)
                 for job in jobs:
+                    if job['target'] == 'local-docker' and source and source.get('subscription_id'):
+                        previous = [old for old in self.jobs.values()
+                                    if old.get('application_id') == application_id
+                                    and old.get('target') == 'local-docker'
+                                    and old.get('status') == 'succeeded'
+                                    and old.get('deployment_state', 'active') == 'active'
+                                    and old.get('github_source', {}).get('subscription_id') == source['subscription_id']]
+                        if previous:
+                            job['git_replaces_local_job_id'] = max(
+                                previous, key=lambda item: item.get('created_at', ''))['id']
                     if job['target'] == 'aws-ecs-express':
                         previous = [old for old in self.jobs.values()
                                     if old.get('application_id') == application_id
@@ -596,6 +615,8 @@ class App(StateRecoveryMixin):
                         previous['deployment_state'] = 'superseded'
                         self.save(previous['id'])
             self.event(job_id, "succeeded", "실제 HTTP 응답 확인 완료")
+            if target == 'local-docker' and job.get('git_replaces_local_job_id'):
+                self.retire_replaced_github_local(job_id)
         except DeploymentCancelled:
             checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)
             self.event(job_id, "cancelled", "배포 시도 전에 사용자가 작업을 취소했습니다.")
@@ -1368,6 +1389,7 @@ def handler_for(app: App):
                 self.json_response(200, {"ai_available": app.ai_settings.available,
                     "ai_model": app.ai_settings.model if app.ai_settings.available else None,
                     "monitor_interval": app.monitor_interval,
+                    "github_poll_interval": app.github_poll_interval,
                     "targets": [{"id": "auto", "name": "AI 자동 선택", "available": app.ai_settings.available},
                                 {"id": "local-docker", "name": "Local Docker", "available": True},
                                 {"id": "cloud-run", "name": "Google Cloud Run",
@@ -1380,6 +1402,9 @@ def handler_for(app: App):
                 return
             if self.path == "/api/jobs":
                 self.json_response(200, app.summaries())
+                return
+            if self.path == "/api/github/sources":
+                self.json_response(200, app.github_source_summaries())
                 return
             if re.fullmatch(r'/api/deployment-groups/[a-f0-9]{16}', self.path):
                 try:
@@ -1489,6 +1514,31 @@ def handler_for(app: App):
                 self.json_response(403, {"error": "Invalid session token"})
                 return
             try:
+                if self.path == '/api/github/deployments':
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 2048:
+                        raise ValueError('GitHub 배포 요청은 2 KiB 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if (not isinstance(payload, dict) or set(payload) != {
+                            'repository_url', 'branch', 'application_id', 'targets',
+                            'public', 'auto_deploy'}):
+                        raise ValueError('GitHub 저장소와 배포 설정이 필요합니다.')
+                    self.json_response(202, app.create_github_deployment(
+                        payload['repository_url'], payload['branch'], payload['application_id'],
+                        payload['targets'], payload['public'], payload['auto_deploy']))
+                    return
+                if re.fullmatch(r'/api/github/sources/[a-f0-9]{16}/(pause|resume|check|disconnect)', self.path):
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('GitHub 연결 작업에는 본문이 없어야 합니다.')
+                    source_id, operation = self.path.split('/')[4:6]
+                    if operation == 'check':
+                        self.json_response(200, app.poll_github_source(source_id))
+                    elif operation == 'disconnect':
+                        self.json_response(200, app.remove_github_source(source_id))
+                    else:
+                        self.json_response(200, app.set_github_source_enabled(
+                            source_id, operation == 'resume'))
+                    return
                 if re.fullmatch(r"/api/applications/[a-z][a-z0-9-]{2,30}/network/plan", self.path):
                     application_id = self.path.split('/')[3]
                     size = int(self.headers.get('Content-Length', '0'))
@@ -1712,6 +1762,10 @@ def handler_for(app: App):
                             message = ('종료할 수 있는 AWS 배포가 아닙니다.' if job and job.get('target') == 'aws-ecs-express'
                                        else '종료할 수 있는 배포가 아닙니다.')
                             self.json_response(409, {'error': message})
+                            return
+                        github_source_id = (job.get('github_source') or {}).get('subscription_id')
+                        if github_source_id and app.github_sources.get(github_source_id, {}).get('enabled'):
+                            self.json_response(409, {'error': '앱 종료 전에 GitHub 자동 배포를 일시 중지하거나 연결 해제하세요.'})
                             return
                         target = job['target']
                         job['deployment_state'] = 'deleting'
@@ -2191,15 +2245,23 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     parser.add_argument("--state-dir", type=Path, default=Path(default_state_dir))
     parser.add_argument("--monitor-interval", type=int, default=300,
                         help="Seconds between health checks (60–3600; 0 disables monitoring)")
+    parser.add_argument("--github-poll-interval", type=int, default=60,
+                        help="Seconds between public GitHub branch checks (60–3600; 0 disables checks)")
     args = parser.parse_args()
     if args.monitor_interval != 0 and not 60 <= args.monitor_interval <= 3600:
         parser.error('--monitor-interval must be 0 or 60–3600 seconds')
+    if args.github_poll_interval != 0 and not 60 <= args.github_poll_interval <= 3600:
+        parser.error('--github-poll-interval must be 0 or 60–3600 seconds')
     with StateDirectoryLock(args.state_dir) as state_dir:
-        app = App(state_dir, monitor_interval=args.monitor_interval)
+        app = App(state_dir, monitor_interval=args.monitor_interval,
+                  github_poll_interval=args.github_poll_interval)
         server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(app))
         stop_monitor = threading.Event()
         if app.monitor_interval:
             threading.Thread(target=app.monitor_loop, args=(stop_monitor,), daemon=True).start()
+        if app.github_poll_interval:
+            threading.Thread(target=app.github_poll_loop,
+                             args=(stop_monitor, app.github_poll_interval), daemon=True).start()
         print(f"{product_name}: http://127.0.0.1:{args.port}", flush=True)
         try:
             server.serve_forever()

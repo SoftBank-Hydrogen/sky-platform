@@ -83,7 +83,7 @@ test('multi-target button uploads once and requests an ordered deployment group'
     multiGcp: {checked: false}, public: {checked: true}, jobSection: {hidden: false}};
   const calls = [];
   const followed = [];
-  const context = {el: id => elements[id], Error, String,
+  const context = {el: id => elements[id], Error, String, githubMode: false,
     selectedUploadBody: () => 'zip-bytes', lock() {}, history: async () => {},
     followGroup: async id => followed.push(id),
     api: async (path, options) => {
@@ -97,6 +97,32 @@ test('multi-target button uploads once and requests an ordered deployment group'
   assert.equal(calls[0][1].headers['X-Deploy-Targets'], 'local-docker,aws-ecs-express');
   assert.equal(calls[0][1].body, 'zip-bytes');
   assert.deepEqual(followed, ['a'.repeat(16)]);
+});
+
+test('GitHub link deploy sends a pinned-source request with auto deploy opt-in', async () => {
+  const start = html.indexOf("el('deploy').onclick=async()=>{");
+  const end = html.indexOf("el('file').onchange", start);
+  const elements = {deploy: {}, application: {value: 'demo-app'}, error: {textContent: ''},
+    repositoryUrl: {value: 'https://github.com/team/demo'}, repositoryBranch: {value: 'main'},
+    githubAutoDeploy: {checked: true}, multiMode: {checked: false}, target: {value: 'local-docker'},
+    public: {checked: false}, jobSection: {hidden: false}, groupSection: {hidden: false}};
+  const calls = [];
+  const context = {el: id => elements[id], Error, String, JSON, githubMode: true,
+    selectedUploadBody: () => { throw Error('file upload should not run'); },
+    lock() {}, history: async () => {}, refreshGithubSources: async () => {},
+    follow: async id => calls.push(['follow', id]),
+    api: async (path, options) => {
+      calls.push([path, options]);
+      return {deployment: {id: 'b'.repeat(16)}};
+    }};
+  runInNewContext(html.slice(start, end), context);
+  await elements.deploy.onclick();
+  assert.equal(calls[0][0], '/api/github/deployments');
+  assert.deepEqual(JSON.parse(calls[0][1].body), {
+    repository_url: 'https://github.com/team/demo', branch: 'main',
+    application_id: 'demo-app', targets: ['local-docker'], public: false, auto_deploy: true,
+  });
+  assert.deepEqual(calls[1], ['follow', 'b'.repeat(16)]);
 });
 
 test('running deployment can be cancelled only before its first attempt', () => {
