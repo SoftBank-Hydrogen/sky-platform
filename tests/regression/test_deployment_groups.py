@@ -96,6 +96,132 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(self.app.jobs[aws_id]['attempts'], 1)
         self.assertEqual(self.app.deployment_group(group['id'])['status'], 'succeeded')
 
+    def test_required_env_pauses_aws_then_resumes_same_image_after_restart(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        image_id = 'sha256:' + 'a' * 64
+        def run_local(job_id):
+            self.assertEqual(job_id, local_id)
+            job = self.app.jobs[job_id]
+            work = self.app.root / job_id / 'work'
+            shutil.copytree(Path(job['project']), work)
+            plan = analyze(work)
+            plan.required_env = ['APP_SECRET']
+            job.update(status='succeeded', plan=plan.__dict__, attempts=1,
+                       result={'image': f'sky/{local_id}-a1:latest', 'image_id': image_id,
+                               'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+            self.app.save(job_id)
+        with patch.object(self.app, 'run_agent', side_effect=run_local) as run:
+            self.app.run_group(group['id'])
+        run.assert_called_once_with(local_id)
+        waiting = self.app.jobs[aws_id]
+        self.assertEqual(waiting['status'], 'waiting_input')
+        self.assertEqual(waiting['missing_environment'], ['APP_SECRET'])
+        self.assertEqual(waiting['attempts'], 0)
+        self.assertEqual(waiting['promotion_source_job_id'], local_id)
+        self.assertEqual(self.app.deployment_group(group['id'])['status'], 'waiting_input')
+        secret = 'synthetic-private-value'
+        self.assertNotIn(secret, (self.app.root / aws_id / 'job.json').read_text())
+        restored = App(self.app.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.app.aws_settings, monitor_interval=0)
+        self.assertEqual(restored.jobs[aws_id]['status'], 'waiting_input')
+        restored.jobs[aws_id]['status'] = 'running'
+        restored.save(aws_id)
+        supplied = {'APP_SECRET': secret}
+        received = []
+        def deploy(_project, _plan, _attempt_id, environment):
+            received.append(dict(environment))
+            return {'url': 'https://example.test', 'promotion': {'source_job_id': local_id}}
+        with patch('interfaces.http.server.AwsExpressAdapter.deploy', side_effect=deploy) as aws_deploy, \
+                patch.object(restored, 'start_group_worker') as continue_group:
+            restored.resume_promoted_aws(aws_id, supplied)
+        self.assertEqual(aws_deploy.call_count, 1)
+        self.assertEqual(received, [{'APP_SECRET': secret}])
+        self.assertEqual(supplied, {})
+        self.assertEqual(restored.jobs[aws_id]['status'], 'succeeded')
+        self.assertEqual(restored.jobs[aws_id]['attempts'], 1)
+        self.assertNotIn(secret, (self.app.root / aws_id / 'job.json').read_text())
+        self.assertEqual(restored.deployment_group(group['id'])['status'], 'succeeded')
+        continue_group.assert_called_once_with(group['id'])
+
+    def test_changed_work_cannot_resume_promoted_aws(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        work = self.app.root / local_id / 'work'
+        shutil.copytree(Path(self.app.jobs[local_id]['project']), work)
+        plan = analyze(work)
+        plan.required_env = ['APP_SECRET']
+        self.app.jobs[local_id].update(status='succeeded', plan=plan.__dict__, attempts=1,
+            result={'image': f'sky/{local_id}-a1:latest', 'image_id': 'sha256:' + 'a' * 64,
+                    'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+        self.app.save(local_id)
+        with patch.object(self.app, 'run_agent') as agent:
+            self.app.run_group(group['id'])
+        agent.assert_not_called()
+        aws_work = self.app.root / aws_id / 'work'
+        (aws_work / 'server.js').write_text('changed after waiting')
+        self.app.jobs[aws_id]['status'] = 'running'
+        self.app.save(aws_id)
+        supplied = {'APP_SECRET': 'synthetic-private-value'}
+        with patch('interfaces.http.server.AwsExpressAdapter.deploy') as deploy, \
+                patch.object(self.app, 'start_group_worker'):
+            self.app.resume_promoted_aws(aws_id, supplied)
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'failed')
+        self.assertEqual(supplied, {})
+
+    def test_resume_http_routes_waiting_promotion_to_promotion_worker(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        job = self.app.jobs[aws_id]
+        work = self.app.root / aws_id / 'work'
+        shutil.copytree(Path(job['project']), work)
+        plan = analyze(work)
+        plan.target = 'aws-ecs-express'
+        plan.required_env = ['APP_SECRET']
+        job.update(status='waiting_input', plan=plan.__dict__, missing_environment=['APP_SECRET'],
+                   promotion_source_job_id=local_id, work_digest=plan.source_digest)
+        self.app.save(aws_id)
+        payload = json.dumps({'environment': {'APP_SECRET': 'synthetic-private-value'}}).encode()
+        handler = handler_for(self.app).__new__(handler_for(self.app))
+        handler.path = f'/api/deployments/{aws_id}/resume'
+        handler.rfile = io.BytesIO(payload)
+        handler.headers = {'X-Sky-Token': self.app.token, 'Content-Length': str(len(payload))}
+        handler.json_response = Mock()
+        with patch.object(self.app, 'start_job_worker', return_value=True) as start:
+            handler.do_POST()
+        self.assertEqual(handler.json_response.call_args.args[0], 202)
+        self.assertEqual(start.call_args.args[1], self.app.resume_promoted_aws)
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'running')
+        self.assertNotIn('synthetic-private-value', (self.app.root / aws_id / 'job.json').read_text())
+
+    def test_promotion_failure_does_not_record_environment_value(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        local = self.app.jobs[local_id]
+        work = self.app.root / local_id / 'work'
+        shutil.copytree(Path(local['project']), work)
+        plan = analyze(work)
+        plan.required_env = ['APP_SECRET']
+        local.update(status='succeeded', plan=plan.__dict__, attempts=1,
+                     result={'image': f'sky/{local_id}-a1:latest',
+                             'image_id': 'sha256:' + 'a' * 64,
+                             'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+        self.app.save(local_id)
+        self.app.jobs[aws_id]['status'] = 'running'
+        self.app.save(aws_id)
+        secret = 'synthetic-private-value'
+        supplied = {'APP_SECRET': secret}
+        with patch('interfaces.http.server.AwsExpressAdapter.deploy',
+                   side_effect=RuntimeError('failed: ' + secret)), \
+                patch('interfaces.http.server.AwsExpressAdapter.cleanup_failure'):
+            self.app.run_promoted_aws(aws_id, local_id, supplied)
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'failed')
+        self.assertEqual(supplied, {})
+        self.assertNotIn(secret, str(self.app.jobs[aws_id]))
+        self.assertNotIn(secret, (self.app.root / aws_id / 'job.json').read_text())
+        self.assertIn('[REDACTED]', self.app.jobs[aws_id]['events'][-1]['message'])
+
     def test_waiting_for_environment_pauses_next_target(self):
         group = self.create()
         first, second = [item['job_id'] for item in group['targets']]

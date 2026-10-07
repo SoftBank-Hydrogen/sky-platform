@@ -183,8 +183,7 @@ class App(StateRecoveryMixin):
                                     and job['target'] == 'local-docker'
                                     and job['status'] == 'succeeded'), None)
                 if (child['target'] == 'aws-ecs-express' and prior_local
-                        and (prior_local.get('result') or {}).get('image_id')
-                        and not (prior_local.get('plan') or {}).get('required_env')):
+                        and (prior_local.get('result') or {}).get('image_id')):
                     self.run_promoted_aws(child['id'], prior_local['id'])
                 else:
                     self.run_agent(child['id'])
@@ -202,15 +201,34 @@ class App(StateRecoveryMixin):
                 if self.jobs[child['id']]['status'] == 'waiting_input':
                     return
 
-    def run_promoted_aws(self, job_id: str, local_job_id: str) -> None:
+    def resume_promoted_aws(self, job_id: str, environment: dict) -> None:
+        source_job_id = self.jobs[job_id].get('promotion_source_job_id')
+        try:
+            self.run_promoted_aws(job_id, source_job_id, environment)
+        finally:
+            group_id = self.jobs[job_id].get('group_id')
+            if group_id and self.jobs[job_id].get('status') != 'waiting_input':
+                self.start_group_worker(group_id)
+
+    def run_promoted_aws(self, job_id: str, local_job_id: str,
+                         environment: dict | None = None) -> None:
         """Deploy a verified Local image to AWS without editing or rebuilding it."""
         job = self.jobs[job_id]
-        local = self.jobs[local_job_id]
+        local = self.jobs.get(local_job_id) if isinstance(local_job_id, str) else None
         attempt_id = f'{job_id}-a1'
         adapter = None
+        submitted_environment = environment
+        validated_environment = None
         try:
             if self.cancel_requested(job_id):
                 raise DeploymentCancelled()
+            if (not isinstance(local, dict) or job.get('target') != 'aws-ecs-express'
+                    or job.get('status') != 'running' or job.get('attempts') != 0
+                    or not job.get('group_id') or local.get('group_id') != job['group_id']
+                    or local.get('target') != 'local-docker'
+                    or local.get('group_order', -1) >= job.get('group_order', -1)
+                    or local.get('status') != 'succeeded'):
+                raise ValueError('같은 배포 묶음에서 성공한 Local 작업만 AWS에 승격할 수 있습니다.')
             project = Path(job['project'])
             work = self.root / job_id / 'work'
             local_work = self.root / local_job_id / 'work'
@@ -223,21 +241,45 @@ class App(StateRecoveryMixin):
                     or result.get('platform') != 'linux/amd64'
                     or local_attempt != f"{local_job_id}-a{local.get('attempts')}"):
                 raise ValueError('로컬 검증 산출물의 소스 또는 이미지 출처를 확인할 수 없습니다.')
-            if work.exists():
-                raise ValueError('AWS 작업용 소스가 이미 존재합니다. 자동으로 덮어쓰지 않습니다.')
             validate_infrastructure(inspect_infrastructure(local_work), 'aws-ecs-express')
-            shutil.copytree(local_work, work)
+            if work.exists():
+                if (work.is_symlink() or not work.is_dir()
+                        or job.get('promotion_source_job_id') != local_job_id
+                        or job.get('work_digest') != source_digest(work)):
+                    raise ValueError('입력 대기 이후 AWS 작업용 소스의 무결성을 확인할 수 없습니다.')
+            else:
+                if job.get('promotion_source_job_id') is not None:
+                    raise ValueError('AWS 승격 작업용 소스가 사라졌습니다. 새 배포를 시작하세요.')
+                shutil.copytree(local_work, work)
             if source_digest(work) != local_plan['source_digest']:
                 raise ValueError('AWS로 복사한 작업용 소스가 로컬 검증 소스와 다릅니다.')
             plan = DeploymentPlan(**{**local_plan, 'target': 'aws-ecs-express'})
+            if job.get('plan') is not None and job['plan'] != asdict(plan):
+                raise ValueError('입력 대기 이후 AWS 배포 계획이 변경됐습니다.')
             promotion = {'source_job_id': local_job_id, 'attempt_id': local_attempt,
                          'image': result['image'], 'image_id': result['image_id'],
                          'platform': result['platform']}
+            if plan.required_env and environment is None:
+                with self.lock:
+                    if job.get('cancel_requested'):
+                        raise DeploymentCancelled()
+                    job.update(plan=asdict(plan), diff=dockerfile_diff(project, asdict(plan)),
+                               promotion_source_job_id=local_job_id, work_digest=source_digest(work),
+                               status='waiting_input', missing_environment=sorted(plan.required_env),
+                               input_reason='AWS에 사용할 환경변수 값을 다시 입력하세요. Sky 작업 기록에는 저장하지 않지만 AWS 서비스 설정에 전달됩니다.')
+                    self.save(job_id)
+                self.event(job_id, 'waiting_input', 'AWS 승격에 필요한 환경변수 입력을 기다립니다.')
+                return
+            validated_environment = validate_environment(environment, plan.required_env)
+            if set(validated_environment) != set(plan.required_env):
+                raise ValueError('AWS 승격에는 계획에 선언된 환경변수만 입력하세요.')
             with self.lock:
                 if job.get('cancel_requested'):
                     raise DeploymentCancelled()
                 job['plan'] = asdict(plan)
                 job['diff'] = dockerfile_diff(project, job['plan'])
+                job['promotion_source_job_id'] = local_job_id
+                job['work_digest'] = source_digest(work)
                 job['attempts'] = 1
                 self.save(job_id)
             self.event(job_id, 'promotion', '로컬 HTTP 검증을 통과한 이미지를 AWS로 승격합니다.')
@@ -250,9 +292,10 @@ class App(StateRecoveryMixin):
             adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
                                         AwsSettings(**job['aws']), existing=job.get('prior_result'),
                                         checkpoint=checkpoint, promoted_image=promotion)
-            result = adapter.deploy(context, plan, attempt_id)
+            result = adapter.deploy(context, plan, attempt_id, validated_environment)
             with self.lock:
-                job.update(status='succeeded', result=result, deployment_state='active')
+                job.update(status='succeeded', result=result, deployment_state='active',
+                           missing_environment=[], input_reason=None)
                 self.save(job_id)
                 previous = self.jobs.get(job.get('replaces_job_id'))
                 if previous and previous.get('deployment_state', 'active') == 'active':
@@ -267,7 +310,12 @@ class App(StateRecoveryMixin):
                 self.save(job_id)
             self.event(job_id, 'cancelled', 'AWS 승격 시작 전에 취소됐습니다.')
         except Exception as exc:
-            self.event(job_id, 'error', redact(str(exc))[:500])
+            message = str(exc)
+            values = (validated_environment or submitted_environment or {}).values()
+            for value in sorted(set(values), key=len, reverse=True):
+                if value:
+                    message = message.replace(value, '[REDACTED]')
+            self.event(job_id, 'error', redact(message)[:500])
             if adapter is not None:
                 try:
                     adapter.cleanup_failure(attempt_id)
@@ -283,6 +331,11 @@ class App(StateRecoveryMixin):
                         previous['deployment_state'] = 'needs_attention'
                         self.save(previous['id'])
                 self.save(job_id)
+        finally:
+            if validated_environment is not None:
+                validated_environment.clear()
+            if submitted_environment is not None:
+                submitted_environment.clear()
 
     def create_deployment_group(self, project, application_id, targets, public):
         """Reserve stateless target jobs from one checked upload before starting any adapter."""
@@ -2014,9 +2067,18 @@ def handler_for(app: App):
                             self.json_response(409, {"error": "입력 대기 이후 작업용 소스가 없거나 변경됐습니다. 새 배포를 시작하세요."})
                             return
                         environment = validate_environment(payload['environment'], job['missing_environment'])
+                        promoted = 'promotion_source_job_id' in job
+                        if promoted and (job.get('target') != 'aws-ecs-express'
+                                         or job.get('attempts') != 0
+                                         or not isinstance(job.get('plan'), dict)
+                                         or set(environment) != set(job['plan'].get('required_env', []))):
+                            environment.clear()
+                            self.json_response(409, {'error': 'AWS 이미지 승격 입력 상태가 변경됐습니다. 새 배포를 시작하세요.'})
+                            return
                         job.update(status="running", environment_names=sorted(environment), missing_environment=[])
                         app.save(job_id)
-                    started = app.start_job_worker(job_id, app.run_agent, environment)
+                    worker = app.resume_promoted_aws if promoted else app.run_agent
+                    started = app.start_job_worker(job_id, worker, environment)
                     self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 if re.fullmatch(r"/api/deployments/[a-f0-9]{16}/resume-postgres", self.path):
