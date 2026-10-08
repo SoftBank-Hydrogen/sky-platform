@@ -37,6 +37,7 @@ from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       inspect_infrastructure,
                                       plan_infrastructure, preflight_sqlite_conversion,
                                       validate_infrastructure)
+from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
 from application.network_operations import NetworkOperations
 from adapters.aws.postgres import (AwsPostgresProvisioner, PostgresRequest,
@@ -625,6 +626,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                        for other in self.jobs.values())
                 if aws_in_group:
                     adapter_factory = lambda event: LocalDockerAdapter(event, platform='linux/amd64')
+            if target == 'local-docker' and job.get('local_sqlite_binding'):
+                adapter_factory = lambda event: LocalDockerAdapter(
+                    event, sqlite_binding=job['local_sqlite_binding'])
             if target == "cloud-run":
                 settings = CloudRunSettings(**job["cloud"])
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
@@ -639,6 +643,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     infrastructure_plan=job.get('infrastructure_plan'),
                                     postgres_request=postgres_request_from_job(job),
                                     sqlite_conversion=job.get('sqlite_conversion'),
+                                    local_sqlite_binding=job.get('local_sqlite_binding'),
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))
@@ -1842,12 +1847,19 @@ def handler_for(app: App):
                             archive.write_bytes(body)
                         project = extract_project(archive, Path(temporary) / 'source')
                         profile = inspect_infrastructure(project)
+                        local_sqlite_mount = self.headers.get('X-Local-Sqlite-Mount')
+                        local_sqlite_binding = None
+                        if local_sqlite_mount is not None:
+                            local_sqlite_binding = preflight_local_sqlite(
+                                project, profile, self.headers.get('X-Application-Id', ''),
+                                local_sqlite_mount)
                         digest = source_digest(project)
                         availability = {'local-docker': None,
                                         'aws-ecs-express': app.aws_settings.unavailable_reason(),
                                         'cloud-run': app.cloud_settings.unavailable_reason()}
                         reports, candidates = compare_targets(
-                            profile, availability, public_access=public_flag == 'true')
+                            profile, availability, public_access=public_flag == 'true',
+                            local_sqlite=local_sqlite_binding is not None)
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile).as_dict(),
                                              'inspection': {
@@ -1856,6 +1868,7 @@ def handler_for(app: App):
                                                  'scanned_files': profile.scanned_files,
                                              },
                                              'reports': reports,
+                                             'local_sqlite_binding': local_sqlite_binding,
                                              'candidates': candidates})
                     return
                 if self.path == '/api/deployment-groups':
@@ -1867,7 +1880,8 @@ def handler_for(app: App):
                     public_flag = self.headers.get('X-Public-Access', 'false')
                     if public_flag not in {'true', 'false'}:
                         raise ValueError('공개 접근 선택이 올바르지 않습니다.')
-                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-')) for name in self.headers):
+                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-', 'x-local-sqlite-'))
+                           for name in self.headers):
                         raise ValueError('다중 대상 배포는 현재 데이터베이스 연결·이전을 지원하지 않습니다.')
                     if 'aws-ecs-express' in targets and public_flag != 'true':
                         raise ValueError('AWS ECS Express를 포함하려면 인터넷 공개를 허용하세요.')
@@ -1943,6 +1957,12 @@ def handler_for(app: App):
                     sqlite_flag = self.headers.get('X-Sqlite-Convert', 'false')
                     if sqlite_flag not in {'true', 'false'}:
                         raise ValueError('SQLite 변환 선택 값이 올바르지 않습니다.')
+                    local_sqlite_mount = self.headers.get('X-Local-Sqlite-Mount')
+                    if local_sqlite_mount is not None:
+                        if target not in {'auto', 'local-docker'} or sqlite_flag == 'true' or postgres_flag == 'true':
+                            raise ValueError('Local SQLite 볼륨은 Local Docker 단일 배포에서만 사용합니다.')
+                        if len(local_sqlite_mount) > 200 or not local_sqlite_mount.startswith('/'):
+                            raise ValueError('Local SQLite 볼륨 경로는 컨테이너 내부의 절대 경로여야 합니다.')
                     create_plan_id = self.headers.get('X-Postgres-Create-Plan')
                     if create_plan_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', create_plan_id):
                         raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
@@ -2008,14 +2028,23 @@ def handler_for(app: App):
                             archive.unlink(missing_ok=True)
                         infrastructure_profile = inspect_infrastructure(project)
                         sqlite_conversion = None
+                        local_sqlite_binding = None
                         deployment_profile = infrastructure_profile
+                        if local_sqlite_mount is not None:
+                            if create_plan_id is not None:
+                                raise ValueError('Local SQLite 볼륨과 RDS 생성은 함께 사용할 수 없습니다.')
+                            local_sqlite_binding = preflight_local_sqlite(
+                                project, infrastructure_profile, application_id, local_sqlite_mount)
+                            if target == 'auto':
+                                target = 'local-docker'
                         if sqlite_flag == 'true':
                             if postgres_request is None:
                                 raise ValueError('SQLite 자동 이전은 PostgreSQL RDS 선택이 필요합니다.')
                             sqlite_conversion, deployment_profile = preflight_sqlite_conversion(
                                 project, infrastructure_profile)
                         validate_infrastructure(deployment_profile, target,
-                                                postgres=postgres_request is not None)
+                                                postgres=postgres_request is not None,
+                                                local_sqlite=local_sqlite_binding is not None)
                         if postgres_request is not None:
                             if sqlite_conversion is None:
                                 collect_sql_migrations(project)
@@ -2052,8 +2081,15 @@ def handler_for(app: App):
                                     ('검토된 생성 계획을 확인해 AWS를 선택했습니다. DB는 생성 후 앱 실패에도 보존됩니다.'
                                      if create_plan_id is not None else
                                      'RDS 소유권을 확인해 AWS를 선택했습니다. DB는 새로 생성하지 않으며 앱 종료 후에도 보존됩니다.'))
+                            if local_sqlite_binding is not None:
+                                infrastructure_plan['planner'] = 'user-confirmed-storage'
+                                infrastructure_plan['rationale'] = (
+                                    '사용자가 Local Docker와 SQLite DB 디렉터리의 영속 볼륨 경로를 확인했습니다. '
+                                    '볼륨은 앱 종료 후에도 보존합니다.')
+                                infrastructure_plan['sqlite_volume'] = local_sqlite_binding
                         infrastructure_plan['compatibility'] = infrastructure_compatibility(
                             deployment_profile, target, postgres=postgres_request is not None,
+                            local_sqlite=local_sqlite_binding is not None,
                             public_access=public_flag == 'true')
                         if sqlite_conversion is not None:
                             infrastructure_plan['conversion_pending'] = 'sqlite-to-postgresql'
@@ -2062,6 +2098,16 @@ def handler_for(app: App):
                             raise ValueError('선택한 배포 대상의 공개 범위를 지원하지 않습니다.')
                         with app.lock:
                             app.ensure_application_available(application_id, target)
+                            if local_sqlite_binding is not None and any(
+                                old.get('application_id') == application_id
+                                and old.get('target') == 'local-docker'
+                                and old.get('status') == 'succeeded'
+                                and old.get('deployment_state', 'active') == 'active'
+                                for old in app.jobs.values()
+                            ):
+                                raise ValueError(
+                                    '기존 Local 배포가 실행 중입니다. SQLite 데이터 보호를 위해 종료 후 재배포하세요. '
+                                    '앱 볼륨은 종료 후에도 남습니다.')
                             latest = None
                             if target == 'aws-ecs-express':
                                 previous = [old for old in app.jobs.values()
@@ -2090,6 +2136,8 @@ def handler_for(app: App):
                                 "events": []}
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion
+                            if local_sqlite_binding is not None:
+                                app.jobs[job_id]['local_sqlite_binding'] = local_sqlite_binding
                             app.jobs[job_id]['source_digest'] = source_digest(project)
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)

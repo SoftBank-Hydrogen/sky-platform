@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -16,9 +17,42 @@ from application.deployment_core import DeploymentPlan, source_digest, validate_
 
 
 class LocalDockerAdapter:
-    def __init__(self, event, *, platform: str | None = None):
+    def __init__(self, event, *, platform: str | None = None,
+                 sqlite_binding: dict | None = None):
         self.event = event
         self.platform = platform
+        self.sqlite_binding = sqlite_binding
+
+    def prepare_sqlite_volume(self) -> None:
+        binding = self.sqlite_binding
+        if binding is None:
+            return
+        name = binding["volume_name"]
+        volume = self.inspect_resource("volume", name)
+        if volume is None:
+            self.command(["docker", "volume", "create",
+                          "--label", "sky-managed=true",
+                          "--label", f"sky-application={binding['application_id']}",
+                          "--label", f"sky-mount={binding['mount_path']}", name], timeout=30)
+            volume = self.inspect_resource("volume", name)
+        labels = (volume or {}).get("Labels") or {}
+        if (not volume or volume.get("Name") != name or volume.get("Driver") != "local"
+                or labels.get("sky-managed") != "true"
+                or labels.get("sky-application") != binding["application_id"]
+                or labels.get("sky-mount") != binding["mount_path"]):
+            raise ValueError("SQLite 볼륨 소유권·경로가 맞지 않아 배포를 중단합니다.")
+        attached = self.command(
+            ["docker", "ps", "-a", "-q", "--filter", f"volume={name}"], timeout=30, quiet=True)
+        if attached:
+            raise ValueError("이 앱의 SQLite 볼륨을 연결한 컨테이너가 있습니다. 기존 배포를 종료한 뒤 재배포하세요.")
+
+    @staticmethod
+    def available_loopback_port() -> int:
+        # Docker's automatically allocated host port can change on restart.
+        # Persist the mapping for a stateful local service.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            return listener.getsockname()[1]
 
     def command(self, args: list[str], timeout: int = 300, quiet: bool = False) -> str:
         if not quiet:
@@ -50,14 +84,20 @@ class LocalDockerAdapter:
         image_id = inspect_image_id(self.command, image) if self.platform else None
         created = False
         try:
-            self.event("starting", "Starting container on a loopback-only random port")
+            self.prepare_sqlite_volume()
+            self.event("starting", "Starting container on a loopback-only port")
+            host_port = self.available_loopback_port() if self.sqlite_binding else None
             run_args = [
                 "docker", "run", "-d", "--name", name, "--label", "app=sky",
                 "--label", f"sky-attempt={job_id}",
                 "--memory", "256m", "--cpus", "1", "--pids-limit", "128",
                 "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-                "-e", f"PORT={plan.port}", "-p", f"127.0.0.1::{plan.port}",
+                "-e", f"PORT={plan.port}", "-p",
+                f"127.0.0.1:{host_port}:{plan.port}" if host_port else f"127.0.0.1::{plan.port}",
             ]
+            if self.sqlite_binding:
+                binding = self.sqlite_binding
+                run_args += ["--mount", f"type=volume,source={binding['volume_name']},target={binding['mount_path']}"]
             if environment:
                 # Private temporary file outside the build context; never store values in job state.
                 with tempfile.NamedTemporaryFile(mode="w", prefix="sky-env-", encoding="utf-8") as env_file:
@@ -68,8 +108,24 @@ class LocalDockerAdapter:
             else:
                 self.command(run_args + [image])
             created = True
+            if self.sqlite_binding:
+                container = self.inspect_resource("container", name)
+                binding = self.sqlite_binding
+                mounts = (container or {}).get("Mounts") or []
+                if not any(mount.get("Type") == "volume"
+                           and mount.get("Name") == binding["volume_name"]
+                           and mount.get("Destination") == binding["mount_path"] for mount in mounts):
+                    raise RuntimeError("SQLite 볼륨 연결을 확인하지 못했습니다.")
+                attached = self.command(
+                    ["docker", "ps", "-a", "-q", "--no-trunc",
+                     "--filter", f"volume={binding['volume_name']}"],
+                    timeout=30, quiet=True).splitlines()
+                if len(attached) != 1 or attached[0] != container.get("Id"):
+                    raise RuntimeError("SQLite 볼륨이 하나의 컨테이너에만 연결됐는지 확인하지 못했습니다.")
             binding = self.command(["docker", "port", name, f"{plan.port}/tcp"])
             url = "http://" + binding.splitlines()[0]
+            if host_port and url != f"http://127.0.0.1:{host_port}":
+                raise RuntimeError("SQLite 서비스의 고정 루프백 포트를 확인하지 못했습니다.")
             self.event("verifying", f"Checking HTTP response: {url}{plan.health_path}")
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             for _ in range(30):
@@ -83,6 +139,9 @@ class LocalDockerAdapter:
                                     raise RuntimeError('HTTP 검증 중 로컬 이미지 또는 컨테이너가 변경됐습니다.')
                             return {"url": url, "health_url": url + plan.health_path,
                                     "container": name, "image": image,
+                                    **({"sqlite_volume": self.sqlite_binding["volume_name"],
+                                        "sqlite_mount": self.sqlite_binding["mount_path"]}
+                                       if self.sqlite_binding else {}),
                                     **({"image_id": image_id, "platform": self.platform} if image_id else {})}
                 except (OSError, urllib.error.URLError):
                     pass
@@ -106,7 +165,8 @@ class LocalDockerAdapter:
     def inspect_resource(kind: str, name: str) -> dict | None:
         result = subprocess.run(["docker", kind, "inspect", name], capture_output=True, text=True, timeout=15)
         if result.returncode:
-            if "No such object" in result.stderr or "No such image" in result.stderr or "No such container" in result.stderr:
+            if any(message in result.stderr.lower() for message in
+                   ("no such object", "no such image", "no such container", "no such volume")):
                 return None
             raise RuntimeError("Docker 리소스 상태를 확인하지 못했습니다: " + result.stderr.strip()[-300:])
         try:

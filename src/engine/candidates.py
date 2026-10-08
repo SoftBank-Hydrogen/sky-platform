@@ -8,12 +8,15 @@ SUPPORTED_TARGETS = ("local-docker", "aws-ecs-express", "cloud-run")
 
 
 def compare_targets(
-    profile: InfrastructureProfile, availability: dict[str, str | None], *, public_access: bool
+    profile: InfrastructureProfile, availability: dict[str, str | None], *,
+    public_access: bool, local_sqlite: bool = False
 ) -> tuple[list[dict], list[dict]]:
     """Evaluate the same target variants for preview and automatic deployment."""
     reports = []
     for target in SUPPORTED_TARGETS:
-        report = infrastructure_compatibility(profile, target, public_access=public_access)
+        report = infrastructure_compatibility(
+            profile, target, public_access=public_access,
+            local_sqlite=local_sqlite and target == "local-docker")
         reason = availability[target]
         reports.append(
             {

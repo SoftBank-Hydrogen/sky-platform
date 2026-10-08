@@ -125,6 +125,16 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                   if completed and migration else '완료된 SQL 마이그레이션 결과가 없습니다.')})
         checks.append({'name': 'cross_environment_data_migration', 'status': 'unverified',
                        'detail': '환경 간 기존 데이터 이전은 SQL 스키마 마이그레이션과 별도로 검증해야 합니다.'})
+    local_sqlite = job.get('local_sqlite_binding')
+    if isinstance(local_sqlite, dict):
+        mounted = bool(completed and result.get('sqlite_volume') == local_sqlite.get('volume_name')
+                       and result.get('sqlite_mount') == local_sqlite.get('mount_path'))
+        checks.append({'name': 'local_sqlite_mount',
+                       'status': 'passed' if mounted else 'unverified',
+                       'detail': ('배포 시 컨테이너의 지정 볼륨 연결을 확인했습니다.'
+                                  if mounted else '배포 시 SQLite 볼륨 연결 확인 기록이 없습니다.')})
+        checks.append({'name': 'data_persistence_after_restart', 'status': 'unverified',
+                       'detail': '이 앱의 DB 기록을 재시작 전후에 대조한 작업별 증거가 없습니다.'})
 
     ir = job.get('application_ir')
     hypotheses = ir.get('hypotheses') or [] if isinstance(ir, dict) else []

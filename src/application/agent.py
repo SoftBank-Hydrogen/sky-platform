@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from application.analysis import AISettings, redact
 from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
+from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
@@ -177,6 +178,7 @@ class DeploymentTools:
                  *, adapter_factory, attempts=0, target="local-docker",
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
                  sqlite_conversion: dict | None = None,
+                 local_sqlite_binding: dict | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -194,6 +196,7 @@ class DeploymentTools:
                 raise ValueError('PostgreSQL 연결값은 사용자가 직접 덮어쓸 수 없습니다.')
         self.postgres_request = postgres_request
         self.sqlite_conversion = sqlite_conversion
+        self.local_sqlite_binding = local_sqlite_binding
         self.infrastructure_plan = infrastructure_plan
         self.plan = None
         self.result = None
@@ -388,8 +391,15 @@ class DeploymentTools:
     def deploy_application(self):
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
+        if self.local_sqlite_binding:
+            checked = preflight_local_sqlite(
+                self.work, inspect_infrastructure(self.work),
+                self.local_sqlite_binding["application_id"], self.local_sqlite_binding["mount_path"])
+            if checked != self.local_sqlite_binding:
+                raise ValueError("SQLite 소스·볼륨 경로가 승인된 배포 입력과 달라졌습니다.")
         validate_infrastructure(inspect_infrastructure(self.work), self.target,
-                                postgres=self.postgres_request is not None)
+                                postgres=self.postgres_request is not None,
+                                local_sqlite=self.local_sqlite_binding is not None)
         migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
         if source_digest(self.work) != self.plan.source_digest:
             raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
@@ -456,6 +466,7 @@ class DeploymentAgent:
                 (MANAGED_POSTGRES_ENV if self.tools.postgres_request else set())),
             "managed_postgres_connection": self.tools.postgres_request is not None,
             "sqlite_conversion": self.tools.sqlite_conversion,
+            "local_sqlite_binding": self.tools.local_sqlite_binding,
             "attempts_used": self.tools.attempts}, ensure_ascii=False)}]
         started = time.monotonic()
         while self.steps < self.max_steps:

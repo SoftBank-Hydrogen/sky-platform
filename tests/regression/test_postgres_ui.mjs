@@ -23,6 +23,20 @@ test('SQLite conversion header is sent only with an explicit RDS choice', () => 
   assert.throws(() => context.postgresUploadHeaders('demo-app'), /SQLite 이전에는 기존 RDS/);
 });
 
+test('Local SQLite header needs an explicit compatible single upload', () => {
+  const start = html.indexOf('function localSqliteUploadHeaders()');
+  const end = html.indexOf('function selectedUploadBody()', start);
+  assert.ok(start >= 0 && end > start);
+  const elements = {localSqlite: {checked: true}, localSqliteMount: {value: '/app/data'},
+    multiMode: {checked: false}, target: {value: 'local-docker'},
+    postgresExisting: {checked: false}, sqliteConvert: {checked: false}};
+  const context = {el: id => elements[id], githubMode: false, Error};
+  runInNewContext(html.slice(start, end), context);
+  assert.equal(context.localSqliteUploadHeaders()['X-Local-Sqlite-Mount'], '/app/data');
+  elements.multiMode.checked = true;
+  assert.throws(() => context.localSqliteUploadHeaders(), /단일 Local Docker/);
+});
+
 test('deployment certificate separates recorded checks from unverified checks', async () => {
   const start = html.indexOf('const certificateLabels=');
   const end = html.indexOf("el('certificateSection').ontoggle", start);
@@ -52,6 +66,7 @@ test('environment preview shows target differences before deployment', async () 
   assert.ok(start >= 0 && end > start);
   const file = {name: 'app.zip'};
   const elements = {file: {files: [file]}, folder: {files: []}, public: {checked: true},
+                    localSqlite: {checked: false},
                     compatibilityPreview: {}, compatibilityMap: {hidden: true, textContent: ''}};
   const calls = [];
   const context = {el: id => elements[id], Error, String,

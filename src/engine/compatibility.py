@@ -182,7 +182,8 @@ def deployment_access_mode(target: str, public_access: bool) -> str | None:
 
 
 def infrastructure_compatibility(
-    profile: InfrastructureProfile, target: str, *, postgres: bool = False, public_access: bool | None = None
+    profile: InfrastructureProfile, target: str, *, postgres: bool = False,
+    local_sqlite: bool = False, public_access: bool | None = None
 ) -> dict:
     """Assess detected requirements against the actual Sky target adapter."""
     if target != "auto" and target not in TARGET_CAPABILITIES:
@@ -217,7 +218,8 @@ def infrastructure_compatibility(
         )
 
     if "sqlite" in profile.requirements or profile.storage == "sqlite":
-        check("DATA-SQLITE-01", "sqlite", "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다")
+        check("DATA-SQLITE-01", "sqlite", None if local_sqlite and target == "local-docker" else
+              "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다")
     if ("database" in profile.requirements or profile.storage == "database") and not (
         postgres and capabilities["postgresql_binding"] and profile.database_engines == ("postgresql",)
     ):
@@ -290,6 +292,7 @@ def infrastructure_compatibility(
         "declared_image_platform": profile.final_image_platform,
         "access_mode": access_mode,
         "postgres_binding": postgres,
+        "local_sqlite_binding": local_sqlite and target == "local-docker",
         "adapter_capabilities": capabilities.copy(),
         "compatible": not problems,
         "problems": problems,
@@ -299,11 +302,12 @@ def infrastructure_compatibility(
     }
 
 
-def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False) -> None:
-    report = infrastructure_compatibility(profile, target, postgres=postgres)
+def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False,
+                            local_sqlite: bool = False) -> None:
+    report = infrastructure_compatibility(profile, target, postgres=postgres, local_sqlite=local_sqlite)
     if report["problems"]:
         sqlite_guidance = (
-            " SQLite 앱은 현재 Local Docker·일반 자동 배포에서 영속 저장소를 지원하지 않습니다. "
+            " SQLite 앱은 Local Docker에서 DB 경로를 확인한 영속 볼륨을 명시하거나 "
             "AWS ECS Express를 선택하고 인터넷 공개를 허용한 뒤, "
             "'SQLite 파일을 PostgreSQL로 이전하기'와 기존 RDS 또는 신규 RDS 생성 계획을 선택하세요. "
             "이전은 실험적이며 RDS 비용이 발생합니다."

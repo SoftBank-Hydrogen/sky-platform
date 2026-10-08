@@ -53,6 +53,17 @@ def check_deployment(job: dict) -> dict:
                     or containers[0].get('Config', {}).get('Labels', {}).get('app') != 'sky'
                     or containers[0].get('Config', {}).get('Image') != result.get('image')):
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'Container identity or state changed'}
+            sqlite_binding = job.get('local_sqlite_binding')
+            if isinstance(sqlite_binding, dict):
+                mounts = containers[0].get('Mounts') or []
+                if (result.get('sqlite_volume') != sqlite_binding.get('volume_name')
+                        or result.get('sqlite_mount') != sqlite_binding.get('mount_path')
+                        or not any(mount.get('Type') == 'volume'
+                                   and mount.get('Name') == sqlite_binding.get('volume_name')
+                                   and mount.get('Destination') == sqlite_binding.get('mount_path')
+                                   for mount in mounts)):
+                    return {'healthy': False, 'checked_at': checked_at,
+                            'reason': 'SQLite volume mount identity changed'}
             url = result.get('url', '')
             parsed = urllib.parse.urlsplit(url)
             if (parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port
