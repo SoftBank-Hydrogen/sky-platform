@@ -16,6 +16,48 @@ def _digest(value: object) -> str | None:
     return value if isinstance(value, str) and _SHA256.fullmatch(value) else None
 
 
+def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dict:
+    """Expose recorded decisions, not unverified source or cloud claims."""
+    ir = job.get('application_ir') if isinstance(job.get('application_ir'), dict) else {}
+    evidence = ir.get('evidence') if isinstance(ir.get('evidence'), list) else []
+    requirements = ir.get('requirements') if isinstance(ir.get('requirements'), list) else []
+    constraints = compatibility.get('constraint_results')
+    constraints = constraints if isinstance(constraints, list) else []
+    candidates = infrastructure.get('candidates')
+    candidates = candidates if isinstance(candidates, list) else []
+    return {
+        'status': 'recorded' if ir and constraints else 'incomplete',
+        'applies_to_uploaded_source_sha256': _digest(job.get('source_digest')),
+        'topology_status': ir.get('topology_status', 'unresolved'),
+        'source_evidence': [
+            {'id': item['id'], 'path': item['path'], 'signal': item['signal']}
+            for item in evidence if isinstance(item, dict)
+            and all(isinstance(item.get(key), str) for key in ('id', 'path', 'signal'))
+        ],
+        'requirements': [
+            {'id': item['id'], 'kind': item['kind'], 'evidence_ids': item.get('evidence_ids', [])}
+            for item in requirements if isinstance(item, dict)
+            and isinstance(item.get('id'), str) and isinstance(item.get('kind'), str)
+        ],
+        'constraint_results': [
+            {'rule_id': item['rule_id'], 'status': item['status'],
+             'requirement': item.get('requirement'),
+             'evidence_ids': item.get('evidence_ids', []), 'reason': item.get('reason')}
+            for item in constraints if isinstance(item, dict)
+            and isinstance(item.get('rule_id'), str) and item.get('status') in {'satisfied', 'violated'}
+        ],
+        'candidate_evaluations': [
+            {'target': item['id'], 'status': item['status'], 'selected': item.get('selected') is True,
+             'violated_rule_ids': item.get('violated_rule_ids', [])}
+            for item in candidates if isinstance(item, dict)
+            and isinstance(item.get('id'), str) and isinstance(item.get('status'), str)
+        ],
+        'selected_target': job.get('target'),
+        'selection_basis': infrastructure.get('planner'),
+        'note': '업로드한 소스와 작업 시점의 판단 기록입니다. 실행 중 상태의 독립적인 증명이 아닙니다.',
+    }
+
+
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
@@ -99,6 +141,7 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                         rehearsal.get('image_id') if rehearsal_passed else None),
                      'promoted_from_job_id': promotion.get('source_job_id') if promoted else None,
                      'registry_manifest_digest': registry_digest},
+        'decision_trace': _decision_trace(job, infrastructure, compatibility),
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],
         'rollback': {'previous_job_id': job.get('replaces_job_id'),

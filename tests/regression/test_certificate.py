@@ -34,6 +34,7 @@ class CertificateTests(unittest.TestCase):
         self.assertEqual(statuses['image_identity'], 'unverified')
         self.assertEqual(statuses['ai_model_execution'], 'unverified')
         self.assertEqual(statuses['cross_environment_data_migration'], 'unverified')
+        self.assertEqual(certificate['decision_trace']['status'], 'incomplete')
         self.assertNotIn('synthetic-private-value', str(certificate))
         self.assertNotIn('result', certificate)
 
@@ -77,6 +78,32 @@ class CertificateTests(unittest.TestCase):
         self.assertEqual(checks['image_identity'], 'unverified')
         self.assertEqual(certificate['artifact']['local_image_id'], 'sha256:' + 'd' * 64)
         self.assertEqual(certificate['artifact']['promoted_from_job_id'], source_job_id)
+
+    def test_decision_trace_links_source_constraint_and_selected_candidate(self):
+        job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'aws-ecs-express',
+               'source_digest': 'a' * 64,
+               'application_ir': {'topology_status': 'unresolved',
+                                  'requirements': [{'id': 'R-image-platform', 'kind': 'image-platform',
+                                                    'evidence_ids': ['E-1']}],
+                                  'evidence': [{'id': 'E-1', 'path': 'Dockerfile',
+                                                'signal': 'image-platform', 'excerpt': 'private-value'}]},
+               'infrastructure_plan': {'planner': 'openai',
+                                       'compatibility': {'constraint_results': [
+                                          {'rule_id': 'IMAGE-PLATFORM-01', 'status': 'satisfied',
+                                            'requirement': 'image-platform',
+                                            'evidence_ids': ['E-1'], 'reason': '플랫폼 일치'}]},
+                                       'candidates': [{'id': 'aws-ecs-express', 'status': 'eligible',
+                                                       'selected': True, 'violated_rule_ids': []}]},
+               'result': {'url': 'https://example.com'}}
+        trace = deployment_certificate(job)['decision_trace']
+        self.assertEqual(trace['status'], 'recorded')
+        self.assertEqual(trace['applies_to_uploaded_source_sha256'], 'a' * 64)
+        self.assertEqual(trace['source_evidence'][0]['id'], 'E-1')
+        self.assertEqual(trace['requirements'][0]['evidence_ids'], ['E-1'])
+        self.assertEqual(trace['constraint_results'][0]['evidence_ids'], ['E-1'])
+        self.assertTrue(trace['candidate_evaluations'][0]['selected'])
+        self.assertEqual(trace['selection_basis'], 'openai')
+        self.assertNotIn('private-value', str(trace))
 
     def test_certificate_api_requires_session_and_existing_job(self):
         with tempfile.TemporaryDirectory() as directory:
