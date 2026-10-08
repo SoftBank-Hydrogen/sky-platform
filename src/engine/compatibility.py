@@ -182,8 +182,12 @@ def deployment_access_mode(target: str, public_access: bool) -> str | None:
 
 
 def infrastructure_compatibility(
-    profile: InfrastructureProfile, target: str, *, postgres: bool = False,
-    local_sqlite: bool = False, public_access: bool | None = None
+    profile: InfrastructureProfile,
+    target: str,
+    *,
+    postgres: bool = False,
+    local_sqlite: bool = False,
+    public_access: bool | None = None,
 ) -> dict:
     """Assess detected requirements against the actual Sky target adapter."""
     if target != "auto" and target not in TARGET_CAPABILITIES:
@@ -218,8 +222,13 @@ def infrastructure_compatibility(
         )
 
     if "sqlite" in profile.requirements or profile.storage == "sqlite":
-        check("DATA-SQLITE-01", "sqlite", None if local_sqlite and target == "local-docker" else
-              "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다")
+        check(
+            "DATA-SQLITE-01",
+            "sqlite",
+            None
+            if local_sqlite and target == "local-docker"
+            else "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다",
+        )
     if ("database" in profile.requirements or profile.storage == "database") and not (
         postgres and capabilities["postgresql_binding"] and profile.database_engines == ("postgresql",)
     ):
@@ -302,8 +311,9 @@ def infrastructure_compatibility(
     }
 
 
-def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False,
-                            local_sqlite: bool = False) -> None:
+def validate_infrastructure(
+    profile: InfrastructureProfile, target: str, *, postgres: bool = False, local_sqlite: bool = False
+) -> None:
     report = infrastructure_compatibility(profile, target, postgres=postgres, local_sqlite=local_sqlite)
     if report["problems"]:
         sqlite_guidance = (
