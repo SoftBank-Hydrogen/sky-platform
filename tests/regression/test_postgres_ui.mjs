@@ -125,6 +125,36 @@ test('GitHub link deploy sends a pinned-source request with auto deploy opt-in',
   assert.deepEqual(calls[1], ['follow', 'b'.repeat(16)]);
 });
 
+test('failed GitHub deployment is labeled as failed and exposes manual retry', async () => {
+  const start = html.indexOf('async function refreshGithubSources(){');
+  const end = html.indexOf("el('resumePostgres').onclick", start);
+  assert.ok(start >= 0 && end > start);
+  const elements = new Map();
+  const makeElement = () => ({children: [], textContent: '',
+    replaceChildren() { this.children = []; }, append(child) { this.children.push(child); }});
+  const el = id => {if (!elements.has(id)) elements.set(id, makeElement()); return elements.get(id);};
+  const source = {id: 'a'.repeat(16), application_id: 'demo-app', branch: 'main',
+    repository_url: 'https://github.com/team/demo', last_revision: 'b'.repeat(40),
+    enabled: true, last_deployment_status: 'failed', retryable: true, last_error: null};
+  const calls = [];
+  const context = {el, document: {createElement: makeElement}, history: async () => {},
+    api: async (path, options) => {
+      calls.push([path, options]);
+      return path === '/api/github/sources' ? [source] : {changed: true};
+    }};
+  runInNewContext(html.slice(start, end), context);
+  await context.refreshGithubSources();
+  const card = el('githubSources').children[0];
+  assert.ok(card.children.some(child => child.textContent === '마지막 배포 실패'));
+  assert.ok(card.children.some(child => child.textContent.includes('마지막 시도 ')));
+  const retry = card.children.find(child => child.textContent === '같은 커밋 다시 시도');
+  assert.ok(retry);
+  await retry.onclick();
+  assert.equal(calls[1][0], '/api/github/sources/' + source.id + '/retry');
+  assert.equal(calls[1][1].method, 'POST');
+  assert.equal(el('githubSourceInfo').textContent, '배포를 다시 시작했습니다.');
+});
+
 test('running deployment can be cancelled only before its first attempt', () => {
   assert.equal(cancelContext.canCancel({status: 'waiting_input'}), true);
   assert.equal(cancelContext.canCancel({status: 'running', attempts: 0}), true);

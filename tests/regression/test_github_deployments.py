@@ -106,6 +106,75 @@ class GitHubSourceTests(unittest.TestCase):
             self.assertTrue(restarted.remove_github_source(source_id)["disconnected"])
             self.assertFalse(restarted.github_source_summaries())
 
+    def test_failed_push_is_visible_and_same_commit_retry_is_manual(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(
+                Path(directory),
+                AISettings("fixture-key", "fixture-model"),
+                monitor_interval=0,
+                github_poll_interval=60,
+            )
+            with (
+                patch(
+                    "application.github_deployments.resolve_revision",
+                    side_effect=[
+                        ("main", FIRST),
+                        ("main", SECOND),
+                        ("main", SECOND),
+                        ("main", SECOND),
+                        ("main", SECOND),
+                    ],
+                ),
+                patch("application.github_deployments.download_revision", side_effect=write_app_archive),
+                patch.object(app, "start_job_worker") as worker,
+            ):
+                first = app.create_github_deployment(
+                    "https://github.com/team/demo", None, "demo-app", ["local-docker"], False, True
+                )
+                source_id = first["source_id"]
+                first_job = first["deployment"]["id"]
+                app.jobs[first_job]["status"] = "succeeded"
+                app.jobs[first_job]["result"] = {"container": "sky-" + first_job + "-a1"}
+                app.jobs[first_job]["deployment_state"] = "active"
+                app.save(first_job)
+                failed = app.poll_github_source(source_id)
+                failed_job = failed["job_ids"][0]
+                app.jobs[failed_job]["status"] = "failed"
+                app.save(failed_job)
+                summary = app.github_source_summaries()[0]
+                self.assertEqual(summary["last_deployment_status"], "failed")
+                self.assertTrue(summary["retryable"])
+                self.assertEqual(app.jobs[first_job]["deployment_state"], "active")
+                with patch(
+                    "application.github_deployments.resolve_revision",
+                    return_value=("main", "c" * 40),
+                ):
+                    with self.assertRaisesRegex(ValueError, "새 커밋"):
+                        app.poll_github_source(source_id, retry_failed=True)
+                self.assertEqual(worker.call_count, 2)
+                self.assertFalse(app.poll_github_source(source_id)["changed"])
+                self.assertEqual(worker.call_count, 2)
+                retry = app.poll_github_source(source_id, retry_failed=True)
+                self.assertTrue(retry["changed"])
+                self.assertEqual(retry["commit"], SECOND)
+                self.assertNotEqual(retry["job_ids"], [failed_job])
+                self.assertEqual(app.github_source_summaries()[0]["last_deployment_status"], "running")
+                self.assertEqual(worker.call_count, 3)
+                with self.assertRaisesRegex(ValueError, "다시 시도할 실패한"):
+                    app.poll_github_source(source_id, retry_failed=True)
+                retried_job = retry["job_ids"][0]
+                self.assertEqual(app.jobs[retried_job]["git_replaces_local_job_id"], first_job)
+                app.jobs[retried_job]["status"] = "succeeded"
+                app.jobs[retried_job]["result"] = {"container": "sky-" + retried_job + "-a1"}
+                app.save(retried_job)
+                with patch("application.github_deployments.LocalDockerAdapter.retire") as retire:
+                    app.retire_replaced_github_local(retried_job)
+                retire.assert_called_once()
+                self.assertEqual(app.jobs[first_job]["deployment_state"], "deleted")
+                summary = app.github_source_summaries()[0]
+                self.assertEqual(summary["last_deployment_status"], "succeeded")
+                self.assertFalse(summary["retryable"])
+
     def test_failed_import_does_not_persist_subscription(self):
         with tempfile.TemporaryDirectory() as directory:
             app = App(

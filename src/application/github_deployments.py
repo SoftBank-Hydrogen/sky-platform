@@ -96,7 +96,26 @@ class GitHubDeploymentsMixin:
 
     def github_source_summaries(self):
         with self.lock:
-            return [dict(item) for item in self.github_sources.values()]
+            summaries = []
+            for item in self.github_sources.values():
+                summary = dict(item)
+                statuses = [
+                    self.jobs[job_id]["status"] if job_id in self.jobs else "missing"
+                    for job_id in item["last_job_ids"]
+                ]
+                if all(status == "succeeded" for status in statuses):
+                    summary["last_deployment_status"] = "succeeded"
+                elif any(status in {"failed", "cancelled", "interrupted"} for status in statuses):
+                    summary["last_deployment_status"] = "failed"
+                elif any(status == "missing" for status in statuses):
+                    summary["last_deployment_status"] = "unknown"
+                else:
+                    summary["last_deployment_status"] = "running"
+                summary["retryable"] = summary["last_deployment_status"] == "failed" and all(
+                    status in {"succeeded", "failed", "cancelled", "interrupted"} for status in statuses
+                )
+                summaries.append(summary)
+            return summaries
 
     def set_github_source_enabled(self, source_id: str, enabled: bool):
         with self.lock:
@@ -350,18 +369,18 @@ class GitHubDeploymentsMixin:
             "source_id": source_id,
         }
 
-    def poll_github_source(self, source_id: str) -> dict:
+    def poll_github_source(self, source_id: str, retry_failed: bool = False) -> dict:
         with self.lock:
             if source_id in self.github_polling:
                 return {"changed": False, "in_progress": True}
             self.github_polling.add(source_id)
         try:
-            return self._poll_github_source_once(source_id)
+            return self._poll_github_source_once(source_id, retry_failed)
         finally:
             with self.lock:
                 self.github_polling.discard(source_id)
 
-    def _poll_github_source_once(self, source_id: str) -> dict:
+    def _poll_github_source_once(self, source_id: str, retry_failed: bool = False) -> dict:
         with self.lock:
             item = self.github_sources.get(source_id)
             if not item or not item["enabled"]:
@@ -370,7 +389,22 @@ class GitHubDeploymentsMixin:
         repository = parse_repository_url(snapshot["repository_url"])
         try:
             branch, commit = resolve_revision(repository, snapshot["branch"])
-            if commit != snapshot["last_revision"]:
+            if retry_failed and commit != snapshot["last_revision"]:
+                raise ValueError("브랜치에 새 커밋이 있습니다. 지금 확인으로 새 커밋을 배포하세요.")
+            if retry_failed and commit == snapshot["last_revision"]:
+                with self.lock:
+                    statuses = [
+                        self.jobs[job_id]["status"] if job_id in self.jobs else "missing"
+                        for job_id in snapshot["last_job_ids"]
+                    ]
+                if not (
+                    any(status in {"failed", "cancelled", "interrupted"} for status in statuses)
+                    and all(
+                        status in {"succeeded", "failed", "cancelled", "interrupted"} for status in statuses
+                    )
+                ):
+                    raise ValueError("다시 시도할 실패한 GitHub 배포가 없습니다.")
+            if commit != snapshot["last_revision"] or retry_failed:
                 with self.lock:
                     pending = any(
                         job.get("github_source", {}).get("subscription_id") == source_id

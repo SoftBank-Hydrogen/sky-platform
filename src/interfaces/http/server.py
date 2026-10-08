@@ -1527,12 +1527,14 @@ def handler_for(app: App):
                         payload['repository_url'], payload['branch'], payload['application_id'],
                         payload['targets'], payload['public'], payload['auto_deploy']))
                     return
-                if re.fullmatch(r'/api/github/sources/[a-f0-9]{16}/(pause|resume|check|disconnect)', self.path):
+                if re.fullmatch(r'/api/github/sources/[a-f0-9]{16}/(pause|resume|check|retry|disconnect)', self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('GitHub 연결 작업에는 본문이 없어야 합니다.')
                     source_id, operation = self.path.split('/')[4:6]
                     if operation == 'check':
                         self.json_response(200, app.poll_github_source(source_id))
+                    elif operation == 'retry':
+                        self.json_response(202, app.poll_github_source(source_id, retry_failed=True))
                     elif operation == 'disconnect':
                         self.json_response(200, app.remove_github_source(source_id))
                     else:
