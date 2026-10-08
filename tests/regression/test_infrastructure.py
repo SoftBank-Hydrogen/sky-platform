@@ -627,6 +627,47 @@ class InfrastructureTests(unittest.TestCase):
             self.assertIn('사용할 수 없는', private_handler.json_response.call_args.args[1]['error'])
             self.assertEqual(len(app.jobs), 1)
 
+    def test_auto_target_filters_platform_conflicts_before_ai_proposal(self):
+        offered_targets = []
+
+        class Planner:
+            def __init__(self, _settings):
+                pass
+
+            def propose(self, files, available_targets, public_access):
+                offered_targets.extend(available_targets)
+                return {'target': 'local-docker', 'workload': 'stateless-http',
+                        'rationale': '최종 이미지는 ARM 플랫폼입니다.',
+                        'evidence': [{'file': 'Dockerfile', 'quote': 'linux/arm64'}]}
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('Dockerfile', 'FROM --platform=linux/arm64 node:22\n')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'),
+                      infrastructure_planner_factory=Planner, monitor_interval=0)
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = '/api/deployments'
+            handler.headers = {'X-Sky-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue())),
+                               'X-Deploy-Target': 'auto', 'X-Public-Access': 'true'}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value=None), \
+                    patch('interfaces.http.server.CloudRunSettings.unavailable_reason', return_value=None), \
+                    patch('interfaces.http.server.threading.Thread'):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 202)
+            self.assertEqual(offered_targets, ['local-docker'])
+            job = app.jobs[handler.json_response.call_args.args[1]['id']]
+            candidates = {item['id']: item for item in job['infrastructure_plan']['candidates']}
+            self.assertEqual(job['target'], 'local-docker')
+            self.assertEqual(candidates['aws-ecs-express']['status'], 'rejected')
+            self.assertEqual(candidates['cloud-run']['status'], 'rejected')
+            self.assertEqual(candidates['local-docker']['status'], 'eligible')
+            self.assertTrue(candidates['local-docker']['selected'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,30 @@
 
 from __future__ import annotations
 
+from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
+
+SUPPORTED_TARGETS = ("local-docker", "aws-ecs-express", "cloud-run")
+
+
+def compare_targets(
+    profile: InfrastructureProfile, availability: dict[str, str | None], *, public_access: bool
+) -> tuple[list[dict], list[dict]]:
+    """Evaluate the same target variants for preview and automatic deployment."""
+    reports = []
+    for target in SUPPORTED_TARGETS:
+        report = infrastructure_compatibility(profile, target, public_access=public_access)
+        reason = availability[target]
+        reports.append(
+            {
+                **report,
+                "configured": reason is None,
+                "configuration_reason": reason,
+                "preview_eligible": report["compatible"] and reason is None,
+                "cost": {"estimate": None, "note": "대상 전체 비용은 아직 산정하지 않았습니다."},
+            }
+        )
+    return reports, evaluate_candidates(reports)
+
 
 def evaluate_candidates(reports: list[dict]) -> list[dict]:
     """Separate constraint failures from missing credentials and unmeasured trade-offs."""

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from engine.application_ir import application_ir
-from engine.candidates import evaluate_candidates
+from engine.candidates import compare_targets
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
@@ -1803,16 +1803,8 @@ def handler_for(app: App):
                         availability = {'local-docker': None,
                                         'aws-ecs-express': app.aws_settings.unavailable_reason(),
                                         'cloud-run': app.cloud_settings.unavailable_reason()}
-                        reports = []
-                        for target in ('local-docker', 'aws-ecs-express', 'cloud-run'):
-                            report = infrastructure_compatibility(
-                                profile, target, public_access=public_flag == 'true')
-                            reason = availability[target]
-                            reports.append({**report, 'configured': reason is None,
-                                            'configuration_reason': reason,
-                                            'preview_eligible': report['compatible'] and reason is None,
-                                            'cost': {'estimate': None,
-                                                     'note': '대상 전체 비용은 아직 산정하지 않았습니다.'}})
+                        reports, candidates = compare_targets(
+                            profile, availability, public_access=public_flag == 'true')
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile).as_dict(),
                                              'inspection': {
@@ -1821,7 +1813,7 @@ def handler_for(app: App):
                                                  'scanned_files': profile.scanned_files,
                                              },
                                              'reports': reports,
-                                             'candidates': evaluate_candidates(reports)})
+                                             'candidates': candidates})
                     return
                 if self.path == '/api/deployment-groups':
                     if not app.ai_settings.available:
@@ -1989,16 +1981,20 @@ def handler_for(app: App):
                                 app.postgres_operations.require_deployable(
                                     application_id, database['database_id'])
                         if target == 'auto':
-                            available_targets = ['local-docker']
-                            if app.cloud_settings.unavailable_reason() is None:
-                                available_targets.append('cloud-run')
-                            if (deployment_access_mode('aws-ecs-express', public_flag == 'true') is not None
-                                    and app.aws_settings.unavailable_reason() is None):
-                                available_targets.append('aws-ecs-express')
+                            availability = {'local-docker': None,
+                                            'aws-ecs-express': app.aws_settings.unavailable_reason(),
+                                            'cloud-run': app.cloud_settings.unavailable_reason()}
+                            _, candidates = compare_targets(infrastructure_profile, availability,
+                                                            public_access=public_flag == 'true')
+                            available_targets = [item['id'] for item in candidates if item['status'] == 'eligible']
+                            if not available_targets:
+                                raise ValueError('현재 설정에서 감지된 요구와 호환되는 자동 배포 대상이 없습니다.')
                             infrastructure_plan = plan_infrastructure(project, available_targets,
                                 public_flag == 'true', app.infrastructure_planner_factory(app.ai_settings))
                             target = infrastructure_plan['target']
                             validate_infrastructure(infrastructure_profile, target)
+                            infrastructure_plan['candidates'] = [
+                                {**item, 'selected': item['id'] == target} for item in candidates]
                         else:
                             infrastructure_plan = explicit_infrastructure_plan(
                                 target, deployment_profile,
