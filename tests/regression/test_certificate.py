@@ -50,6 +50,21 @@ class CertificateTests(unittest.TestCase):
         self.assertIn('deployment_http', certificate['unverified'])
         self.assertEqual(job['status'], 'failed')
 
+    def test_model_execution_requires_completed_job_and_valid_response_metadata(self):
+        job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'local-docker',
+               'result': {'url': 'http://127.0.0.1:1234'},
+               'ai_model_execution': {'provider': 'openai-responses', 'response_id': 'resp_123abc',
+                                      'model': 'gpt-5.4-mini', 'response_count': 2,
+                                      'recorded_at': '2026-10-09T00:00:00+00:00'}}
+        def status():
+            return {item['name']: item['status'] for item in deployment_certificate(job)['verification']}['ai_model_execution']
+        self.assertEqual(status(), 'passed')
+        job['status'] = 'failed'
+        self.assertEqual(status(), 'unverified')
+        job['status'] = 'succeeded'
+        job['ai_model_execution']['response_id'] = 'invalid'
+        self.assertEqual(status(), 'unverified')
+
     def test_rehearsal_and_registry_evidence_do_not_claim_running_task_digest(self):
         job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'aws-ecs-express',
                'result': {'url': 'https://example.com', 'image': 'example:v1',

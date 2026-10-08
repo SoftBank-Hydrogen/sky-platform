@@ -87,6 +87,15 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                     and isinstance(promotion.get('image_id'), str)
                     and re.fullmatch(r'sha256:[a-f0-9]{64}', promotion['image_id'])
                     and promotion.get('platform') == 'linux/amd64')
+    ai_execution = job.get('ai_model_execution') if isinstance(job.get('ai_model_execution'), dict) else {}
+    ai_recorded = bool(completed and ai_execution.get('provider') == 'openai-responses'
+                       and isinstance(ai_execution.get('response_id'), str)
+                       and re.fullmatch(r'resp_[A-Za-z0-9]+', ai_execution['response_id'])
+                       and isinstance(ai_execution.get('model'), str)
+                       and re.fullmatch(r'[A-Za-z0-9._-]{1,100}', ai_execution['model'])
+                       and type(ai_execution.get('response_count')) is int
+                       and ai_execution['response_count'] > 0
+                       and isinstance(ai_execution.get('recorded_at'), str))
     history = health_history or []
     latest_health = history[-1] if history else None
     checks = [
@@ -104,8 +113,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                     if completed and registry_digest else '레지스트리 매니페스트 다이제스트 확인 기록이 없습니다.')},
         {'name': 'image_identity', 'status': 'unverified',
          'detail': '실행 중인 ECS 태스크의 이미지 다이제스트는 아직 대조하지 않았습니다.'},
-        {'name': 'ai_model_execution', 'status': 'unverified',
-         'detail': '실제 모델 호출과 고정 응답을 구분하는 출처 기록이 없습니다.'},
+        {'name': 'ai_model_execution', 'status': 'passed' if ai_recorded else 'unverified',
+         'detail': ('Sky가 OpenAI Responses API의 완료 응답 ID와 모델명을 작업에 기록했습니다. 독립 서명 검증은 아닙니다.'
+                    if ai_recorded else '실제 모델 호출과 고정 응답을 구분하는 출처 기록이 없습니다.')},
         {'name': 'rollback_rehearsal', 'status': 'unverified',
          'detail': '롤백을 실행하고 원래 릴리스로 복귀한 리허설 결과가 없습니다.'},
     ]

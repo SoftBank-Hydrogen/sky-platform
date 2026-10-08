@@ -96,6 +96,8 @@ class OpenAIDeployAgent:
     def __init__(self, settings: AISettings):
         self.settings = settings
         self.compact_at = COMPACT_AGENT_REQUEST_BYTES
+        self.response_count = 0
+        self.response_evidence = None
 
     def compact_history(self, history):
         payload = {"model": self.settings.model, "instructions": INSTRUCTIONS, "input": history}
@@ -170,6 +172,16 @@ class OpenAIDeployAgent:
             raise AgentError('AI 응답 토큰 한도에 도달했습니다. 배포 도구는 실행하지 않았습니다.')
         if not isinstance(body, dict) or body.get("status") != "completed" or not isinstance(body.get("output"), list):
             raise AgentError("AI 응답이 완료되지 않았습니다.")
+        response_id = body.get('id')
+        model = body.get('model')
+        if (isinstance(response_id, str) and re.fullmatch(r'resp_[A-Za-z0-9]+', response_id)
+                and isinstance(model, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,100}', model)):
+            self.response_count += 1
+            self.response_evidence = {
+                'provider': 'openai-responses', 'response_id': response_id,
+                'model': model, 'response_count': self.response_count,
+                'recorded_at': datetime.now(timezone.utc).isoformat(),
+            }
         return body["output"]
 
 
@@ -477,6 +489,8 @@ class DeploymentAgent:
             self.tools.check_cancelled()
             if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
                 raise AgentError("AI 도구 호출 형식이 올바르지 않습니다.")
+            if isinstance(self.provider, OpenAIDeployAgent) and self.provider.response_evidence:
+                self.tools.checkpoint(ai_model_execution=self.provider.response_evidence)
             calls = [item for item in output if item.get("type") == "function_call"]
             if len(calls) != 1:
                 raise AgentError("AI가 실행할 배포 작업 하나를 선택하지 못했습니다.")

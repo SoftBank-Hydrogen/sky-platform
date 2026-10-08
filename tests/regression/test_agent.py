@@ -308,13 +308,31 @@ class AgentTests(unittest.TestCase):
     def test_tool_protocol_preserves_reasoning_items(self):
         output = [{'type': 'reasoning', 'encrypted_content': 'opaque'}, *call('read_runtime_logs', {})]
         with patch('application.agent.urllib.request.build_opener') as opener:
-            opener.return_value.open.return_value = io.BytesIO(json.dumps({'status': 'completed', 'output': output}).encode())
-            result = OpenAIDeployAgent(AISettings('fake', 'model')).next([{'role': 'user', 'content': 'deploy'}])
+            opener.return_value.open.return_value = io.BytesIO(json.dumps({
+                'id': 'resp_123abc', 'model': 'gpt-5.4-mini',
+                'status': 'completed', 'output': output}).encode())
+            agent = OpenAIDeployAgent(AISettings('fake', 'model'))
+            result = agent.next([{'role': 'user', 'content': 'deploy'}])
             payload = json.loads(opener.return_value.open.call_args.args[0].data)
         self.assertEqual(result, output)
+        self.assertEqual(agent.response_evidence['response_id'], 'resp_123abc')
+        self.assertEqual(agent.response_evidence['model'], 'gpt-5.4-mini')
+        self.assertEqual(agent.response_evidence['response_count'], 1)
         self.assertFalse(payload['parallel_tool_calls'])
         self.assertFalse(payload['store'])
         self.assertIn('reasoning.encrypted_content', payload['include'])
+
+    def test_deployment_records_completed_model_response_before_tool_execution(self):
+        response = {'id': 'resp_123abc', 'model': 'gpt-5.4-mini',
+                    'status': 'completed', 'output': call('read_runtime_logs', {})}
+        provider = OpenAIDeployAgent(AISettings('fake', 'gpt-5.4-mini'))
+        with patch('application.agent.read_response', return_value=json.dumps(response).encode()):
+            with self.assertRaisesRegex(AgentError, '작업 횟수 제한'):
+                DeploymentAgent(provider, self.tools, max_steps=1).run()
+        recorded = [update['ai_model_execution'] for update in self.updates
+                    if 'ai_model_execution' in update]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]['response_id'], 'resp_123abc')
 
     def test_incomplete_response_never_exposes_partial_tool_call(self):
         body = {'status': 'incomplete',
