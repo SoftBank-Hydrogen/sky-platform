@@ -285,6 +285,13 @@ def infrastructure_compatibility(
 def validate_infrastructure(profile: InfrastructureProfile, target: str, *, postgres: bool = False) -> None:
     report = infrastructure_compatibility(profile, target, postgres=postgres)
     if report["problems"]:
+        sqlite_guidance = (
+            " SQLite 앱은 현재 Local Docker·일반 자동 배포에서 영속 저장소를 지원하지 않습니다. "
+            "AWS ECS Express를 선택하고 인터넷 공개를 허용한 뒤, "
+            "'SQLite 파일을 PostgreSQL로 이전하기'와 기존 RDS 또는 신규 RDS 생성 계획을 선택하세요. "
+            "이전은 실험적이며 RDS 비용이 발생합니다."
+            if "sqlite" in profile.requirements or profile.storage == "sqlite" else ""
+        )
         raise ValueError(
             "인프라 요구가 감지됐습니다 ("
             + ", ".join(profile.evidence[:3])
@@ -293,6 +300,7 @@ def validate_infrastructure(profile: InfrastructureProfile, target: str, *, post
             + ". 현재 "
             + target
             + " 구성에서는 지원하지 않아 데이터 손실 또는 작업 누락 위험이 있으므로 배포를 중단합니다."
+            + sqlite_guidance
         )
 
 

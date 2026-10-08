@@ -388,6 +388,8 @@ class InfrastructureTests(unittest.TestCase):
             handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 400)
             self.assertIn('SQLite', handler.json_response.call_args.args[1]['error'])
+            self.assertIn('SQLite 파일을 PostgreSQL로 이전하기',
+                          handler.json_response.call_args.args[1]['error'])
             self.assertFalse(app.jobs)
 
     def test_ai_planner_failure_removes_uncommitted_upload(self):
