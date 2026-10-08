@@ -13,6 +13,7 @@ class SourceEvidence:
     path: str
     signal: str
     origin: str = "deterministic-source-inspection"
+    status: str = "confirmed"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,14 @@ class Component:
 
 
 @dataclass(frozen=True)
+class Hypothesis:
+    id: str
+    kind: str
+    evidence_ids: tuple[str, ...]
+    status: str = "inferred"
+
+
+@dataclass(frozen=True)
 class ApplicationIR:
     version: int
     components: tuple[Component, ...]
@@ -38,6 +47,7 @@ class ApplicationIR:
     database_engines: tuple[str, ...]
     declared_image_platform: str | None
     topology_status: str = "unresolved"
+    hypotheses: tuple[Hypothesis, ...] = ()
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -58,6 +68,14 @@ def application_ir(profile: InfrastructureProfile) -> ApplicationIR:
             evidence.append(SourceEvidence(identifier, path, name))
             ids.append(identifier)
         requirements.append(Requirement("R-" + name, name, tuple(ids)))
+    hypotheses = []
+    for name, paths in profile.source_signals:
+        ids = tuple(evidence_id(name, path) for path in paths)
+        evidence.extend(
+            SourceEvidence(identifier, path, name, status="inferred")
+            for identifier, path in zip(ids, paths, strict=True)
+        )
+        hypotheses.append(Hypothesis("H-" + name, name, ids))
     return ApplicationIR(
         version=1,
         components=(Component("source-bundle", "unresolved", tuple(item.id for item in requirements)),),
@@ -65,4 +83,5 @@ def application_ir(profile: InfrastructureProfile) -> ApplicationIR:
         evidence=tuple(evidence),
         database_engines=profile.database_engines,
         declared_image_platform=profile.final_image_platform,
+        hypotheses=tuple(hypotheses),
     )

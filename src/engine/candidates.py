@@ -20,7 +20,7 @@ def compare_targets(
                 **report,
                 "configured": reason is None,
                 "configuration_reason": reason,
-                "preview_eligible": report["compatible"] and reason is None,
+                "preview_eligible": report["compatible"] and not report["unknowns"] and reason is None,
                 "cost": {"estimate": None, "note": "대상 전체 비용은 아직 산정하지 않았습니다."},
             }
         )
@@ -39,12 +39,20 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
         )
         if database_binding_only:
             status = "requires_database_binding"
-            reasons = ["PostgreSQL DB 생성 또는 기존 DB 연결을 선택·검증해야 배포할 수 있습니다."]
+            reasons = [
+                "PostgreSQL DB 생성 또는 기존 DB 연결을 선택·검증해야 배포할 수 있습니다.",
+                *report["unknowns"],
+            ]
             if not report["configured"]:
                 reasons.append(report["configuration_reason"])
         elif violations:
             status = "rejected"
             reasons = [result["reason"] for result in violations]
+        elif report["unknowns"]:
+            status = "needs_review"
+            reasons = [*report["unknowns"]]
+            if not report["configured"]:
+                reasons.append(report["configuration_reason"])
         elif not report["configured"]:
             status = "requires_setup"
             reasons = [report["configuration_reason"]]

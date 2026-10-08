@@ -111,6 +111,8 @@ LOCAL_WRITE = re.compile(
     r"\bopen\s*\(\s*['\"](?:\./)?(?:data|uploads|storage)/[^'\"]+['\"]\s*,\s*['\"][wax+]",
     re.IGNORECASE,
 )
+WEBSOCKET_SOURCE = re.compile(r"\b(?:WebSocketServer|new\s+WebSocket\s*\(|\.on\s*\(\s*['\"]upgrade['\"])")
+PROCESS_LOCAL_MAP = re.compile(r"\b(?:const|let|var)\s+\w+\s*=\s*new\s+(?:Map|Set)\s*\(")
 TARGET_RESOURCES = {
     "local-docker": ["Docker image", "local container"],
     "cloud-run": ["Artifact Registry repository", "runtime service account", "Cloud Run service"],
@@ -155,6 +157,7 @@ class InfrastructureProfile:
     database_engines: tuple[str, ...] = ()
     final_image_platform: str | None = None
     requirement_evidence: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    source_signals: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def as_dict(self):
         return asdict(self)
@@ -197,6 +200,7 @@ def infrastructure_compatibility(
     )
     constraints = []
     evidence_by_requirement = dict(profile.requirement_evidence)
+    source_signals = dict(profile.source_signals)
 
     def check(rule_id: str, requirement: str, problem: str | None) -> None:
         constraints.append(
@@ -237,6 +241,17 @@ def infrastructure_compatibility(
             "background-worker",
             None if capabilities["background_worker"] else "별도 백그라운드 워커가 필요합니다",
         )
+    if "websocket" in source_signals:
+        constraints.append(
+            {
+                "rule_id": "PROTOCOL-WS-01",
+                "status": "unknown",
+                "requirement": "websocket",
+                "evidence_files": list(source_signals["websocket"]),
+                "evidence_ids": [evidence_id("websocket", path) for path in source_signals["websocket"]],
+                "reason": "WebSocket 사용 신호가 있습니다. 이 대상의 실제 ingress 왕복은 아직 검증되지 않았습니다.",
+            }
+        )
     literal_platform = (
         profile.final_image_platform
         if profile.final_image_platform
@@ -266,6 +281,7 @@ def infrastructure_compatibility(
     elif target != "auto" and public_access is not None:
         check("ACCESS-01", "access-mode", None)
     problems = [item["reason"] for item in constraints if item["status"] == "violated"]
+    unknowns = [item["reason"] for item in constraints if item["status"] == "unknown"]
     return {
         "target": target,
         "detected_requirements": list(profile.requirements),
@@ -277,6 +293,7 @@ def infrastructure_compatibility(
         "adapter_capabilities": capabilities.copy(),
         "compatible": not problems,
         "problems": problems,
+        "unknowns": unknowns,
         "constraint_results": constraints,
         "inspection_note": "탐지 신호가 없어도 무상태 앱임이 증명된 것은 아닙니다.",
     }
@@ -290,7 +307,8 @@ def validate_infrastructure(profile: InfrastructureProfile, target: str, *, post
             "AWS ECS Express를 선택하고 인터넷 공개를 허용한 뒤, "
             "'SQLite 파일을 PostgreSQL로 이전하기'와 기존 RDS 또는 신규 RDS 생성 계획을 선택하세요. "
             "이전은 실험적이며 RDS 비용이 발생합니다."
-            if "sqlite" in profile.requirements or profile.storage == "sqlite" else ""
+            if "sqlite" in profile.requirements or profile.storage == "sqlite"
+            else ""
         )
         raise ValueError(
             "인프라 요구가 감지됐습니다 ("

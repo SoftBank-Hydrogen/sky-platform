@@ -21,6 +21,7 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
     ir = job.get('application_ir') if isinstance(job.get('application_ir'), dict) else {}
     evidence = ir.get('evidence') if isinstance(ir.get('evidence'), list) else []
     requirements = ir.get('requirements') if isinstance(ir.get('requirements'), list) else []
+    hypotheses = ir.get('hypotheses') if isinstance(ir.get('hypotheses'), list) else []
     constraints = compatibility.get('constraint_results')
     constraints = constraints if isinstance(constraints, list) else []
     candidates = infrastructure.get('candidates')
@@ -30,7 +31,8 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
         'applies_to_uploaded_source_sha256': _digest(job.get('source_digest')),
         'topology_status': ir.get('topology_status', 'unresolved'),
         'source_evidence': [
-            {'id': item['id'], 'path': item['path'], 'signal': item['signal']}
+            {'id': item['id'], 'path': item['path'], 'signal': item['signal'],
+             'status': item.get('status', 'confirmed')}
             for item in evidence if isinstance(item, dict)
             and all(isinstance(item.get(key), str) for key in ('id', 'path', 'signal'))
         ],
@@ -39,12 +41,19 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
             for item in requirements if isinstance(item, dict)
             and isinstance(item.get('id'), str) and isinstance(item.get('kind'), str)
         ],
+        'hypotheses': [
+            {'id': item['id'], 'kind': item['kind'], 'status': item['status'],
+             'evidence_ids': item.get('evidence_ids', [])}
+            for item in hypotheses if isinstance(item, dict)
+            and isinstance(item.get('id'), str) and isinstance(item.get('kind'), str)
+            and item.get('status') == 'inferred'
+        ],
         'constraint_results': [
             {'rule_id': item['rule_id'], 'status': item['status'],
              'requirement': item.get('requirement'),
              'evidence_ids': item.get('evidence_ids', []), 'reason': item.get('reason')}
             for item in constraints if isinstance(item, dict)
-            and isinstance(item.get('rule_id'), str) and item.get('status') in {'satisfied', 'violated'}
+            and isinstance(item.get('rule_id'), str) and item.get('status') in {'satisfied', 'violated', 'unknown'}
         ],
         'candidate_evaluations': [
             {'target': item['id'], 'status': item['status'], 'selected': item.get('selected') is True,
@@ -116,6 +125,19 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                   if completed and migration else '완료된 SQL 마이그레이션 결과가 없습니다.')})
         checks.append({'name': 'cross_environment_data_migration', 'status': 'unverified',
                        'detail': '환경 간 기존 데이터 이전은 SQL 스키마 마이그레이션과 별도로 검증해야 합니다.'})
+
+    ir = job.get('application_ir')
+    hypotheses = ir.get('hypotheses') or [] if isinstance(ir, dict) else []
+    if any(item.get('kind') == 'websocket' for item in hypotheses if isinstance(item, dict)):
+        websocket = job.get('websocket_verification') or {}
+        recorded = websocket.get('status') if completed else None
+        checks.append({'name': 'websocket_round_trip',
+                       'status': recorded if recorded in {'passed', 'failed'} else 'unverified',
+                       'checked_at': websocket.get('checked_at') if recorded else None,
+                       'detail': ('실제 대상에서 sky.probe nonce 왕복을 확인한 당시 기록입니다.'
+                                  if recorded == 'passed' else
+                                  '실제 대상의 sky.probe 왕복에 실패했습니다.' if recorded == 'failed' else
+                                  '실제 대상의 WebSocket 메시지 왕복 기록이 없습니다.')})
 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes

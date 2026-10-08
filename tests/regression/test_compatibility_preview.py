@@ -87,6 +87,26 @@ class CompatibilityPreviewTests(unittest.TestCase):
             self.assertIn('DATA-SQLITE-01', candidate['violated_rule_ids'])
             self.assertEqual(set(candidate['evidence_ids']), evidence_ids)
 
+    def test_websocket_and_process_local_state_remain_inferred_and_auto_needs_review(self):
+        status, payload = self.preview(archive({
+            'package.json': '{"scripts":{"start":"node server.js"}}',
+            'server.js': 'const {WebSocketServer}=require("ws"); const clients = new Map(); '
+                         'const wss = new WebSocketServer({noServer:true}); '
+                         'if (message.type === "sky.probe") send("sky.probe.ack");',
+        }))
+        self.assertEqual(status, 200)
+        ir = payload['application_ir']
+        hypotheses = {item['kind']: item for item in ir['hypotheses']}
+        self.assertEqual(set(hypotheses),
+                         {'websocket', 'possible-process-local-state', 'sky-probe-protocol'})
+        self.assertTrue(all(item['status'] == 'inferred' for item in hypotheses.values()))
+        self.assertTrue(all(item['status'] == 'inferred' for item in ir['evidence']))
+        self.assertEqual({item['status'] for item in payload['candidates']}, {'needs_review'})
+        self.assertTrue(all(not item['preview_eligible'] for item in payload['reports']))
+        self.assertTrue(all(any(rule['rule_id'] == 'PROTOCOL-WS-01' and rule['status'] == 'unknown'
+                                for rule in report['constraint_results']) for report in payload['reports']))
+        self.assertEqual(self.app.jobs, {})
+
     def test_access_rule_uses_user_intent_without_inventing_source_evidence(self):
         status, payload = self.preview(archive({
             'package.json': '{"scripts":{"start":"node server.js"}}',

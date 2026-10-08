@@ -30,6 +30,7 @@ from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from adapters.local.docker import LocalDockerAdapter
 from application.health import check_deployment
+from application.websocket_probe import WebSocketProbeError, probe_sky_game
 from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       deployment_access_mode, explicit_infrastructure_plan,
                                       infrastructure_compatibility,
@@ -526,6 +527,43 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 if temporary is not None:
                     Path(temporary).unlink(missing_ok=True)
         return result
+
+    def check_and_record_websocket(self, job_id: str) -> dict:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if (not job or job.get('status') != 'succeeded'
+                    or job.get('deployment_state', 'active') != 'active'
+                    or not isinstance(job.get('result'), dict)):
+                raise ValueError('실행 중인 완료 배포만 WebSocket을 확인할 수 있습니다.')
+            ir = job.get('application_ir')
+            hypotheses = ir.get('hypotheses') or [] if isinstance(ir, dict) else []
+            if not any(item.get('kind') == 'sky-probe-protocol' for item in hypotheses
+                       if isinstance(item, dict)):
+                raise ValueError('이 앱에는 sky.probe 응답 계약이 확인되지 않았습니다.')
+            if job.get('target') == 'cloud-run' and not job['result'].get('public'):
+                raise ValueError('비공개 Cloud Run WebSocket 인증 검사는 아직 지원하지 않습니다.')
+            snapshot = json.loads(json.dumps(job))
+        health = check_deployment(snapshot)
+        if not health['healthy']:
+            outcome = {'status': 'failed', 'protocol': 'sky.probe.v1',
+                       'checked_at': datetime.now(timezone.utc).isoformat(),
+                       'reason': '대상 소유권·현재 HTTP 상태를 확인하지 못했습니다.'}
+        else:
+            try:
+                outcome = probe_sky_game(snapshot['result']['url'])
+            except WebSocketProbeError as exc:
+                outcome = {'status': 'failed', 'protocol': 'sky.probe.v1',
+                           'checked_at': datetime.now(timezone.utc).isoformat(),
+                           'reason': str(exc)}
+        with self.lock:
+            current = self.jobs.get(job_id)
+            if (not current or current.get('status') != 'succeeded'
+                    or current.get('deployment_state', 'active') != 'active'
+                    or current.get('result') != snapshot['result']):
+                raise ValueError('WebSocket 확인 중 배포 상태가 바뀌었습니다. 다시 확인하세요.')
+            current['websocket_verification'] = outcome
+            self.save(job_id)
+        return outcome
 
     def monitor_once(self) -> None:
         with self.lock:
@@ -1517,6 +1555,11 @@ def handler_for(app: App):
                 self.json_response(403, {"error": "Invalid session token"})
                 return
             try:
+                if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
+                    if int(self.headers.get('Content-Length', '0')) != 0:
+                        raise ValueError('WebSocket 검사 요청에는 본문을 넣을 수 없습니다.')
+                    self.json_response(200, app.check_and_record_websocket(self.path.split('/')[3]))
+                    return
                 if self.path == '/api/github/deployments':
                     size = int(self.headers.get('Content-Length', '0'))
                     if not 0 < size <= 2048:

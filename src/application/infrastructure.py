@@ -17,7 +17,7 @@ from engine.compatibility import (
     DATABASE_SOURCE, DOCKER_FROM, InfrastructureProfile, LOCAL_WRITE, MANIFESTS,
     MAX_INSPECT_BYTES, MAX_INSPECT_FILES, MAX_INSPECT_FILE_BYTES, SKIP_DIRECTORIES,
     SOURCE_EXTENSIONS, SQLITE_DEPENDENCIES, SQLITE_FILES, SQLITE_SOURCE,
-    TARGET_RESOURCES, WORKER_DEPENDENCIES, deployment_access_mode,
+    TARGET_RESOURCES, WEBSOCKET_SOURCE, PROCESS_LOCAL_MAP, WORKER_DEPENDENCIES, deployment_access_mode,
     explicit_infrastructure_plan, infrastructure_compatibility,
     validate_infrastructure,
 )
@@ -54,9 +54,15 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     """Find known durable-storage needs; absence of signals is not a statelessness proof."""
     evidence = []
     requirement_evidence = {}
+    source_signals = {}
 
     def record(requirement, path):
         files = requirement_evidence.setdefault(requirement, set())
+        if len(files) < 20:
+            files.add(path)
+
+    def signal(name, path):
+        files = source_signals.setdefault(name, set())
         if len(files) < 20:
             files.add(path)
 
@@ -147,6 +153,14 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 except (ValueError, TypeError, AttributeError):
                     pass
         if path.suffix in SOURCE_EXTENSIONS:
+            if path.suffix.lower() in {'.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx'}:
+                websocket = bool(WEBSOCKET_SOURCE.search(content))
+                if websocket:
+                    signal('websocket', relative.as_posix())
+                if websocket and PROCESS_LOCAL_MAP.search(content):
+                    signal('possible-process-local-state', relative.as_posix())
+                if websocket and 'sky.probe' in content and 'sky.probe.ack' in content:
+                    signal('sky-probe-protocol', relative.as_posix())
             if SQLITE_SOURCE.search(content):
                 found.add('sqlite')
             if DATABASE_SOURCE.search(content):
@@ -169,7 +183,9 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)),
                                  tuple(sorted(database_engines)), final_image_platform,
                                  tuple((name, tuple(sorted(paths)))
-                                       for name, paths in sorted(requirement_evidence.items())))
+                                       for name, paths in sorted(requirement_evidence.items())),
+                                 tuple((name, tuple(sorted(paths)))
+                                       for name, paths in sorted(source_signals.items())))
 
 
 def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -> tuple[dict, InfrastructureProfile]:
@@ -193,7 +209,8 @@ def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -
                                       tuple(sorted((set(profile.requirements) - {'sqlite'}) | {'database'})),
                                       ('postgresql',), profile.final_image_platform,
                                       tuple((name, tuple(sorted(paths)))
-                                            for name, paths in sorted(projected_evidence.items())))
+                                            for name, paths in sorted(projected_evidence.items())),
+                                      profile.source_signals)
     return ({'path': files[0].relative_to(project).as_posix(),
              'source_sha256': snapshot.source_sha256, 'row_counts': snapshot.row_counts,
              'schema': snapshot.schema}, projected)
