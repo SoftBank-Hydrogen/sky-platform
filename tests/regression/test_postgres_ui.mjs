@@ -57,20 +57,28 @@ test('environment preview shows target differences before deployment', async () 
   const context = {el: id => elements[id], Error, String,
     api: async (path, options) => {
       calls.push([path, options]);
-      return {inspection: {requirements: ['sqlite'], evidence_files: ['server.js'], scanned_files: 2}, reports: [
+      return {inspection: {requirements: ['sqlite'], evidence_files: ['server.js'], scanned_files: 2},
+       application_ir: {evidence: [{id: 'E-1', path: 'server.js'}]},
+       candidates: [
+        {id: 'local-docker', status: 'eligible', reasons: ['조건부 가능']},
+        {id: 'aws-ecs-express', status: 'rejected', reasons: ['공개 범위 미지원']},
+       ], reports: [
         {target: 'local-docker', compatible: true, preview_eligible: true,
-         access_mode: 'loopback', problems: [], configuration_reason: null},
+         access_mode: 'loopback', problems: [], configuration_reason: null, constraint_results: []},
         {target: 'aws-ecs-express', compatible: false, preview_eligible: false,
-         access_mode: null, problems: ['공개 범위 미지원'], configuration_reason: null},
+         access_mode: null, problems: ['공개 범위 미지원'], configuration_reason: null,
+         constraint_results: [{rule_id: 'ACCESS-01', status: 'violated',
+                               reason: '공개 범위 미지원', evidence_ids: []}]},
       ]};
     }};
   runInNewContext(html.slice(start, end), context);
   await elements.compatibilityPreview.onclick();
   assert.equal(calls[0][0], '/api/compatibility');
   assert.equal(calls[0][1].body, file);
-  assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 통과/);
+  assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 배포 시도 가능/);
   assert.match(elements.compatibilityMap.textContent, /탐지한 요구: sqlite · 근거 파일: server.js/);
-  assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 현재 미지원/);
+  assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 제약 위반/);
+  assert.match(elements.compatibilityMap.textContent, /\[ACCESS-01\] 공개 범위 미지원 · 근거: 사용자 선택·설정/);
   assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
 });
 

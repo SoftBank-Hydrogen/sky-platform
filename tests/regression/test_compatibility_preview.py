@@ -3,7 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from application.analysis import AISettings
 from interfaces.http.server import App, handler_for
@@ -50,6 +50,10 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(all(item['cost']['estimate'] is None for item in reports.values()))
         self.assertEqual(payload['inspection']['requirements'], [])
         self.assertEqual(payload['inspection']['scanned_files'], 2)
+        candidates = {item['id']: item for item in payload['candidates']}
+        self.assertEqual(candidates['local-docker']['status'], 'eligible')
+        self.assertEqual(candidates['local-docker']['cost_estimate'], None)
+        self.assertTrue(all(not item['selected'] for item in candidates.values()))
         self.assertEqual(self.app.jobs, {})
         self.assertFalse(list(Path(self.temp.name).glob('*/job.json')))
 
@@ -64,6 +68,60 @@ class CompatibilityPreviewTests(unittest.TestCase):
                             for item in payload['reports']))
         self.assertIn('sqlite', payload['inspection']['requirements'])
         self.assertIn('package.json', payload['inspection']['evidence_files'])
+        ir = payload['application_ir']
+        self.assertEqual(ir['topology_status'], 'unresolved')
+        self.assertEqual(ir['components'][0]['kind'], 'unresolved')
+        sqlite_requirement = next(item for item in ir['requirements'] if item['kind'] == 'sqlite')
+        evidence_ids = set(sqlite_requirement['evidence_ids'])
+        self.assertTrue(evidence_ids)
+        self.assertEqual({item['path'] for item in ir['evidence'] if item['id'] in evidence_ids},
+                         {'package.json', 'server.js'})
+        for report in payload['reports']:
+            decision = next(item for item in report['constraint_results']
+                            if item['rule_id'] == 'DATA-SQLITE-01')
+            self.assertEqual(decision['status'], 'violated')
+            self.assertEqual(set(decision['evidence_ids']), evidence_ids)
+            self.assertIn(decision['reason'], report['problems'])
+        for candidate in payload['candidates']:
+            self.assertEqual(candidate['status'], 'rejected')
+            self.assertIn('DATA-SQLITE-01', candidate['violated_rule_ids'])
+            self.assertEqual(set(candidate['evidence_ids']), evidence_ids)
+
+    def test_access_rule_uses_user_intent_without_inventing_source_evidence(self):
+        status, payload = self.preview(archive({
+            'package.json': '{"scripts":{"start":"node server.js"}}',
+            'server.js': 'console.log("ready")',
+        }), public='false')
+        self.assertEqual(status, 200)
+        aws = next(item for item in payload['reports'] if item['target'] == 'aws-ecs-express')
+        access = next(item for item in aws['constraint_results'] if item['rule_id'] == 'ACCESS-01')
+        self.assertEqual(access['status'], 'violated')
+        self.assertEqual(access['evidence_ids'], [])
+        self.assertFalse(aws['compatible'])
+
+    def test_configuration_gap_is_not_reported_as_constraint_failure(self):
+        with patch('interfaces.http.server.AwsSettings.unavailable_reason',
+                   return_value='AWS credentials missing'):
+            status, payload = self.preview(archive({
+                'package.json': '{"scripts":{"start":"node server.js"}}',
+                'server.js': 'console.log("ready")',
+            }))
+        self.assertEqual(status, 200)
+        candidates = {item['id']: item for item in payload['candidates']}
+        self.assertEqual(candidates['aws-ecs-express']['status'], 'requires_setup')
+        self.assertEqual(candidates['aws-ecs-express']['violated_rule_ids'], [])
+
+    def test_postgres_binding_is_conditional_only_on_supported_aws_target(self):
+        status, payload = self.preview(archive({
+            'package.json': '{"dependencies":{"pg":"8.0.0"}}',
+            'server.js': 'const database = require("pg");',
+        }))
+        self.assertEqual(status, 200)
+        candidates = {item['id']: item for item in payload['candidates']}
+        self.assertEqual(candidates['aws-ecs-express']['status'], 'requires_database_binding')
+        self.assertEqual(candidates['aws-ecs-express']['violated_rule_ids'], ['DATA-BINDING-01'])
+        self.assertEqual(candidates['local-docker']['status'], 'rejected')
+        self.assertEqual(candidates['cloud-run']['status'], 'rejected')
 
 
 if __name__ == '__main__':

@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from assets import ASSET_ROOT
+from engine.application_ir import application_ir
+from engine.candidates import evaluate_candidates
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
@@ -387,6 +389,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                        'status': 'planned', 'created_at': datetime.now(timezone.utc).isoformat(),
                        'plan': None, 'diff': '', 'changes': [], 'steps': 0, 'attempts': 0,
                        'project': str(copied_source), 'infrastructure_profile': profile.as_dict(),
+                       'application_ir': application_ir(profile).as_dict(),
                        'events': [], 'source_digest': digest,
                        'group_id': group_id, 'group_order': order}
                 if target == 'cloud-run':
@@ -1811,12 +1814,14 @@ def handler_for(app: App):
                                             'cost': {'estimate': None,
                                                      'note': '대상 전체 비용은 아직 산정하지 않았습니다.'}})
                     self.json_response(200, {'source_digest': digest,
+                                             'application_ir': application_ir(profile).as_dict(),
                                              'inspection': {
                                                  'requirements': list(profile.requirements),
                                                  'evidence_files': list(profile.evidence),
                                                  'scanned_files': profile.scanned_files,
                                              },
-                                             'reports': reports})
+                                             'reports': reports,
+                                             'candidates': evaluate_candidates(reports)})
                     return
                 if self.path == '/api/deployment-groups':
                     if not app.ai_settings.available:
@@ -2042,6 +2047,7 @@ def handler_for(app: App):
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
+                                "application_ir": application_ir(infrastructure_profile).as_dict(),
                                 "events": []}
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion

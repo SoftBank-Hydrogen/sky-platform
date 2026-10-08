@@ -53,6 +53,13 @@ Explain your decision briefly in Korean. Return only the requested structured JS
 def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     """Find known durable-storage needs; absence of signals is not a statelessness proof."""
     evidence = []
+    requirement_evidence = {}
+
+    def record(requirement, path):
+        files = requirement_evidence.setdefault(requirement, set())
+        if len(files) < 20:
+            files.add(path)
+
     requirements = set()
     database_engines = set()
     final_image_platform = None
@@ -66,6 +73,7 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
             continue
         if path.suffix.lower() in SQLITE_FILES:
             requirements.add('sqlite')
+            record('sqlite', relative.as_posix())
             if len(evidence) < 20:
                 evidence.append(relative.as_posix())
             continue
@@ -87,6 +95,8 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 final_image_platform = stages[-1].lower() or None
                 if final_image_platform and len(evidence) < 20:
                     evidence.append('Dockerfile')
+                if final_image_platform:
+                    record('image-platform', 'Dockerfile')
             continue
         found = set()
         if path.name == 'package.json':
@@ -148,6 +158,8 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
                 found.add('local-files')
         if found:
             requirements.update(found)
+            for requirement in found:
+                record(requirement, relative.as_posix())
             if len(evidence) < 20 and relative.as_posix() not in evidence:
                 evidence.append(relative.as_posix())
     storage = ('sqlite' if 'sqlite' in requirements else 'database' if 'database' in requirements
@@ -155,7 +167,9 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
     if 'database' in requirements and not database_engines:
         database_engines.add('unknown')
     return InfrastructureProfile(storage, tuple(evidence), scanned, tuple(sorted(requirements)),
-                                 tuple(sorted(database_engines)), final_image_platform)
+                                 tuple(sorted(database_engines)), final_image_platform,
+                                 tuple((name, tuple(sorted(paths)))
+                                       for name, paths in sorted(requirement_evidence.items())))
 
 
 def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -> tuple[dict, InfrastructureProfile]:
@@ -171,9 +185,15 @@ def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -
     if profile.database_engines and any(engine not in {'sqlite', 'unknown'}
                                         for engine in profile.database_engines):
         raise ValueError('SQLite 외에 다른 데이터베이스 엔진이 함께 감지됐습니다.')
+    projected_evidence = {name: set(paths) for name, paths in profile.requirement_evidence
+                          if name != 'sqlite'}
+    projected_evidence.setdefault('database', set()).update(
+        dict(profile.requirement_evidence).get('sqlite', ()))
     projected = InfrastructureProfile('database', profile.evidence, profile.scanned_files,
                                       tuple(sorted((set(profile.requirements) - {'sqlite'}) | {'database'})),
-                                      ('postgresql',), profile.final_image_platform)
+                                      ('postgresql',), profile.final_image_platform,
+                                      tuple((name, tuple(sorted(paths)))
+                                            for name, paths in sorted(projected_evidence.items())))
     return ({'path': files[0].relative_to(project).as_posix(),
              'source_sha256': snapshot.source_sha256, 'row_counts': snapshot.row_counts,
              'schema': snapshot.schema}, projected)

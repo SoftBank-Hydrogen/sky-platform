@@ -116,6 +116,10 @@ class InfrastructureTests(unittest.TestCase):
             job = app.jobs[handler.json_response.call_args.args[1]['id']]
             self.assertFalse(job['public'])
             self.assertEqual(job['infrastructure_plan']['compatibility']['access_mode'], 'loopback')
+            self.assertEqual(job['application_ir']['topology_status'], 'unresolved')
+            access = next(item for item in job['infrastructure_plan']['compatibility']['constraint_results']
+                          if item['rule_id'] == 'ACCESS-01')
+            self.assertEqual(access['status'], 'satisfied')
 
     def test_agent_edit_cannot_change_final_image_to_arm_for_aws(self):
         with tempfile.TemporaryDirectory() as directory:

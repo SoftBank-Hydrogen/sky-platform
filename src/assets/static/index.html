@@ -305,7 +305,34 @@ function postgresUploadHeaders(application){
  return {'X-Postgres-Existing':'true',...(el('sqliteConvert').checked?{'X-Sqlite-Convert':'true'}:{})};
 }
 function selectedUploadBody(){const file=el('file').files[0],folder=[...el('folder').files];if(!file&&!folder.length)throw Error('앱 폴더 또는 ZIP을 선택하세요.');if(!folder.length)return file;const included=folder.filter(item=>!ignoredSource(item.webkitRelativePath));if(!included.length)throw Error('업로드할 앱 파일이 없습니다.');if(included.length>5000||included.reduce((total,item)=>total+item.size,0)>20*1024*1024)throw Error('폴더는 파일 5000개, 총 20 MiB 이하여야 합니다.');const body=new FormData();for(const item of included){body.append('path',item.webkitRelativePath);body.append('file',item,item.name);}return body;}
-el('compatibilityPreview').onclick=async()=>{const output=el('compatibilityMap');output.hidden=false;output.textContent='앱 요구와 대상 기능을 비교하는 중입니다.';try{const body=selectedUploadBody();const result=await api('/api/compatibility',{method:'POST',headers:{'X-Public-Access':String(el('public').checked)},body});const names={'local-docker':'Local Docker','aws-ecs-express':'AWS ECS Express','cloud-run':'Google Cloud Run'};const inspection=result.inspection||{};const basis='탐지한 요구: '+((inspection.requirements||[]).join(', ')||'알려진 영속·워커 요구 없음')+' · 근거 파일: '+((inspection.evidence_files||[]).join(', ')||'없음')+' · 검사 파일: '+(inspection.scanned_files??'미기록')+'개. 탐지되지 않은 요구가 없다는 보증은 아닙니다.\n\n';output.textContent=basis+result.reports.map(report=>{const state=report.preview_eligible?'감지된 요구 기준 통과':report.compatible?'서버 설정 필요':'현재 미지원';const issues=[...report.problems,report.configuration_reason].filter(Boolean).join('; ');return names[report.target]+' · '+state+' · 접근: '+(report.access_mode||'선택한 공개 범위 미지원')+'\n  '+(issues||'감지한 요구사항과 충돌 없음')+'\n  비용: 미산정';}).join('\n\n')+'\n\n정적 탐지만으로 앱의 무상태성이나 실제 배포 성공을 증명하지 않습니다.';}catch(error){output.textContent=error.message;}};
+function compatibilityPreviewText(result){
+ const names={'local-docker':'Local Docker','aws-ecs-express':'AWS ECS Express','cloud-run':'Google Cloud Run'};
+ const states={eligible:'감지된 요구 기준 배포 시도 가능',rejected:'제약 위반',requires_setup:'대상 설정 필요',requires_database_binding:'DB 연결 선택 필요'};
+ const inspection=result.inspection||{};
+ const paths=new Map((result.application_ir?.evidence||[]).map(item=>[item.id,item.path]));
+ const reports=new Map((result.reports||[]).map(item=>[item.target,item]));
+ const basis='탐지한 요구: '+((inspection.requirements||[]).join(', ')||'알려진 영속·워커 요구 없음')+
+  ' · 근거 파일: '+((inspection.evidence_files||[]).join(', ')||'없음')+
+  ' · 검사 파일: '+(inspection.scanned_files??'미기록')+'개.\n\n';
+ const candidates=(result.candidates||[]).map(candidate=>{
+  const report=reports.get(candidate.id)||{};
+  const rules=(report.constraint_results||[]).filter(item=>item.status==='violated').map(item=>
+   '  ['+item.rule_id+'] '+item.reason+' · 근거: '+(item.evidence_ids.map(id=>paths.get(id)).filter(Boolean).join(', ')||'사용자 선택·설정'));
+  return (names[candidate.id]||candidate.id)+' · '+(states[candidate.status]||candidate.status)+
+   ' · 접근: '+(report.access_mode||'선택한 공개 범위 미지원')+'\n'+
+   (rules.length?rules.join('\n'):'  '+candidate.reasons.join('; '))+
+   (candidate.status==='requires_database_binding'?'\n  '+candidate.reasons.join('; '):'')+'\n  비용: 미산정';
+ });
+ return basis+candidates.join('\n\n')+'\n\n정적 탐지만으로 앱의 무상태성이나 실제 배포 성공을 증명하지 않습니다.';
+}
+el('compatibilityPreview').onclick=async()=>{
+ const output=el('compatibilityMap');output.hidden=false;output.textContent='앱 요구와 대상 기능을 비교하는 중입니다.';
+ try{
+  const body=selectedUploadBody();
+  const result=await api('/api/compatibility',{method:'POST',headers:{'X-Public-Access':String(el('public').checked)},body});
+  output.textContent=compatibilityPreviewText(result);
+ }catch(error){output.textContent=error.message;}
+};
 el('deploy').onclick=async()=>{
  const application=el('application').value.trim();el('error').textContent='';
  if(!/^[a-z][a-z0-9-]{2,30}$/.test(application)){el('error').textContent='앱 ID는 영문 소문자로 시작하는 3~31자의 영문 소문자·숫자·하이픈이어야 합니다.';return;}

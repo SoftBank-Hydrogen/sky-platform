@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 
 SOURCE_EXTENSIONS = {
     ".js",
@@ -153,9 +154,14 @@ class InfrastructureProfile:
     requirements: tuple[str, ...] = ()
     database_engines: tuple[str, ...] = ()
     final_image_platform: str | None = None
+    requirement_evidence: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def as_dict(self):
         return asdict(self)
+
+
+def evidence_id(requirement: str, path: str) -> str:
+    return "E-" + sha256(f"{requirement}\0{path}".encode()).hexdigest()[:12]
 
 
 def deployment_access_mode(target: str, public_access: bool) -> str | None:
@@ -189,18 +195,48 @@ def infrastructure_compatibility(
             "access_modes": [],
         },
     )
-    problems = []
+    constraints = []
+    evidence_by_requirement = dict(profile.requirement_evidence)
+
+    def check(rule_id: str, requirement: str, problem: str | None) -> None:
+        constraints.append(
+            {
+                "rule_id": rule_id,
+                "status": "violated" if problem else "satisfied",
+                "requirement": requirement,
+                "evidence_files": list(evidence_by_requirement.get(requirement, ())),
+                "evidence_ids": [
+                    evidence_id(requirement, path) for path in evidence_by_requirement.get(requirement, ())
+                ],
+                "reason": problem or "현재 대상 어댑터의 선언과 충돌하지 않습니다.",
+            }
+        )
+
     if "sqlite" in profile.requirements or profile.storage == "sqlite":
-        problems.append("SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다")
+        check("DATA-SQLITE-01", "sqlite", "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다")
     if ("database" in profile.requirements or profile.storage == "database") and not (
         postgres and capabilities["postgresql_binding"] and profile.database_engines == ("postgresql",)
     ):
         engines = ", ".join(profile.database_engines) if profile.database_engines else "불명"
-        problems.append(f"{engines} 데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다")
-    if "local-files" in profile.requirements and not capabilities["durable_files"]:
-        problems.append("로컬 파일 쓰기에 영속 저장소가 필요합니다")
-    if "background-worker" in profile.requirements and not capabilities["background_worker"]:
-        problems.append("별도 백그라운드 워커가 필요합니다")
+        check(
+            "DATA-BINDING-01",
+            "database",
+            f"{engines} 데이터베이스 서비스 연결·마이그레이션 검증이 필요합니다",
+        )
+    elif "database" in profile.requirements or profile.storage == "database":
+        check("DATA-BINDING-01", "database", None)
+    if "local-files" in profile.requirements:
+        check(
+            "STORAGE-DURABILITY-01",
+            "local-files",
+            None if capabilities["durable_files"] else "로컬 파일 쓰기에 영속 저장소가 필요합니다",
+        )
+    if "background-worker" in profile.requirements:
+        check(
+            "WORKER-01",
+            "background-worker",
+            None if capabilities["background_worker"] else "별도 백그라운드 워커가 필요합니다",
+        )
     literal_platform = (
         profile.final_image_platform
         if profile.final_image_platform
@@ -212,17 +248,24 @@ def infrastructure_compatibility(
         and capabilities["image_platform"]
         and "/".join(literal_platform.split("/")[:2]) != capabilities["image_platform"]
     ):
-        problems.append(
+        check(
+            "IMAGE-PLATFORM-01",
+            "image-platform",
             f"최종 Dockerfile 단계의 {profile.final_image_platform} 플랫폼이 "
-            f"{capabilities['image_platform']} 이미지 빌드와 충돌합니다"
+            f"{capabilities['image_platform']} 이미지 빌드와 충돌합니다",
         )
+    elif literal_platform and capabilities["image_platform"]:
+        check("IMAGE-PLATFORM-01", "image-platform", None)
     access_mode = (
         deployment_access_mode(target, public_access)
         if target != "auto" and public_access is not None
         else None
     )
     if target != "auto" and public_access is not None and access_mode is None:
-        problems.append("선택한 공개 범위로 배포할 수 없습니다")
+        check("ACCESS-01", "access-mode", "선택한 공개 범위로 배포할 수 없습니다")
+    elif target != "auto" and public_access is not None:
+        check("ACCESS-01", "access-mode", None)
+    problems = [item["reason"] for item in constraints if item["status"] == "violated"]
     return {
         "target": target,
         "detected_requirements": list(profile.requirements),
@@ -234,6 +277,7 @@ def infrastructure_compatibility(
         "adapter_capabilities": capabilities.copy(),
         "compatible": not problems,
         "problems": problems,
+        "constraint_results": constraints,
         "inspection_note": "탐지 신호가 없어도 무상태 앱임이 증명된 것은 아닙니다.",
     }
 
