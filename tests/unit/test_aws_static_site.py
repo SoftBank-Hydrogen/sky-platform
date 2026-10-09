@@ -24,8 +24,10 @@ class StaticSiteAdapterTests(unittest.TestCase):
                 return {"Account": account}
             raise AssertionError(f"Unexpected AWS request: {args}")
 
-        return AwsStaticSiteAdapter(AwsSettings("ap-northeast-2", expected_account=ACCOUNT,
-                                               account_pin_required=True), command=command), calls
+        return AwsStaticSiteAdapter(
+            AwsSettings("ap-northeast-2", expected_account=ACCOUNT, account_pin_required=True),
+            command=command,
+        ), calls
 
     def test_static_preflight_is_read_only_and_source_bound(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,12 +62,13 @@ class StaticSiteAdapterTests(unittest.TestCase):
     def test_foreign_stack_arn_is_rejected_before_aws_call(self):
         adapter, calls = self.make_adapter()
         with self.assertRaises(AwsConfigurationError):
-            adapter.retire("hello-site", ATTEMPT, "arn:aws:cloudformation:ap-northeast-2:999999999999:stack/other/x")
+            adapter.retire(
+                "hello-site", ATTEMPT, "arn:aws:cloudformation:ap-northeast-2:999999999999:stack/other/x"
+            )
         self.assertEqual(calls, [])
 
     def test_owned_stack_upload_requires_exact_public_index(self):
-        stack = ("arn:aws:cloudformation:ap-northeast-2:123456789012:"
-                 f"stack/sky-static-{ATTEMPT}/generated")
+        stack = f"arn:aws:cloudformation:ap-northeast-2:123456789012:stack/sky-static-{ATTEMPT}/generated"
         bucket = f"sky-static-{ACCOUNT}-ap-northeast-2-{ATTEMPT}"
         calls = []
 
@@ -78,13 +81,24 @@ class StaticSiteAdapterTests(unittest.TestCase):
             if args[:2] == ["cloudformation", "wait"]:
                 return {}
             if args[:2] == ["cloudformation", "describe-stacks"]:
-                return {"Stacks": [{"StackId": stack, "StackStatus": "CREATE_COMPLETE",
-                                    "Tags": [{"Key": "sky-managed", "Value": "true"},
-                                             {"Key": "sky-app", "Value": "hello-site"},
-                                             {"Key": "sky-attempt", "Value": ATTEMPT}],
-                                    "Outputs": [{"OutputKey": "BucketName", "OutputValue": bucket},
-                                                {"OutputKey": "DistributionId", "OutputValue": "E12345678"},
-                                                {"OutputKey": "DomainName", "OutputValue": "d123.cloudfront.net"}]}]}
+                return {
+                    "Stacks": [
+                        {
+                            "StackId": stack,
+                            "StackStatus": "CREATE_COMPLETE",
+                            "Tags": [
+                                {"Key": "sky-managed", "Value": "true"},
+                                {"Key": "sky-app", "Value": "hello-site"},
+                                {"Key": "sky-attempt", "Value": ATTEMPT},
+                            ],
+                            "Outputs": [
+                                {"OutputKey": "BucketName", "OutputValue": bucket},
+                                {"OutputKey": "DistributionId", "OutputValue": "E12345678"},
+                                {"OutputKey": "DomainName", "OutputValue": "d123.cloudfront.net"},
+                            ],
+                        }
+                    ]
+                }
             if args[:2] == ["s3api", "put-object"]:
                 return {"ETag": '"abc"'}
             raise AssertionError(f"Unexpected AWS request: {args}")
@@ -111,9 +125,11 @@ class StaticSiteAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / "index.html").write_text("<h1>Hello</h1>")
-            adapter = AwsStaticSiteAdapter(AwsSettings("ap-northeast-2", expected_account=ACCOUNT,
-                                                       account_pin_required=True), command=command,
-                                           checkpoint=lambda **updates: checkpoints.append(updates))
+            adapter = AwsStaticSiteAdapter(
+                AwsSettings("ap-northeast-2", expected_account=ACCOUNT, account_pin_required=True),
+                command=command,
+                checkpoint=lambda **updates: checkpoints.append(updates),
+            )
             with patch("adapters.aws.static_site.urllib.request.build_opener", return_value=opener):
                 result = adapter.deploy(project, "hello-site", ATTEMPT)
         self.assertEqual(result["url"], "https://d123.cloudfront.net")

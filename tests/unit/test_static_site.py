@@ -23,38 +23,52 @@ class StaticSiteAssessmentTests(unittest.TestCase):
             return assess_static_site(root, inspect_infrastructure(root))
 
     def test_html_and_client_assets_are_static_candidate(self):
-        result = self.assess({"index.html": '<script src="assets/app.js"></script>',
-                              "assets/app.js": "document.body.dataset.ready = 'yes';"})
+        result = self.assess(
+            {
+                "index.html": '<script src="assets/app.js"></script>',
+                "assets/app.js": "document.body.dataset.ready = 'yes';",
+            }
+        )
         self.assertEqual(result.status, "eligible")
         self.assertIn("index.html", result.evidence_files)
 
     def test_client_call_to_same_origin_api_requires_review(self):
-        result = self.assess({"index.html": '<script src="app.js"></script>',
-                              "app.js": "fetch('/api/posts').then(console.log)"})
+        result = self.assess(
+            {
+                "index.html": '<script src="app.js"></script>',
+                "app.js": "fetch('/api/posts').then(console.log)",
+            }
+        )
         self.assertEqual(result.status, "needs_review")
         self.assertIn("app.js", result.evidence_files)
 
     def test_frontend_source_requires_verified_build_output(self):
-        result = self.assess({"index.html": '<div id="root"></div>',
-                              "package.json": '{"scripts":{"build":"vite build"},'
-                                              '"devDependencies":{"vite":"1.0.0"}}'})
+        result = self.assess(
+            {
+                "index.html": '<div id="root"></div>',
+                "package.json": '{"scripts":{"build":"vite build"},"devDependencies":{"vite":"1.0.0"}}',
+            }
+        )
         self.assertEqual(result.status, "needs_build")
 
     def test_game_frontend_does_not_hide_server(self):
-        result = self.assess({"index.html": "<h1>Game</h1>",
-                              "server.js": "const http = require('node:http');"})
+        result = self.assess(
+            {"index.html": "<h1>Game</h1>", "server.js": "const http = require('node:http');"}
+        )
         self.assertEqual(result.status, "server_or_mixed")
         self.assertIn("server.js", result.evidence_files)
 
     def test_nested_server_is_not_hidden_by_root_index(self):
-        result = self.assess({"index.html": "<h1>Game</h1>",
-                              "backend/server.js": "const http = require('node:http');"})
+        result = self.assess(
+            {"index.html": "<h1>Game</h1>", "backend/server.js": "const http = require('node:http');"}
+        )
         self.assertEqual(result.status, "server_or_mixed")
         self.assertIn("backend/server.js", result.evidence_files)
 
     def test_sqlite_dependent_site_is_not_static_candidate(self):
-        result = self.assess({"index.html": "<h1>Scores</h1>",
-                              "db.js": "const Database = require('better-sqlite3');"})
+        result = self.assess(
+            {"index.html": "<h1>Scores</h1>", "db.js": "const Database = require('better-sqlite3');"}
+        )
         self.assertEqual(result.status, "server_or_mixed")
 
     def test_pure_static_zip_can_enter_preflight(self):
@@ -66,8 +80,7 @@ class StaticSiteAssessmentTests(unittest.TestCase):
                 bundle.writestr("site/style.css", "body { color: navy; }")
             project = extract_project(archive, root / "source")
             self.assertEqual(project.name, "site")
-            self.assertEqual(assess_static_site(project, inspect_infrastructure(project)).status,
-                             "eligible")
+            self.assertEqual(assess_static_site(project, inspect_infrastructure(project)).status, "eligible")
 
     def test_top_level_static_folder_cannot_hide_sibling_backend(self):
         with tempfile.TemporaryDirectory() as directory:
