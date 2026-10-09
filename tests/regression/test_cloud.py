@@ -96,6 +96,13 @@ class CloudTests(unittest.TestCase):
                                     {'APP_SECRET': 'private-app-value'})
         prepare.assert_not_called()
 
+    def test_browser_client_loopback_url_stops_before_gcp_setup(self):
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-05'):
+                self.adapter.deploy(self.project, self.plan, self.attempt,
+                                    {'VITE_API_URL': 'http://localhost:3000'})
+        prepare.assert_not_called()
+
     def test_full_private_deployment_build_push_infrastructure_and_probe(self):
         result, verify = self.deploy()
         self.assertEqual(result['target'], 'cloud-run')

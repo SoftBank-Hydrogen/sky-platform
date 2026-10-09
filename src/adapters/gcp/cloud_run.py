@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from application.analysis import redact
+from application.client_urls import check_browser_client_urls
 from application.deployment_core import validate_environment
 from application.source_secrets import reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source
 from adapters.build.image import ImageBuilder
@@ -127,6 +128,7 @@ class CloudRunAdapter:
         environment = validate_environment(environment, plan.required_env)
         reject_supplied_secrets_in_source(project, environment)
         reject_plaintext_cloud_secrets(environment, 'cloud-run')
+        check_browser_client_urls(environment, 'cloud-run')
         self.sensitive.extend(environment.values())
         self.prepare_infrastructure()
         service = f'sky-{attempt_id}'

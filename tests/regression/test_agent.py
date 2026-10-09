@@ -154,6 +154,19 @@ class AgentTests(unittest.TestCase):
         self.assertIsNone(self.tools.plan)
         self.assertEqual(self.tools.attempts, 0)
 
+    def test_browser_client_loopback_url_stops_before_deployment_attempt(self):
+        self.tools.target = 'aws-ecs-express'
+        self.tools.environment['VITE_API_URL'] = 'http://localhost:8080'
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        self.tools.configure_deployment('start', None, 3000, '/', ['VITE_API_URL'])
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'CV-05'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

@@ -20,6 +20,7 @@ from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
+from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_sqlite_migration_consistency,
@@ -452,6 +453,7 @@ class DeploymentTools:
             raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
         reject_supplied_secrets_in_source(self.work, self.environment)
         reject_plaintext_cloud_secrets(self.environment, self.target)
+        check_browser_client_urls(self.environment, self.target)
         if self.compilation is not None:
             verify_source_transform(
                 self.source_transform, self.compilation, self.original, self.work, self.plan)

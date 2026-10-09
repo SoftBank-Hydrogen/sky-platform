@@ -49,6 +49,13 @@ class AwsTests(unittest.TestCase):
                                     environment={'APP_SECRET': 'synthetic-private-value'})
         prepare.assert_not_called()
 
+    def test_browser_client_loopback_url_stops_before_aws_setup(self):
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-05'):
+                self.adapter.deploy(self.project, self.plan, ATTEMPT,
+                                    environment={'VITE_API_URL': 'http://localhost:3000'})
+        prepare.assert_not_called()
+
     def test_server_aws_target_requires_pinned_account(self):
         with patch.dict(os.environ, {'SKY_AWS_REGION': REGION,
                                       'SKY_AWS_ACCOUNT_ID': ''}):

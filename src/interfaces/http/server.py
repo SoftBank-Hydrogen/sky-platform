@@ -33,6 +33,7 @@ from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
+from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_target_resource_consistency, require_health_result)
@@ -329,6 +330,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 raise ValueError('AWS 승격에는 계획에 선언된 환경변수만 입력하세요.')
             reject_supplied_secrets_in_source(work, validated_environment)
             reject_plaintext_cloud_secrets(validated_environment, 'aws-ecs-express')
+            check_browser_client_urls(validated_environment, 'aws-ecs-express')
             with self.lock:
                 if job.get('cancel_requested'):
                     raise DeploymentCancelled()
