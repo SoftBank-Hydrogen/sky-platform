@@ -14,6 +14,9 @@ from application.deployment_core import DeploymentPlan
 from adapters.aws.postgres import PostgresRequest
 
 
+JOB_RECORD_VERSION = 1
+
+
 def postgres_request_from_job(job: dict) -> PostgresRequest | None:
     configuration = job.get('postgres')
     if configuration is None:
@@ -85,6 +88,9 @@ class StateRecoveryMixin:
                 job = json.loads(path.read_text())
                 if not isinstance(job, dict):
                     raise ValueError("Invalid job record")
+                version = job.get('job_record_version', 0)
+                if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
+                    raise ValueError('Unsupported job record version')
                 job_id = path.parent.name
                 if not re.fullmatch(r"[a-f0-9]{16}", job_id) or job.get("id") != job_id:
                     raise ValueError("Invalid job identity")
@@ -107,6 +113,9 @@ class StateRecoveryMixin:
                     raise ValueError('Invalid PostgreSQL creation binding')
                 if job["status"] not in {"planned", "provisioning", "running", "waiting_input", "succeeded", "failed", "interrupted", "cancelled"}:
                     raise ValueError("Invalid job status")
+                attempts = job.get('attempts', 0)
+                if type(attempts) is not int or not 0 <= attempts <= 3:
+                    raise ValueError('Invalid deployment attempt count')
                 if (not isinstance(job["events"], list) or any(
                         not isinstance(event, dict) or any(not isinstance(event.get(key), str)
                         for key in ("time", "stage", "message")) for event in job["events"])):
@@ -204,12 +213,18 @@ class StateRecoveryMixin:
         path = self.root / job_id / "job.json"
         temporary = None
         try:
+            job = self.jobs[job_id]
+            version = job.get('job_record_version', 0)
+            if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
+                raise ValueError('Unsupported job record version')
+            record = {**job, 'job_record_version': JOB_RECORD_VERSION}
             descriptor, temporary = tempfile.mkstemp(prefix='.job-', suffix='.tmp', dir=path.parent)
             with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
-                json.dump(self.jobs[job_id], output, ensure_ascii=False, indent=2)
+                json.dump(record, output, ensure_ascii=False, indent=2)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, path)
+            job['job_record_version'] = JOB_RECORD_VERSION
         except OSError as exc:
             job = self.jobs[job_id]
             job['status'] = 'failed'
