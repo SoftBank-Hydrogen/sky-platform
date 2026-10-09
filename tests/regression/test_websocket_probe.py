@@ -103,8 +103,8 @@ class WebSocketProbeTests(unittest.TestCase):
                     {'kind': 'websocket', 'status': 'inferred'},
                     {'kind': 'sky-probe-protocol', 'status': 'inferred'}]},
             }
-            with patch('interfaces.http.server.check_deployment', return_value={'healthy': True}), \
-                    patch('interfaces.http.server.probe_sky_game',
+            with patch('application.monitoring.check_deployment', return_value={'healthy': True}), \
+                    patch('application.monitoring.probe_sky_game',
                           return_value={'status': 'passed', 'protocol': 'sky.probe.v1',
                                         'checked_at': '2026-10-09T00:00:00+00:00'}):
                 handler_type = handler_for(app)
@@ -116,8 +116,8 @@ class WebSocketProbeTests(unittest.TestCase):
             self.assertEqual(handler.json_response.call_args.args[0], 200)
             self.assertEqual(app.jobs[job_id]['websocket_verification']['status'], 'passed')
             self.assertEqual(deployment_certificate(app.jobs[job_id])['verification'][-1]['status'], 'passed')
-            with patch('interfaces.http.server.check_deployment', return_value={'healthy': False}), \
-                    patch('interfaces.http.server.probe_sky_game') as probe:
+            with patch('application.monitoring.check_deployment', return_value={'healthy': False}), \
+                    patch('application.monitoring.probe_sky_game') as probe:
                 failed = app.check_and_record_websocket(job_id)
             self.assertEqual(failed['status'], 'failed')
             probe.assert_not_called()

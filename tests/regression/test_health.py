@@ -78,7 +78,7 @@ class HealthTests(unittest.TestCase):
             handler.path = f'/api/jobs/{JOB_ID}/health'
             handler.headers = {'X-Sky-Token': app.token}
             handler.json_response = Mock()
-            with patch('interfaces.http.server.check_deployment', return_value={'healthy': True}) as check:
+            with patch('application.monitoring.check_deployment', return_value={'healthy': True}) as check:
                 handler.do_GET()
                 handler.json_response.assert_called_once_with(200, {'healthy': True})
                 check.assert_called_once()
