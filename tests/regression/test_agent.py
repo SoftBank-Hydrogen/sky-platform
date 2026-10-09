@@ -39,6 +39,19 @@ class AgentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Configure'):
             self.tools.deploy_application()
 
+    def test_npm_lock_sync_checkpoint_is_invalidated_by_later_manifest_edit(self):
+        marker = {'generator': 'isolated_npm', 'manifest_sha256': 'a' * 64,
+                  'before_sha256': 'b' * 64, 'after_sha256': 'c' * 64}
+        with patch('application.agent.sync_npm_lockfile', return_value=marker) as sync:
+            self.tools.sync_npm_lockfile()
+        sync.assert_called_once_with(self.original, self.tools.work)
+        self.assertEqual(self.tools.npm_lock_sync, marker)
+        self.assertEqual(self.updates[-1]['npm_lock_sync'], marker)
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}', '"scripts":{"start":"node server.js"}')
+        self.assertIsNone(self.tools.npm_lock_sync)
+        self.assertIsNone(self.updates[-1]['npm_lock_sync'])
+
     def test_invalid_npm_command_explains_available_script_names(self):
         self.tools.read_project_files(['package.json'])
         self.tools.apply_project_patch('package.json', '"scripts": {}',

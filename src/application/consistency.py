@@ -20,7 +20,8 @@ class HealthResultMismatch(ValueError):
     retryable = False
 
 
-def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None) -> dict:
+def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None,
+                              npm_lock_sync: dict | None = None) -> dict:
     """Check verified source changes against edit scope and the reviewed SQLite exception."""
     changes = record.get("changes") if isinstance(record, dict) else None
     if not isinstance(changes, list):
@@ -47,6 +48,19 @@ def check_source_change_scope(record: dict, original: Path, sqlite_conversion: d
             migration_path: (None, hashlib.sha256(snapshot.sql.encode()).hexdigest()),
         }
 
+    allowed_lock = None
+    if npm_lock_sync is not None:
+        if not isinstance(npm_lock_sync, dict) or npm_lock_sync.get("generator") != "isolated_npm":
+            raise ValueError("CV-02: npm lockfile sync record is invalid")
+        manifest = original / "package.json"
+        lock = original / "package-lock.json"
+        if (manifest.is_symlink() or lock.is_symlink() or not manifest.is_file() or not lock.is_file()
+                or hashlib.sha256(lock.read_bytes()).hexdigest() != npm_lock_sync.get("before_sha256")):
+            raise ValueError("CV-02: npm lockfile sync source differs from the uploaded source")
+        allowed_lock = (npm_lock_sync.get("before_sha256"), npm_lock_sync.get("after_sha256"))
+        if not isinstance(allowed_lock[1], str) or not re.fullmatch(r"[0-9a-f]{64}", allowed_lock[1]):
+            raise ValueError("CV-02: npm lockfile sync digest is invalid")
+
     observed = set()
     for item in changes:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
@@ -64,6 +78,10 @@ def check_source_change_scope(record: dict, original: Path, sqlite_conversion: d
             if hashes != allowed_conversion[name]:
                 raise ValueError(f"CV-02: Approved SQLite conversion changed unexpectedly: {name}")
             continue
+        if name == "package-lock.json" and allowed_lock is not None:
+            if hashes != allowed_lock:
+                raise ValueError("CV-02: npm lockfile differs from the isolated sync result")
+            continue
         if (hashes[1] is None or name in {"package-lock.json", "Gemfile.lock", "poetry.lock",
                                          "go.sum", "Cargo.lock"}
                 or (name == "Dockerfile" and not (original / name).is_file())
@@ -72,6 +90,12 @@ def check_source_change_scope(record: dict, original: Path, sqlite_conversion: d
             raise ValueError(f"CV-02: Source change is outside the allowlist: {name}")
     if set(allowed_conversion) - observed:
         raise ValueError("CV-02: Approved SQLite conversion is incomplete")
+    if allowed_lock is not None:
+        manifest_change = next((item for item in changes if item["path"] == "package.json"), None)
+        if ("package-lock.json" not in observed or manifest_change is None
+                or manifest_change.get("before_sha256") != hashlib.sha256(manifest.read_bytes()).hexdigest()
+                or manifest_change.get("after_sha256") != npm_lock_sync.get("manifest_sha256")):
+            raise ValueError("CV-02: npm lockfile sync is not bound to the changed manifest")
     return {"id": "CV-02", "status": "pass", "source": "applied_source_transform"}
 
 

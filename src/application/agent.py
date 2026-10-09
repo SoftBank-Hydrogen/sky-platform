@@ -30,6 +30,7 @@ from application.source_secrets import (reject_plaintext_cloud_secret_names,
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
+from application.npm_lockfile import sync_npm_lockfile
 from adapters.database.migrations import collect_sql_migrations
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
@@ -52,6 +53,7 @@ TOOLS = [
     tool("apply_project_patch", "Apply one exact replacement in a previously read working-copy file. Use old_text='' to create a new file or fill a previously read empty file. Preserve app behavior; fix deployment problems only.",
          {"path": STRING, "old_text": STRING, "new_text": STRING}),
     tool("prepare_sqlite_migration", "For an explicitly approved SQLite-to-PostgreSQL job, turn the uploaded database snapshot into a PostgreSQL migration in the working copy. Call before editing database code. The original is preserved.", {}),
+    tool("sync_npm_lockfile", "After changing root package.json dependencies, regenerate an existing package-lock.json with isolated npm. Only public npm registry packages with semver ranges are supported; package scripts are disabled. Call before configuring deployment.", {}),
     tool("configure_deployment", "Prepare the container. Use start_script='dockerfile' for an existing Dockerfile, an existing server.py/app.py/main.py for executable Python, 'asgi:<file>.py' for a root ASGI app with uvicorn, 'wsgi:<file>.py' for a root WSGI app with gunicorn, or the name of an existing npm script (for example 'start', never 'npm start' or 'node server.js'). Python server dependencies must be explicit in requirements.txt. Use build_script=null except for Node. Call again after any file edit.",
          {"start_script": STRING, "build_script": {"type": ["string", "null"]},
           "port": {"type": "integer"}, "health_path": STRING,
@@ -77,6 +79,7 @@ queries, placeholders and dependencies with PostgreSQL equivalents in the workin
 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE environment. Do not remove database behavior or claim that
 the conversion succeeded until the real migration, deployment and HTTP probe succeed. Report a blocker
 if the source is too complex to convert safely.
+If you change root package.json dependencies and package-lock.json exists, call sync_npm_lockfile before configuring.
 Use an existing meaningful HTTP path returning 200. Do not delete tests or disable app security to pass checks.
 If an existing Dockerfile is present, read it and preserve its build and startup behavior. Use start_script='dockerfile' and build_script=null. You may patch that existing Dockerfile to fix deployment issues. Without a Dockerfile, configure_deployment generates one for Node 22/npm or Python. For executable Python use the existing server.py/app.py/main.py as start_script. For a root ASGI app object named app, use 'asgi:main.py', 'asgi:app.py', or 'asgi:server.py' and ensure requirements.txt explicitly includes uvicorn. For a root WSGI app object named app, use the analogous 'wsgi:<file>.py' form and ensure requirements.txt explicitly includes gunicorn. Use build_script=null; preserve the app's HTTP behavior.
 Deploy directly; no user approval of a plan is required. Ask only for missing environment values.
@@ -206,6 +209,7 @@ class DeploymentTools:
                  new_managed_database: bool = False,
                  compilation: dict | None = None,
                  architecture_decision: dict | None = None,
+                 npm_lock_sync: dict | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -229,6 +233,7 @@ class DeploymentTools:
         self.new_managed_database = new_managed_database
         self.compilation = compilation
         self.architecture_decision = architecture_decision
+        self.npm_lock_sync = npm_lock_sync
         self.source_transform = None
         self.plan = None
         self.result = None
@@ -286,6 +291,16 @@ class DeploymentTools:
         return {'prepared': True, 'row_counts': snapshot.row_counts,
                 'source_sha256': snapshot.source_sha256,
                 'next': '앱의 SQLite 코드와 의존성을 PostgreSQL로 바꾸고 다시 설정하세요.'}
+
+    def sync_npm_lockfile(self):
+        record = sync_npm_lockfile(self.original, self.work)
+        self.npm_lock_sync = record
+        self.plan = None
+        self.source_transform = None
+        self.event('editing', '변경된 package.json에 맞춰 npm lockfile을 격리된 환경에서 갱신했습니다.')
+        self.checkpoint(npm_lock_sync=record, plan=None, source_transform=None)
+        return {'updated': 'package-lock.json', 'sha256': record['after_sha256'],
+                'next': 'Reconfigure before deploying'}
 
     def clean(self, text):
         for value in sorted(set(self.environment.values()), key=len, reverse=True):
@@ -379,10 +394,15 @@ class DeploymentTools:
         self.read_versions.pop(path, None)
         self.plan = None
         self.source_transform = None
+        if path == 'package.json':
+            self.npm_lock_sync = None
         diff = self.clean(''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                                     fromfile=path, tofile=path)))
         self.event("editing", f"작업용 소스 수정: {path}")
-        self.checkpoint(change={"path": path, "diff": diff}, plan=None, source_transform=None)
+        updates = {"change": {"path": path, "diff": diff}, "plan": None, "source_transform": None}
+        if path == 'package.json':
+            updates['npm_lock_sync'] = None
+        self.checkpoint(**updates)
         return {"changed": path, "patch_sha256": hashlib.sha256(new_text.encode()).hexdigest(),
                 "next": "Reconfigure before deploying"}
 
@@ -465,7 +485,8 @@ class DeploymentTools:
             if self.architecture_decision is None:
                 raise ValueError('Compiled deployment requires an architecture decision')
             checks = [database_check,
-                      check_source_change_scope(self.source_transform, self.original, self.sqlite_conversion),
+                      check_source_change_scope(self.source_transform, self.original, self.sqlite_conversion,
+                                                self.npm_lock_sync),
                       check_port_consistency(self.plan),
                       check_target_resource_consistency(self.compilation, self.infrastructure_plan, self.target)]
             if self.compilation.get("deployment_ir") is not None:

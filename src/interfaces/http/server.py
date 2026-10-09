@@ -301,7 +301,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                         job['compilation'], project, work, plan)
                 checks = [
                     check_database_consistency(job['infrastructure_plan'], inspect_infrastructure(work)),
-                    check_source_change_scope(job['source_transform'], project),
+                    check_source_change_scope(job['source_transform'], project,
+                                              npm_lock_sync=local.get('npm_lock_sync')),
                     check_port_consistency(plan),
                     check_target_resource_consistency(job['compilation'], job['infrastructure_plan'], job['target']),
                 ]
@@ -323,6 +324,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                         raise DeploymentCancelled()
                     job.update(plan=asdict(plan), diff=dockerfile_diff(project, asdict(plan)),
                                promotion_source_job_id=local_job_id, work_digest=source_digest(work),
+                               npm_lock_sync=local.get('npm_lock_sync'),
                                status='waiting_input', missing_environment=sorted(plan.required_env),
                                input_reason='AWS에 사용할 환경변수 값을 다시 입력하세요. Sky 작업 기록에는 저장하지 않지만 AWS 서비스 설정에 전달됩니다.')
                     self.save(job_id)
@@ -341,6 +343,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 job['diff'] = dockerfile_diff(project, job['plan'])
                 job['promotion_source_job_id'] = local_job_id
                 job['work_digest'] = source_digest(work)
+                job['npm_lock_sync'] = local.get('npm_lock_sync')
                 job['attempts'] = 1
                 self.save(job_id)
             self.event(job_id, 'promotion', '로컬 HTTP 검증을 통과한 이미지를 AWS로 승격합니다.')
@@ -725,6 +728,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     new_managed_database=job.get('postgres_creation_id') is not None,
                                     compilation=job.get('compilation'),
                                     architecture_decision=job.get('architecture_decision'),
+                                    npm_lock_sync=job.get('npm_lock_sync'),
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))
