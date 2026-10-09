@@ -224,6 +224,9 @@ class CloudTests(unittest.TestCase):
             def __init__(self, event, settings, public=False):
                 observed.append((settings, public))
                 self.event = event
+                self.public = public
+            def execution_capabilities(self):
+                return CloudRunAdapter.execution_capabilities()
             def deploy(self, project, plan, attempt_id, environment):
                 self.event('output', 'fixture cloud execution')
                 if len([x for x in observed if isinstance(x, str)]) == 0:

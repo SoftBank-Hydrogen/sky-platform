@@ -9,6 +9,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from application.deployment_core import DeploymentPlan
+from engine.compatibility import TARGET_CAPABILITIES
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class ExecutionRequest:
     remote_host: bool = False
     postgres_request: object | None = field(default=None, repr=False)
     migrations: object | None = field(default=None, repr=False)
+    compiled_target: dict | None = None
+    new_managed_database: bool = False
 
 
 class ExecutionAdapter(Protocol):
@@ -67,6 +70,33 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
         raise ValueError("PostgreSQL 연결 요구와 실행 입력이 일치하지 않습니다.")
     if request.migrations is not None and request.postgres_request is None:
         raise ValueError("SQL 마이그레이션에는 PostgreSQL 연결 요청이 필요합니다.")
+    if request.new_managed_database and not request.postgresql_binding:
+        raise ValueError("신규 DB 생성은 PostgreSQL 연결 요청이 필요합니다.")
+    if request.compiled_target is not None:
+        config = request.compiled_target.get("execution_configuration")
+        if request.postgresql_binding:
+            database_mode = "create_rds" if request.new_managed_database else "existing_rds"
+        elif request.sqlite_binding:
+            database_mode = "sqlite_volume"
+        else:
+            database_mode = "none"
+        expected = {
+            "service": "source-bundle",
+            "replicas": 1,
+            "access_mode": request.access_mode,
+            "database_mode": database_mode,
+            "required_image_platform": TARGET_CAPABILITIES[request.target]["image_platform"],
+            "port_source": "executable_deployment_plan",
+        }
+        if (
+            request.compiled_target.get("target") != request.target
+            or config != expected
+            or type(request.plan.port) is not int
+            or not 1 <= request.plan.port <= 65535
+        ):
+            raise ValueError("CV-09: Compiled target and execution request disagree")
+    if request.target == "cloud-run" and state.adapter.public is not (request.access_mode == "public"):
+        raise ValueError("Cloud Run 어댑터의 공개 범위가 실행 요청과 다릅니다.")
     if request.target == "aws-ecs-express":
         result = state.adapter.deploy(
             request.project, request.plan, request.attempt_id, request.environment,
@@ -76,6 +106,12 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
             raise ValueError("AWS 배포 결과의 대상이 요청과 다릅니다.")
     else:
         result = state.adapter.deploy(request.project, request.plan, request.attempt_id, request.environment)
+    if request.target == "cloud-run" and (
+        not isinstance(result, dict)
+        or result.get("target") != request.target
+        or result.get("public") is not (request.access_mode == "public")
+    ):
+        raise ValueError("Cloud Run 배포 결과가 요청한 대상·접근 범위와 다릅니다.")
     if request.target in {"local-docker", "onprem-compose"}:
         expected = f"sky-{request.attempt_id}"
         url = result.get("url") if isinstance(result, dict) else None

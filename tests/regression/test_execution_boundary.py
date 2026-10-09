@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from adapters.local.compose import LocalComposeAdapter
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import make_plan
@@ -126,6 +127,89 @@ class ExecutionBoundaryTests(unittest.TestCase):
         with patch.object(adapter, "deploy", return_value={"target": "cloud-run"}):
             with self.assertRaisesRegex(ValueError, "AWS 배포 결과의 대상"):
                 execute(request, ExecutionState(adapter))
+
+    def test_compiled_target_rejects_execution_drift_before_adapter_call(self):
+        adapter = LocalDockerAdapter(lambda *_: None)
+        request = replace(
+            self.request, target="local-docker",
+            plan=replace(self.request.plan, target="local-docker"),
+            compiled_target={
+                "target": "local-docker",
+                "execution_configuration": {
+                    "service": "source-bundle", "replicas": 1, "access_mode": "loopback",
+                    "database_mode": "none", "required_image_platform": None,
+                    "port_source": "executable_deployment_plan",
+                },
+            },
+        )
+        result = {"url": "http://127.0.0.1:12345", "container": f"sky-{ATTEMPT_ID}",
+                  "image": f"sky/{ATTEMPT_ID}:latest"}
+        with patch.object(adapter, "deploy", return_value=result) as deploy:
+            self.assertEqual(execute(request, ExecutionState(adapter)), result)
+            for changed in (
+                replace(request, access_mode="public"),
+                replace(request, sqlite_binding={"volume_name": "sky-data-demo"}),
+                replace(request, plan=replace(request.plan, port=0)),
+            ):
+                with self.subTest(changed=changed), self.assertRaises(ValueError):
+                    execute(changed, ExecutionState(adapter))
+            deploy.assert_called_once()
+
+    def test_compiled_aws_database_mode_cannot_switch_at_execution(self):
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings("ap-northeast-2"))
+        database = object()
+        request = replace(
+            self.request, target="aws-ecs-express",
+            plan=replace(self.request.plan, target="aws-ecs-express"), access_mode="public",
+            postgresql_binding=True, postgres_request=database, new_managed_database=True,
+            compiled_target={
+                "target": "aws-ecs-express",
+                "execution_configuration": {
+                    "service": "source-bundle", "replicas": 1, "access_mode": "public",
+                    "database_mode": "create_rds", "required_image_platform": "linux/amd64",
+                    "port_source": "executable_deployment_plan",
+                },
+            },
+        )
+        result = {"target": "aws-ecs-express"}
+        with patch.object(adapter, "deploy", return_value=result) as deploy:
+            self.assertEqual(execute(request, ExecutionState(adapter)), result)
+            with self.assertRaisesRegex(ValueError, "CV-09"):
+                execute(replace(request, new_managed_database=False), ExecutionState(adapter))
+            deploy.assert_called_once()
+
+    def test_cloud_run_uses_execution_boundary_and_rejects_access_drift(self):
+        adapter = CloudRunAdapter(
+            lambda *_: None, CloudRunSettings("test-project", "asia-northeast3"), public=True
+        )
+        request = replace(
+            self.request, target="cloud-run", plan=replace(self.request.plan, target="cloud-run"),
+            access_mode="public",
+            compiled_target={
+                "target": "cloud-run",
+                "execution_configuration": {
+                    "service": "source-bundle", "replicas": 1, "access_mode": "public",
+                    "database_mode": "none", "required_image_platform": "linux/amd64",
+                    "port_source": "executable_deployment_plan",
+                },
+            },
+        )
+        result = {"target": "cloud-run", "public": True}
+        with patch.object(adapter, "deploy", return_value=result) as deploy:
+            self.assertEqual(execute(request, ExecutionState(adapter)), result)
+            private_target = {
+                **request.compiled_target,
+                "execution_configuration": {
+                    **request.compiled_target["execution_configuration"],
+                    "access_mode": "authenticated",
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "공개 범위"):
+                execute(
+                    replace(request, access_mode="authenticated", compiled_target=private_target),
+                    ExecutionState(adapter),
+                )
+            deploy.assert_called_once()
 
     def test_supported_request_calls_compose_and_preserves_private_environment(self):
         captured = []
