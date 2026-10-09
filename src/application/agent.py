@@ -529,6 +529,11 @@ class DeploymentTools:
             if self.compilation is not None and self.compilation.get('schema_version') == 2
             else None
         )
+        resolved_source_transform = (
+            self.source_transform
+            if self.source_transform is not None and self.source_transform.get('schema_version') == 2
+            else None
+        )
         self.event("deploying", f"실제 배포 시도 {self.attempts}/3")
         try:
             if self.target in {"local-docker", "onprem-compose"}:
@@ -537,6 +542,7 @@ class DeploymentTools:
                     environment=self.environment, sqlite_binding=self.local_sqlite_binding,
                     postgresql_binding=self.postgres_request is not None,
                     compiled_target=compiled_target,
+                    source_transform=resolved_source_transform,
                 ), ExecutionState(adapter))
             elif self.target == "aws-ecs-express":
                 self.result = execute(ExecutionRequest(
@@ -545,6 +551,7 @@ class DeploymentTools:
                     postgresql_binding=self.postgres_request is not None,
                     postgres_request=self.postgres_request, migrations=migrations,
                     compiled_target=compiled_target, new_managed_database=self.new_managed_database,
+                    source_transform=resolved_source_transform,
                 ), ExecutionState(adapter))
             else:
                 access_mode = (self.infrastructure_plan or {}).get('compatibility', {}).get('access_mode')
@@ -554,6 +561,7 @@ class DeploymentTools:
                     target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
                     environment=self.environment, access_mode=access_mode,
                     compiled_target=compiled_target,
+                    source_transform=resolved_source_transform,
                 ), ExecutionState(adapter))
             if self.compilation is not None:
                 require_health_result(asdict(self.plan), self.result)

@@ -73,3 +73,36 @@ def test_python_generated_image_can_set_port_alongside_other_environment(tmp_pat
         "target_plan": {"id": "target-example", "target": "local-docker"},
     }
     assert source_transform_record(compilation, original, original, plan)["changes"] == []
+
+
+def test_versioned_transform_resolves_http_endpoint_and_preserves_old_records(tmp_path):
+    original = tmp_path / "source"
+    original.mkdir()
+    (original / "package.json").write_text(json.dumps({"scripts": {"start": "node server.js"}}))
+    (original / "server.js").write_text("console.log('ok')")
+    plan = make_plan(original, "start", None, 3000, "/health", target="local-docker")
+    compilation = {
+        "schema_version": 2,
+        "compilation_id": "comp-example",
+        "decision_revision": 1,
+        "source_revision": source_digest(original),
+        "target_plan": {
+            "id": "target-example", "target": "local-docker",
+            "execution_configuration": {
+                "service": "source-bundle", "port_source": "executable_deployment_plan"
+            },
+        },
+    }
+    record = source_transform_record(compilation, original, original, plan)
+    assert record["schema_version"] == 2
+    assert record["resolved_target"] == {
+        "target_plan_id": "target-example", "service": "source-bundle",
+        "container_protocol": "http", "container_port": 3000, "health_path": "/health",
+    }
+    verify_source_transform(record, compilation, original, original, plan)
+    changed = copy.deepcopy(record)
+    changed["resolved_target"]["container_port"] = 8080
+    with pytest.raises(ValueError, match="Stored source transformation"):
+        verify_source_transform(changed, compilation, original, original, plan)
+    old_record = source_transform_record(compilation, original, original, plan, legacy=True)
+    verify_source_transform(old_record, compilation, original, original, plan)

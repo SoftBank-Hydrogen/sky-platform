@@ -12,6 +12,7 @@ from adapters.local.compose import LocalComposeAdapter
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import make_plan
 from application.execution import ExecutionRequest, ExecutionState, execute
+from application.source_transform import executable_plan_digest, resolved_target_plan
 from engine.compatibility import TARGET_CAPABILITIES
 
 ATTEMPT_ID = "a" * 16 + "-a1"
@@ -152,6 +153,38 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 replace(request, plan=replace(request.plan, port=0)),
             ):
                 with self.subTest(changed=changed), self.assertRaises(ValueError):
+                    execute(changed, ExecutionState(adapter))
+            deploy.assert_called_once()
+
+    def test_resolved_endpoint_cannot_drift_before_adapter_call(self):
+        adapter = LocalDockerAdapter(lambda *_: None)
+        plan = replace(self.request.plan, target="local-docker")
+        compiled_target = {
+            "id": "target-example", "compilation_id": "comp-example", "target": "local-docker",
+            "execution_configuration": {
+                "service": "source-bundle", "replicas": 1, "access_mode": "loopback",
+                "database_mode": "none", "required_image_platform": None,
+                "port_source": "executable_deployment_plan",
+            },
+        }
+        transform = {
+            "schema_version": 2, "compilation_id": "comp-example",
+            "target_plan_id": "target-example", "transformed_source_revision": plan.source_digest,
+            "executable_plan_digest": executable_plan_digest(plan),
+            "resolved_target": resolved_target_plan(compiled_target, plan),
+        }
+        request = replace(self.request, target="local-docker", plan=plan,
+                          compiled_target=compiled_target, source_transform=transform)
+        result = {"url": "http://127.0.0.1:12345", "container": f"sky-{ATTEMPT_ID}",
+                  "image": f"sky/{ATTEMPT_ID}:latest"}
+        with patch.object(adapter, "deploy", return_value=result) as deploy:
+            self.assertEqual(execute(request, ExecutionState(adapter)), result)
+            for changed in (
+                replace(request, plan=replace(plan, port=8081)),
+                replace(request, plan=replace(plan, health_path="/ready")),
+                replace(request, source_transform={**transform, "target_plan_id": "target-other"}),
+            ):
+                with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "CV-06"):
                     execute(changed, ExecutionState(adapter))
             deploy.assert_called_once()
 

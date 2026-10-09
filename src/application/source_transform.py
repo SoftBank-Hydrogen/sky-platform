@@ -10,6 +10,37 @@ from pathlib import Path
 from application.deployment_core import DeploymentPlan, source_digest
 
 
+def executable_plan_digest(plan: DeploymentPlan) -> str:
+    return hashlib.sha256(json.dumps(plan.__dict__, sort_keys=True).encode()).hexdigest()
+
+
+def resolved_target_plan(target_plan: dict, plan: DeploymentPlan) -> dict:
+    """Resolve the container HTTP endpoint only after the executable plan exists."""
+    config = target_plan.get("execution_configuration")
+    if (
+        not isinstance(config, dict)
+        or config.get("port_source") != "executable_deployment_plan"
+        or config.get("service") != "source-bundle"
+        or not isinstance(target_plan.get("id"), str)
+        or target_plan.get("target") != plan.target
+        or type(plan.port) is not int
+        or not 1024 <= plan.port <= 65535
+        or not isinstance(plan.health_path, str)
+        or len(plan.health_path) > 200
+        or not re.fullmatch(r"/[A-Za-z0-9/_.-]*", plan.health_path)
+        or "//" in plan.health_path
+        or ".." in plan.health_path
+    ):
+        raise ValueError("CV-06: Executable HTTP endpoint disagrees with the compiled target")
+    return {
+        "target_plan_id": target_plan["id"],
+        "service": config["service"],
+        "container_protocol": "http",
+        "container_port": plan.port,
+        "health_path": plan.health_path,
+    }
+
+
 def _files(root: Path) -> dict[str, str]:
     result = {}
     for path in sorted(root.rglob("*")):
@@ -21,7 +52,9 @@ def _files(root: Path) -> dict[str, str]:
     return result
 
 
-def source_transform_record(compilation: dict, original: Path, work: Path, plan: DeploymentPlan) -> dict:
+def source_transform_record(
+    compilation: dict, original: Path, work: Path, plan: DeploymentPlan, *, legacy: bool = False
+) -> dict:
     """Bind applied file changes and the executable plan to the compiled target."""
     source_revision = compilation["source_revision"]
     if source_digest(original) != source_revision:
@@ -43,21 +76,25 @@ def source_transform_record(compilation: dict, original: Path, work: Path, plan:
         for path in sorted(before.keys() | after.keys())
         if before.get(path) != after.get(path)
     ]
-    plan_digest = hashlib.sha256(json.dumps(plan.__dict__, sort_keys=True).encode()).hexdigest()
-    return {
+    record = {
         "compilation_id": compilation["compilation_id"],
         "decision_revision": compilation["decision_revision"],
         "source_revision": source_revision,
         "transformed_source_revision": work_revision,
         "target_plan_id": compilation["target_plan"]["id"],
-        "executable_plan_digest": plan_digest,
+        "executable_plan_digest": executable_plan_digest(plan),
         "changes": changes,
     }
+    if compilation.get("schema_version") == 2 and not legacy:
+        record["schema_version"] = 2
+        record["resolved_target"] = resolved_target_plan(compilation["target_plan"], plan)
+    return record
 
 
 def verify_source_transform(
     record: dict, compilation: dict, original: Path, work: Path, plan: DeploymentPlan
 ) -> None:
-    expected = source_transform_record(compilation, original, work, plan)
+    legacy = isinstance(record, dict) and "schema_version" not in record
+    expected = source_transform_record(compilation, original, work, plan, legacy=legacy)
     if not isinstance(record, dict) or record != expected:
         raise ValueError("Stored source transformation does not match the executable plan")

@@ -9,6 +9,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from application.deployment_core import DeploymentPlan
+from application.source_transform import executable_plan_digest, resolved_target_plan
 from engine.compatibility import TARGET_CAPABILITIES
 
 
@@ -38,6 +39,7 @@ class ExecutionRequest:
     migrations: object | None = field(default=None, repr=False)
     compiled_target: dict | None = None
     new_managed_database: bool = False
+    source_transform: dict | None = None
 
 
 class ExecutionAdapter(Protocol):
@@ -95,6 +97,19 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
             or not 1 <= request.plan.port <= 65535
         ):
             raise ValueError("CV-09: Compiled target and execution request disagree")
+    if request.source_transform is not None:
+        record = request.source_transform
+        target_plan = request.compiled_target
+        if (
+            target_plan is None
+            or record.get("schema_version") != 2
+            or record.get("compilation_id") != target_plan.get("compilation_id")
+            or record.get("target_plan_id") != target_plan.get("id")
+            or record.get("transformed_source_revision") != request.plan.source_digest
+            or record.get("executable_plan_digest") != executable_plan_digest(request.plan)
+            or record.get("resolved_target") != resolved_target_plan(target_plan, request.plan)
+        ):
+            raise ValueError("CV-06: Resolved target and execution request disagree")
     if request.target == "cloud-run" and state.adapter.public is not (request.access_mode == "public"):
         raise ValueError("Cloud Run 어댑터의 공개 범위가 실행 요청과 다릅니다.")
     if request.target == "aws-ecs-express":
