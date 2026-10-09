@@ -109,33 +109,49 @@ async function collect(target) {
       for (const job of jobs) counts[Object.hasOwn(counts, job.status) ? job.status : 'other']++;
       observations.sky_observed_jobs = counts;
     } else {
-      const stats = JSON.parse(await get(target, '/stats'));
-      if (!finite(stats?.connections?.players) || !finite(stats?.connections?.others)) throw new ObservationError('schema');
-      observations.sky_observed_http_up = 1;
-      observations.sky_game_players = stats.connections.players;
-      observations.sky_game_nonplayer_connections = stats.connections.others;
-      for (const [key, field] of [['sky_game_messages', 'messages'], ['sky_game_messages_rejected', 'messagesRejected'],
-        ['sky_game_taps_accepted', 'tapsAccepted'], ['sky_game_taps_limited', 'tapsLimited']]) {
-        if (!finite(stats.totals?.[field])) throw new ObservationError('schema');
-        observations[key] = stats.totals[field];
+      // One failed endpoint must not prevent observing the other protocols.
+      try {
+        const stats = JSON.parse(await get(target, '/stats'));
+        if (!finite(stats?.connections?.players) || !finite(stats?.connections?.others)) throw new ObservationError('schema');
+        const measurements = {
+          sky_game_players: stats.connections.players,
+          sky_game_nonplayer_connections: stats.connections.others,
+        };
+        for (const [key, field] of [['sky_game_messages', 'messages'], ['sky_game_messages_rejected', 'messagesRejected'],
+          ['sky_game_taps_accepted', 'tapsAccepted'], ['sky_game_taps_limited', 'tapsLimited']]) {
+          if (!finite(stats.totals?.[field])) throw new ObservationError('schema');
+          measurements[key] = stats.totals[field];
+        }
+        Object.assign(observations, measurements, { sky_observed_http_up: 1 });
+      } catch (error) {
+        observations.sky_observed_http_up = 0;
+        observations.sky_observed_collection_up = 0;
+        observations.sky_observed_collection_error = reasonFor(error);
       }
       try {
         const scores = JSON.parse(await get(target, '/api/scoreboard'));
         observations.sky_game_scoreboard_up = finite(scores.rounds) ? 1 : 0;
         if (finite(scores.rounds)) observations.sky_game_stored_rounds = scores.rounds;
       } catch { observations.sky_game_scoreboard_up = 0; }
-      const exchange = await probe(target);
-      observations.sky_observed_websocket_up = Number(exchange.ok);
-      if (exchange.ok) observations.sky_observed_websocket_rtt_seconds = exchange.seconds;
+      try {
+        const exchange = await probe(target);
+        observations.sky_observed_websocket_up = Number(exchange.ok);
+        if (exchange.ok) observations.sky_observed_websocket_rtt_seconds = exchange.seconds;
+      } catch (error) {
+        // Invalid/unavailable credentials prevented a probe: do not invent a WS failure.
+        observations.sky_observed_collection_up = 0;
+        observations.sky_observed_collection_error ??= reasonFor(error);
+      }
     }
-    observations.sky_observed_collection_up = 1;
-    observations.sky_observed_collection_error = 'none';
-    observations.sky_observed_last_success_timestamp_seconds = Date.now() / 1000;
+    observations.sky_observed_collection_up ??= 1;
+    observations.sky_observed_collection_error ??= 'none';
+    if (observations.sky_observed_collection_up) {
+      observations.sky_observed_last_success_timestamp_seconds = Date.now() / 1000;
+    }
   } catch (error) {
     // Clear stale application samples; never repeat a previous "healthy" observation.
     return { sky_observed_http_up: observations.sky_observed_http_up || 0, sky_observed_collection_up: 0,
-      sky_observed_collection_error: reasonFor(error),
-      ...(target.kind === 'game' ? { sky_observed_websocket_up: 0, sky_game_scoreboard_up: 0 } : {}) };
+      sky_observed_collection_error: reasonFor(error) };
   }
   observations.sky_observed_collection_duration_seconds = (performance.now() - started) / 1000;
   return observations;
