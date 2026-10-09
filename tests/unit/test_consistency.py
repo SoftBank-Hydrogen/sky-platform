@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -9,8 +10,10 @@ import pytest
 from adapters.aws.postgres import PostgresRequest
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.consistency import (
+    check_async_database_callers,
     check_database_consistency,
     check_port_consistency,
+    check_postgres_node_dependency,
     check_source_change_scope,
     check_target_resource_consistency,
     check_websocket_state_consistency,
@@ -26,6 +29,74 @@ SQLITE = InfrastructureProfile(
     "sqlite", (), 1, requirements=("database", "sqlite"), database_engines=("sqlite",)
 )
 NO_SIGNAL = InfrastructureProfile("unconfirmed", (), 1)
+
+
+def test_postgres_node_driver_requires_runtime_manifest_and_matching_lock(tmp_path):
+    (tmp_path / "db.js").write_text("const { Pool } = require('pg');\n")
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"ws": "^8.22.0"}}))
+    with pytest.raises(ValueError, match="CV-04.*runtime dependencies"):
+        check_postgres_node_dependency(tmp_path)
+    manifest = {"dependencies": {"ws": "^8.22.0", "pg": "^8.16.0"}}
+    (tmp_path / "package.json").write_text(json.dumps(manifest))
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps({"lockfileVersion": 3, "packages": {"": {"dependencies": {"ws": "^8.22.0"}}}})
+    )
+    with pytest.raises(ValueError, match="CV-04.*lockfile"):
+        check_postgres_node_dependency(tmp_path)
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps({"lockfileVersion": 3, "packages": {"": {"dependencies": manifest["dependencies"]}}})
+    )
+    check_postgres_node_dependency(tmp_path)
+
+
+def test_new_async_postgres_methods_require_callers_to_change(tmp_path):
+    source = tmp_path / "source"
+    work = tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    original_db = (
+        "const sqlite = require('node:sqlite');\n"
+        "function openScores() { return { summary() { return 1; }, close() {} }; }\n"
+        "module.exports = { openScores };\n"
+    )
+    converted_db = (
+        "const { Pool } = require('pg');\n"
+        "function openScores() { return { summary: async () => 1, close: async () => {} }; }\n"
+        "module.exports = { openScores };\n"
+    )
+    caller = (
+        "const { openScores } = require('./db');\n"
+        "const scores = openScores();\n"
+        "ws.close();\n"
+        "console.log(scores.summary());\n"
+    )
+    (source / "db.js").write_text(original_db)
+    (work / "db.js").write_text(converted_db)
+    (source / "server.js").write_text(caller)
+    (work / "server.js").write_text(caller)
+    with pytest.raises(ValueError, match="CV-04.*server.js.*async"):
+        check_async_database_callers(source, work)
+    (work / "server.js").write_text(
+        caller.replace("console.log(scores.summary());", "sendJson(res, { ...scores.summary() });")
+    )
+    with pytest.raises(ValueError, match="CV-04.*without awaiting"):
+        check_async_database_callers(source, work)
+    (work / "server.js").write_text(
+        caller.replace("console.log(scores.summary());", "scores.summary().then(console.log);")
+    )
+    check_async_database_callers(source, work)
+
+
+def test_async_database_guard_ignores_unrelated_or_unchanged_modules(tmp_path):
+    source = tmp_path / "source"
+    work = tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    (source / "db.js").write_text("const sqlite = require('node:sqlite');\n")
+    (work / "db.js").write_text("const { Pool } = require('pg');\n")
+    (source / "server.js").write_text("const x = require('./other'); x.summary();\n")
+    (work / "server.js").write_text("const x = require('./other'); x.summary();\n")
+    check_async_database_callers(source, work)
 
 
 def test_websocket_process_state_requires_conservative_replica_plan():

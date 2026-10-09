@@ -52,6 +52,31 @@ class AgentTests(unittest.TestCase):
         self.assertIsNone(self.tools.npm_lock_sync)
         self.assertIsNone(self.updates[-1]['npm_lock_sync'])
 
+    def test_sqlite_conversion_blocks_missing_driver_and_unhandled_async_call_before_adapter(self):
+        original_db = ("const sqlite = require('node:sqlite');\n"
+                       "function openScores() { return { summary() { return 1; } }; }\n"
+                       "module.exports = { openScores };\n")
+        converted_db = ("const { Pool } = require('pg');\n"
+                        "function openScores() { return { summary: async () => 1 }; }\n"
+                        "module.exports = { openScores };\n")
+        caller = "const { openScores } = require('./db'); const scores = openScores(); scores.summary();\n"
+        (self.original / 'db.js').write_text(original_db)
+        (self.tools.work / 'db.js').write_text(converted_db)
+        (self.original / 'server.js').write_text(caller)
+        (self.tools.work / 'server.js').write_text(caller)
+        self.tools.sqlite_conversion = {}
+        self.tools.plan = object()
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'CV-04.*runtime dependencies'):
+                self.tools.deploy_application()
+            manifest = json.loads((self.tools.work / 'package.json').read_text())
+            manifest['dependencies'] = {'pg': '^8.16.0'}
+            (self.tools.work / 'package.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'CV-04.*without awaiting'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_invalid_npm_command_explains_available_script_names(self):
         self.tools.read_project_files(['package.json'])
         self.tools.apply_project_patch('package.json', '"scripts": {}',

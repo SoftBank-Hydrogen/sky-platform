@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import hashlib
+import json
+import posixpath
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -12,12 +14,132 @@ from adapters.database.migrations import MigrationBundle
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE_SUFFIXES
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
-from engine.compatibility import InfrastructureProfile
+from engine.compatibility import DATABASE_ENGINE_SOURCE, SQLITE_SOURCE, InfrastructureProfile
 from engine.deployment_policy import DeploymentPolicy
 
 
 class HealthResultMismatch(ValueError):
     retryable = False
+
+
+_ASYNC_METHOD = re.compile(r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+([A-Za-z_$][\w$]*)\s*\(")
+_NODE_POSTGRES_IMPORT = re.compile(r"\b(?:require\s*\(\s*|from\s+)['\"](pg|postgres)['\"]")
+
+
+def check_postgres_node_dependency(work: Path) -> None:
+    """Require the runtime manifest and existing lock to include imported PostgreSQL drivers."""
+    manifest_path = work / "package.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return
+    imported = set()
+    for source in work.rglob("*.js"):
+        if (source.is_symlink() or not source.is_file()
+                or any(part in {"node_modules", "dist", "build", "vendor", "tests"}
+                       for part in source.relative_to(work).parts)):
+            continue
+        imported.update(_NODE_POSTGRES_IMPORT.findall(source.read_text(encoding="utf-8", errors="replace")))
+    if not imported:
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        dependencies = manifest["dependencies"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        raise ValueError("CV-04: Node PostgreSQL runtime dependencies are missing") from None
+    if not isinstance(dependencies, dict) or any(not isinstance(dependencies.get(name), str)
+                                                   for name in imported):
+        raise ValueError("CV-04: Imported PostgreSQL driver is missing from runtime dependencies")
+    lock_path = work / "package-lock.json"
+    if lock_path.is_file():
+        if lock_path.is_symlink():
+            raise ValueError("CV-04: npm lockfile must be a regular file")
+        try:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            locked = lock["packages"][""]["dependencies"]
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+            raise ValueError("CV-04: npm lockfile lacks runtime dependency metadata") from None
+        if not isinstance(locked, dict) or any(locked.get(name) != dependencies[name] for name in imported):
+            raise ValueError("CV-04: npm lockfile does not match the PostgreSQL runtime dependencies")
+
+
+def check_async_database_callers(original: Path, work: Path) -> None:
+    """Reject directly unhandled JS calls when SQLite methods become async.
+
+    This is a narrow safety check, not proof that all runtime paths work.
+    """
+    for module in original.rglob("*.js"):
+        if (module.is_symlink() or not module.is_file()
+                or any(part in {"node_modules", "dist", "build", "vendor", "tests"}
+                       for part in module.relative_to(original).parts)):
+            continue
+        relative = module.relative_to(original)
+        converted = work / relative
+        if not converted.is_file() or converted.is_symlink():
+            continue
+        old = module.read_text(encoding="utf-8", errors="replace")
+        new = converted.read_text(encoding="utf-8", errors="replace")
+        if not SQLITE_SOURCE.search(old) or not DATABASE_ENGINE_SOURCE["postgresql"].search(new):
+            continue
+        old_async = {name for match in _ASYNC_METHOD.finditer(old) for name in match.groups() if name}
+        new_async = {name for match in _ASYNC_METHOD.finditer(new) for name in match.groups() if name}
+        gained = new_async - old_async
+        if not gained:
+            continue
+        exported = re.search(r"\bmodule\.exports\s*=\s*\{([^}]*)\}", old)
+        factories = (set(re.findall(r"(?:^|,)\s*([A-Za-z_$][\w$]*)\s*(?=,|:|$)", exported[1]))
+                     if exported else set())
+        factories.update(re.findall(r"\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", old))
+        if not factories:
+            continue
+        factory_pattern = "|".join(map(re.escape, sorted(factories)))
+        for caller in original.rglob("*.js"):
+            if caller == module or caller.is_symlink() or not caller.is_file():
+                continue
+            caller_relative = caller.relative_to(original)
+            if any(part in {"node_modules", "dist", "build", "vendor", "tests"}
+                   for part in caller_relative.parts):
+                continue
+            updated = work / caller_relative
+            if not updated.is_file() or updated.is_symlink():
+                continue
+            source = updated.read_text(encoding="utf-8", errors="replace")
+            specifier = posixpath.relpath(relative.with_suffix("").as_posix(),
+                                          caller_relative.parent.as_posix())
+            if not specifier.startswith("."):
+                specifier = "./" + specifier
+            import_pattern = (r"(?:require\s*\(\s*|from\s+)['\"]"
+                              + re.escape(specifier) + r"(?:\.js)?['\"]")
+            if not re.search(import_pattern, source):
+                continue
+            original_source = caller.read_text(encoding="utf-8", errors="replace")
+            receivers = set(re.findall(
+                r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^\n]*\b(?:"
+                + factory_pattern + r")\s*\(",
+                original_source,
+            ))
+            if not receivers:
+                continue
+            unhandled = []
+            lines = source.splitlines()
+            for name in sorted(gained):
+                call = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(receivers)))
+                                  + r")\." + re.escape(name) + r"\s*\(")
+                for line_number, line in enumerate(lines, 1):
+                    match = call.search(line)
+                    if match is None:
+                        continue
+                    before = line[:match.start()]
+                    after = line[match.end():] + "\n" + "\n".join(lines[line_number:line_number + 2])
+                    handled = bool(re.search(r"\bawait\b", before)
+                                   or ("Promise.resolve(" in before and ".then(" in after)
+                                   or re.search(r"\)\s*\.(?:then|catch)\s*\(", after)
+                                   or re.search(r"\.then\s*\(.*=>\s*$", before))
+                    if not handled:
+                        unhandled.append(f"{name}@{line_number}")
+            if unhandled:
+                raise ValueError(
+                    f"CV-04: {caller_relative.as_posix()} calls async PostgreSQL methods without "
+                    f"awaiting or handling promises: {', '.join(unhandled[:8])}"
+                )
 
 
 def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None,

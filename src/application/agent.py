@@ -22,7 +22,8 @@ from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
-    check_database_consistency, check_port_consistency, check_source_change_scope,
+    check_async_database_callers, check_database_consistency, check_port_consistency,
+    check_postgres_node_dependency, check_source_change_scope,
     check_sqlite_migration_consistency, check_websocket_state_consistency,
     check_target_resource_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
@@ -79,6 +80,9 @@ queries, placeholders and dependencies with PostgreSQL equivalents in the workin
 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE environment. Do not remove database behavior or claim that
 the conversion succeeded until the real migration, deployment and HTTP probe succeed. Report a blocker
 if the source is too complex to convert safely.
+PostgreSQL client methods are asynchronous. When converting a synchronous SQLite API, inspect and update
+every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.
+Do not treat an HTTP health response as proof that database-backed endpoints work.
 If you change root package.json dependencies and package-lock.json exists, call sync_npm_lockfile before configuring.
 Use an existing meaningful HTTP path returning 200. Do not delete tests or disable app security to pass checks.
 If an existing Dockerfile is present, read it and preserve its build and startup behavior. Use start_script='dockerfile' and build_script=null. You may patch that existing Dockerfile to fix deployment issues. Without a Dockerfile, configure_deployment generates one for Node 22/npm or Python. For executable Python use the existing server.py/app.py/main.py as start_script. For a root ASGI app object named app, use 'asgi:main.py', 'asgi:app.py', or 'asgi:server.py' and ensure requirements.txt explicitly includes uvicorn. For a root WSGI app object named app, use the analogous 'wsgi:<file>.py' form and ensure requirements.txt explicitly includes gunicorn. Use build_script=null; preserve the app's HTTP behavior.
@@ -451,6 +455,9 @@ class DeploymentTools:
     def deploy_application(self):
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
+        if self.sqlite_conversion is not None:
+            check_postgres_node_dependency(self.work)
+            check_async_database_callers(self.original, self.work)
         if self.deployment_policy is not None:
             access_mode = (self.infrastructure_plan or {}).get('compatibility', {}).get('access_mode')
             self.deployment_policy.require(
