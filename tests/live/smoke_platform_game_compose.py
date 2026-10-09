@@ -48,6 +48,7 @@ def main() -> None:
         if status != 202:
             raise AssertionError((status, response))
         job_id = response["id"]
+        current = app
         try:
             app.run_agent(job_id)
             job = app.jobs[job_id]
@@ -66,6 +67,7 @@ def main() -> None:
                 initial = json.load(response)["rounds"]
             if initial != 13:
                 raise AssertionError(initial)
+            original_url = job["result"]["url"]
             attempt_id = job["result"]["container"].removeprefix("sky-")
             compose_file = app.root / job_id / f"compose-{attempt_id}.json"
             compose = ["docker", "compose", "-p", job["result"]["compose_project"], "-f", str(compose_file)]
@@ -94,10 +96,19 @@ def main() -> None:
                 raise AssertionError("Compose app was unavailable after restart")
             if after_restart != initial + 1:
                 raise AssertionError(f"SQLite score did not survive restart: {after_restart}")
-            if not app.check_and_record_health(job_id)["healthy"]:
-                raise AssertionError("Compose HTTP failed after restart")
-            if app.check_and_record_websocket(job_id)["status"] != "passed":
-                raise AssertionError("Compose WebSocket failed after restart")
+            current = App(
+                app.root,
+                AISettings("offline-fixture", "offline-fixture"),
+                monitor_interval=0,
+                github_poll_interval=0,
+            )
+            job = current.jobs[job_id]
+            if job["status"] != "succeeded" or job["result"]["url"] != original_url:
+                raise AssertionError("Compose deployment record was not restored")
+            if not current.check_and_record_health(job_id)["healthy"]:
+                raise AssertionError("Compose HTTP failed after server recovery")
+            if current.check_and_record_websocket(job_id)["status"] != "passed":
+                raise AssertionError("Compose WebSocket failed after server recovery")
             checks = {item["name"]: item["status"] for item in deployment_certificate(job)["verification"]}
             if checks["local_sqlite_mount"] != "passed" or checks["websocket_round_trip"] != "passed":
                 raise AssertionError(checks)
@@ -109,6 +120,7 @@ def main() -> None:
                         "status": job["status"],
                         "seed_rounds": initial,
                         "rounds_after_restart": after_restart,
+                        "server_restart_recovered": True,
                         "http": checks["deployment_http"],
                         "websocket": checks["websocket_round_trip"],
                         "sqlite_mount": checks["local_sqlite_mount"],
@@ -117,11 +129,11 @@ def main() -> None:
                 )
             )
         finally:
-            job = app.jobs[job_id]
+            job = current.jobs[job_id]
             if job.get("status") == "succeeded" and job.get("result"):
-                app.retire_compose(job_id)
-                if app.jobs[job_id]["deployment_state"] != "deleted":
-                    raise AssertionError(app.jobs[job_id].get("retire_error"))
+                current.retire_compose(job_id)
+                if current.jobs[job_id]["deployment_state"] != "deleted":
+                    raise AssertionError(current.jobs[job_id].get("retire_error"))
             binding = job["local_sqlite_binding"]
             adapter = LocalDockerAdapter(lambda *_: None)
             volume = adapter.inspect_resource("volume", binding["volume_name"])
