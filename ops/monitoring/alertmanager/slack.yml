@@ -1,0 +1,25 @@
+global:
+  slack_api_url_file: /run/secrets/slack_webhook
+route:
+  receiver: disabled
+  group_by: [alertname, target, kind]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - receiver: sky-alerts
+      matchers:
+        - severity=~"critical|warning"
+receivers:
+  - name: disabled
+  - name: sky-alerts
+    slack_configs:
+      - channel: "#sky-alerts"
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] Sky · Game'
+        text: >-
+          {{ range .Alerts }}
+          *{{ .Labels.alertname }}* / {{ .Labels.severity }}
+          대상: {{ .Labels.target }}
+          {{ .Annotations.summary }}
+          {{ end }}

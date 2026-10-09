@@ -742,6 +742,62 @@
           "placement": "bottom"
         }
       }
+    },
+    {
+      "id": 20,
+      "title": "게임 자동 발견 상태 (1=정상)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 80,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_discovery_up",
+          "legendFormat": "{{target}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "title": "자동 등록 거부 / 용량 초과",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 80,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_discovery_rejected",
+          "legendFormat": "{{target}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     }
   ]
 }

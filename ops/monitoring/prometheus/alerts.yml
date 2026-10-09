@@ -1,6 +1,21 @@
 groups:
   - name: sky-observations
     rules:
+      - alert: SkyDiscoveryFailed
+        expr: sky_discovery_up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Game discovery failed; existing targets retained"}
+      - alert: SkyDiscoveryRejected
+        expr: sky_discovery_rejected > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Game discovery rejected an endpoint or exceeded target capacity"}
+      - alert: SkyAlertmanagerUnavailable
+        expr: up{job="alertmanager"} == 0 or absent(up{job="alertmanager"})
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Alert delivery service is unavailable; external monitoring also required"}
       - alert: SkyObserverHasNoTargets
         expr: sky_observer_targets == 0
         for: 2m

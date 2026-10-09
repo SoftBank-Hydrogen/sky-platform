@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const { randomBytes } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const WebSocket = require('ws');
+const { discover, validateDiscovery } = require('./discovery.cjs');
+const JOBS = Symbol('discoveryJobs');
 
 class ObservationError extends Error {
   constructor(reason) { super('Observation failed'); this.reason = reason; }
@@ -23,6 +25,7 @@ function validateTargets(targets) {
     if (!target || !/^[a-zA-Z0-9_-]{1,48}$/.test(target.name) || names.has(target.name)) throw new Error('Invalid/duplicate target name');
     names.add(target.name);
     if (!['sky', 'game'].includes(target.kind)) throw new Error('Target kind must be sky or game');
+    validateDiscovery(target);
     const url = new URL(target.httpUrl);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
       throw new Error('httpUrl must be an HTTP(S) origin without credentials');
@@ -108,6 +111,7 @@ async function collect(target) {
       const counts = { succeeded: 0, failed: 0, other: 0 };
       for (const job of jobs) counts[Object.hasOwn(counts, job.status) ? job.status : 'other']++;
       observations.sky_observed_jobs = counts;
+      if (target.discovery) observations[JOBS] = { jobs, token };
     } else {
       const stats = JSON.parse(await get(target, '/stats'));
       if (!finite(stats?.connections?.players) || !finite(stats?.connections?.others)) throw new ObservationError('schema');
@@ -172,17 +176,41 @@ function main() {
   const interval = Number(process.env.POLL_SECONDS || 30);
   if (!Number.isInteger(interval) || interval < 15 || interval > 300) throw new Error('POLL_SECONDS must be 15..300');
   const snapshots = new Map();
+  const discovered = new Map();
+  let currentTargets = targets;
   let active = false;
   async function poll() {
     if (active) return;
     active = true;
-    try { await Promise.all(targets.map(async target => snapshots.set(target.name, await collect(target)))); }
+    try {
+      await Promise.all(targets.map(async target => {
+        const snapshot = await collect(target);
+        if (target.discovery) {
+          try {
+            if (!snapshot[JOBS]) throw new Error();
+            const { jobs, token } = snapshot[JOBS];
+            const result = await discover(target, jobs, async id => JSON.parse(await get(target, `/api/jobs/${id}`, { 'X-Sky-Token': token })));
+            const capacity = Math.floor(Math.max(0,20-targets.length) / targets.filter(item => item.discovery).length);
+            discovered.set(target.name, result.targets.slice(0, capacity));
+            snapshot.sky_discovery_up = 1;
+            snapshot.sky_discovery_rejected = result.rejected + Math.max(0, result.targets.length - capacity);
+          } catch { snapshot.sky_discovery_up = 0; }
+        }
+        delete snapshot[JOBS];
+        snapshots.set(target.name, snapshot);
+      }));
+      const dynamic = [...discovered.values()].flat().filter(item => !targets.some(target => target.name === item.name)).slice(0, Math.max(0,20-targets.length));
+      currentTargets = [...targets, ...dynamic];
+      await Promise.all(dynamic.map(async target => snapshots.set(target.name, await collect(target))));
+      const activeNames = new Set(currentTargets.map(target => target.name));
+      for (const name of snapshots.keys()) if (!activeNames.has(name)) snapshots.delete(name);
+    }
     finally { active = false; }
   }
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/metrics') {
       res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
-      return res.end(render(targets, snapshots));
+      return res.end(render(currentTargets, snapshots));
     }
     if (req.method === 'GET' && req.url === '/health') { res.writeHead(200); return res.end('ok'); }
     res.writeHead(404); res.end();
