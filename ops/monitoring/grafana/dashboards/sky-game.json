@@ -1,0 +1,747 @@
+{
+  "uid": "sky-service-game",
+  "title": "Sky · Game 모니터링",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "sky"
+  ],
+  "editable": false,
+  "description": "HTTP/API/게임 통계 관찰과 AWS/ECS 지표. No data는 미설정·수집 실패 확인 필요. k6 실시간 지표와 단계별 성능은 미연동.",
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "region",
+        "type": "textbox",
+        "query": "ap-northeast-2",
+        "current": {
+          "text": "ap-northeast-2",
+          "value": "ap-northeast-2"
+        },
+        "label": "region"
+      },
+      {
+        "name": "sky_cluster",
+        "type": "textbox",
+        "query": "SET_SKY_CLUSTER",
+        "current": {
+          "text": "SET_SKY_CLUSTER",
+          "value": "SET_SKY_CLUSTER"
+        },
+        "label": "sky_cluster"
+      },
+      {
+        "name": "sky_service",
+        "type": "textbox",
+        "query": "SET_SKY_SERVICE",
+        "current": {
+          "text": "SET_SKY_SERVICE",
+          "value": "SET_SKY_SERVICE"
+        },
+        "label": "sky_service"
+      },
+      {
+        "name": "game_cluster",
+        "type": "textbox",
+        "query": "SET_GAME_CLUSTER",
+        "current": {
+          "text": "SET_GAME_CLUSTER",
+          "value": "SET_GAME_CLUSTER"
+        },
+        "label": "game_cluster"
+      },
+      {
+        "name": "game_service",
+        "type": "textbox",
+        "query": "SET_GAME_SERVICE",
+        "current": {
+          "text": "SET_GAME_SERVICE",
+          "value": "SET_GAME_SERVICE"
+        },
+        "label": "game_service"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "수집기 상태 (1=정상)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"sky-observer\"}",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "관찰 대상 수",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observer_targets",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "대상 수집 성공 (1=성공)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_collection_up",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "HTTP 정상 응답 (게임은 /stats)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_http_up",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "WebSocket 앱 메시지 왕복 (1=성공)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_websocket_up",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "게임 참가자",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_game_players",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "현재 보관된 Sky 작업 수 — 누적 성공률 아님",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_jobs",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "게임 WebSocket 최근 왕복 시간",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_websocket_rtt_seconds",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "게임 수신 메시지 / 초 (프로브 포함)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sky_game_messages[2m])",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "게임 거부 메시지 / 초",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sky_game_messages_rejected[2m])",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "게임 인정된 탭 / 초",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sky_game_taps_accepted[2m])",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "게임 점수판 읽기 성공 (쓰기 보장 아님)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_game_scoreboard_up",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "DB 저장 라운드 수",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_game_stored_rounds",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "마지막 수집 이후 경과",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time()-sky_observed_last_success_timestamp_seconds",
+          "legendFormat": "{{target}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Sky ECS CPU — AWS 연결 후 표시",
+      "type": "timeseries",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "sky-cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "sky-cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "namespace": "AWS/ECS",
+          "metricName": "CPUUtilization",
+          "region": "$region",
+          "statistic": "Average",
+          "period": "60",
+          "dimensions": {
+            "ClusterName": "$sky_cluster",
+            "ServiceName": "$sky_service"
+          },
+          "matchExact": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "Sky ECS 메모리 — AWS 연결 후 표시",
+      "type": "timeseries",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "sky-cloudwatch"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "sky-cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "namespace": "AWS/ECS",
+          "metricName": "MemoryUtilization",
+          "region": "$region",
+          "statistic": "Average",
+          "period": "60",
+          "dimensions": {
+            "ClusterName": "$sky_cluster",
+            "ServiceName": "$sky_service"
+          },
+          "matchExact": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "게임 ECS CPU — AWS 연결 후 표시",
+      "type": "timeseries",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "sky-cloudwatch"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "sky-cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "namespace": "AWS/ECS",
+          "metricName": "CPUUtilization",
+          "region": "$region",
+          "statistic": "Average",
+          "period": "60",
+          "dimensions": {
+            "ClusterName": "$game_cluster",
+            "ServiceName": "$game_service"
+          },
+          "matchExact": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "게임 ECS 메모리 — AWS 연결 후 표시",
+      "type": "timeseries",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "sky-cloudwatch"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 64,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "sky-cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "namespace": "AWS/ECS",
+          "metricName": "MemoryUtilization",
+          "region": "$region",
+          "statistic": "Average",
+          "period": "60",
+          "dimensions": {
+            "ClusterName": "$game_cluster",
+            "ServiceName": "$game_service"
+          },
+          "matchExact": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "title": "수집 실패 원인 (1인 항목 확인)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sky-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sky_observed_collection_error",
+          "legendFormat": "{{target}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    }
+  ]
+}

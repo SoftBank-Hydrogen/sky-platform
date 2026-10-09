@@ -13,3 +13,6 @@ dist/
 .sky/
 .DS_Store
 node_modules/
+ops/monitoring/targets.json
+ops/monitoring/secrets/
+ops/monitoring/compose.override.yml

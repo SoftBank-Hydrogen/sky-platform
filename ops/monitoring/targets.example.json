@@ -1,0 +1,4 @@
+[
+  {"name":"sky-service","kind":"sky","httpUrl":"https://YOUR-SKY-HOST","cookieFile":"/run/secrets/sky_cookie"},
+  {"name":"demo-game","kind":"game","httpUrl":"https://YOUR-GAME-API-HOST","wsUrl":"wss://YOUR-GAME-API-HOST/ws"}
+]
