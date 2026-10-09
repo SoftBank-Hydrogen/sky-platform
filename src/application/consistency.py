@@ -146,12 +146,33 @@ def health_result_matches_plan(plan: dict, result: dict) -> bool:
     return bool(
         type(port) is int and 1024 <= port <= 65535
         and valid_url
+        and ingress_result_matches_target(plan, parsed)
         and isinstance(health_path, str) and health_path.startswith("/")
         and result.get("health_url") == url + health_path
     )
 
 
+def ingress_result_matches_target(plan: dict, parsed) -> bool:
+    """Check only the ingress properties the current adapters can prove."""
+    target = plan.get("target")
+    if parsed is None:
+        return False
+    if target in {"local-docker", "onprem-compose"}:
+        return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+    if target in {"aws-ecs-express", "cloud-run"}:
+        return parsed.scheme == "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+    return False
+
+
 def require_health_result(plan: dict, result: dict) -> None:
+    if isinstance(plan, dict) and isinstance(result, dict) and isinstance(result.get("url"), str):
+        try:
+            parsed = urlsplit(result["url"])
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.scheme in {"http", "https"} and parsed.hostname:
+            if not ingress_result_matches_target(plan, parsed):
+                raise HealthResultMismatch("CV-05: Adapter ingress contradicts the deployment target")
     if not health_result_matches_plan(plan, result):
         raise HealthResultMismatch("CV-06: Adapter HTTP verification does not match the executable health endpoint")
 

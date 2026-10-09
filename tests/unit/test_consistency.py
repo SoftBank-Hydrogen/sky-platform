@@ -120,7 +120,7 @@ def test_udp_only_declaration_conflicts_with_http_port(tmp_path):
 
 
 def test_http_result_must_reference_the_planned_health_endpoint():
-    plan = {"port": 8080, "health_path": "/ready"}
+    plan = {"target": "cloud-run", "port": 8080, "health_path": "/ready"}
     result = {"url": "https://example.test", "health_url": "https://example.test/ready"}
     assert health_result_matches_plan(plan, result)
     for changed in (

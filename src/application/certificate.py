@@ -140,7 +140,9 @@ def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
     observed = job.get('websocket_verification') if completed else None
     plan = job.get('plan') if isinstance(job.get('plan'), dict) else {}
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
-    deployment_http_verified = completed and health_result_matches_plan(plan, result)
+    deployment_http_verified = (completed
+                                and plan.get('target') == compilation['target_plan']['target']
+                                and health_result_matches_plan(plan, result))
     obligations = target_verification_obligations(
         gate, observed, deployment_http_verified=deployment_http_verified)
     return {'status': 'recorded', 'static_consistency': gate,

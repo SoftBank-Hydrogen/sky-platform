@@ -168,7 +168,7 @@ class DeploymentGroupTests(unittest.TestCase):
         job['consistency_checks'] = checks
         job['static_consistency_gate'] = static_consistency_gate(
             job['compilation'], job['architecture_decision'], checks)
-        job['plan'] = {'port': 3000, 'health_path': '/ready'}
+        job['plan'] = {'target': 'local-docker', 'port': 3000, 'health_path': '/ready'}
         def obligation():
             return deployment_certificate(job)['verification_gates']['required_obligations'][0]
         self.assertEqual(obligation()['status'], 'pending')
@@ -180,6 +180,12 @@ class DeploymentGroupTests(unittest.TestCase):
         job['result']['health_url'] = 'http://127.0.0.1:12345/ready'
         self.assertEqual(obligation()['status'], 'verified')
         self.assertEqual(obligation()['verification_refs'], ['deployment_http'])
+        job['plan']['target'] = 'cloud-run'
+        self.assertEqual(obligation()['status'], 'pending')
+        job['plan']['target'] = 'local-docker'
+        job['result']['url'] = 'http://example.test:12345'
+        job['result']['health_url'] = 'http://example.test:12345/ready'
+        self.assertEqual(obligation()['status'], 'pending')
         self.assertEqual(job['static_consistency_gate']['required_obligations'][0]['status'], 'pending')
         job['status'] = 'failed'
         self.assertEqual(obligation()['status'], 'pending')
