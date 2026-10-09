@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from application.analysis import AISettings, redact
 from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
+from application.execution import ExecutionRequest, ExecutionState, execute
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
@@ -431,7 +432,13 @@ class DeploymentTools:
         adapter = self.adapter_factory(self.event)
         self.event("deploying", f"실제 배포 시도 {self.attempts}/3")
         try:
-            if self.postgres_request is not None:
+            if self.target == "onprem-compose":
+                self.result = execute(ExecutionRequest(
+                    target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
+                    environment=self.environment, sqlite_binding=self.local_sqlite_binding,
+                    postgresql_binding=self.postgres_request is not None,
+                ), ExecutionState(adapter))
+            elif self.postgres_request is not None:
                 self.result = adapter.deploy(context, self.plan, attempt_id, self.environment,
                                              postgres=self.postgres_request, migrations=migrations)
             else:

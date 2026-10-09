@@ -15,9 +15,21 @@ from pathlib import Path
 from adapters.build.image import ImageBuilder
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import DeploymentPlan, source_digest, validate_environment
+from application.execution import ExecutionCapabilities
+from engine.compatibility import TARGET_CAPABILITIES
 
 
 class LocalComposeAdapter(LocalDockerAdapter):
+    @staticmethod
+    def execution_capabilities() -> ExecutionCapabilities:
+        declared = TARGET_CAPABILITIES["onprem-compose"]
+        return ExecutionCapabilities(
+            target="onprem-compose",
+            access_modes=frozenset(declared["access_modes"]),
+            sqlite_volume=True,
+            postgresql_binding=declared["postgresql_binding"],
+        )
+
     @staticmethod
     def unavailable_reason() -> str | None:
         try:

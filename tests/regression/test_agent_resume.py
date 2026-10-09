@@ -60,7 +60,11 @@ class AgentResumeTests(unittest.TestCase):
             received = []
             def deployed(_project, _plan, _attempt_id, environment):
                 received.append(dict(environment))
-                return {'url': 'http://127.0.0.1:12345'}
+                return {'url': 'http://127.0.0.1:12345',
+                        'container': f'sky-{_attempt_id}',
+                        'compose_project': f'sky-{_attempt_id}',
+                        'image': f'sky/{_attempt_id}:latest',
+                        'compose_sha256': 'a' * 64}
             with patch.object(LocalComposeAdapter, 'deploy', side_effect=deployed) as deploy:
                 restored.run_agent(job_id, supplied)
             self.assertEqual(restored.jobs[job_id]['status'], 'succeeded')
