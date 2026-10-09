@@ -300,14 +300,17 @@ def test_versioned_target_configuration_must_match_lowered_plan():
     }
     compilation = {
         "schema_version": 2,
-        "deployment_ir": {"services": [
-            {"id": "source-bundle", "kind": "container_service", "replicas": 1}
-        ]},
+        "deployment_ir": {"services": [{"id": "source-bundle", "kind": "container_service", "replicas": 1}]},
         "target_plan": {
-            "target": target, "resources": list(plan["resources"]), "access_mode": "loopback",
+            "target": target,
+            "resources": list(plan["resources"]),
+            "access_mode": "loopback",
             "execution_configuration": {
-                "service": "source-bundle", "replicas": 1, "access_mode": "loopback",
-                "database_mode": "none", "required_image_platform": None,
+                "service": "source-bundle",
+                "replicas": 1,
+                "access_mode": "loopback",
+                "database_mode": "none",
+                "required_image_platform": None,
                 "port_source": "executable_deployment_plan",
             },
         },

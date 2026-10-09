@@ -87,17 +87,22 @@ def test_versioned_transform_resolves_http_endpoint_and_preserves_old_records(tm
         "decision_revision": 1,
         "source_revision": source_digest(original),
         "target_plan": {
-            "id": "target-example", "target": "local-docker",
+            "id": "target-example",
+            "target": "local-docker",
             "execution_configuration": {
-                "service": "source-bundle", "port_source": "executable_deployment_plan"
+                "service": "source-bundle",
+                "port_source": "executable_deployment_plan",
             },
         },
     }
     record = source_transform_record(compilation, original, original, plan)
     assert record["schema_version"] == 2
     assert record["resolved_target"] == {
-        "target_plan_id": "target-example", "service": "source-bundle",
-        "container_protocol": "http", "container_port": 3000, "health_path": "/health",
+        "target_plan_id": "target-example",
+        "service": "source-bundle",
+        "container_protocol": "http",
+        "container_port": 3000,
+        "health_path": "/health",
     }
     verify_source_transform(record, compilation, original, original, plan)
     changed = copy.deepcopy(record)
