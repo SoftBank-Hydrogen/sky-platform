@@ -29,6 +29,7 @@ from application.infrastructure import (
     plan_infrastructure,
     validate_infrastructure,
 )
+from engine.application_ir import application_ir
 from engine.deployment_policy import deployment_policy
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
@@ -219,6 +220,7 @@ class GitHubDeploymentsMixin:
                 "attempts": 0,
                 "project": str(copied),
                 "infrastructure_profile": profile.as_dict(),
+                "application_ir": application_ir(profile, digest).as_dict(),
                 "deployment_policy": policy.as_dict(),
                 "events": [],
                 "source_digest": digest,

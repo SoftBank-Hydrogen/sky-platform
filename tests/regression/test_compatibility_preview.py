@@ -93,6 +93,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(evidence_ids)
         self.assertEqual({item['path'] for item in ir['evidence'] if item['id'] in evidence_ids},
                          {'package.json', 'server.js'})
+        self.assertTrue(all(item['source']['revision'] == ir['source_revision']
+                            and item['source']['line'] is None
+                            and item['verified_by'] == () for item in ir['evidence']))
         for report in payload['reports']:
             decision = next(item for item in report['constraint_results']
                             if item['rule_id'] == 'DATA-SQLITE-01')
