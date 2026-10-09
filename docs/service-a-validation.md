@@ -1,7 +1,8 @@
 # A-phase validation — 2026-10-09
 
-Baseline: `27ffe75712d292539b4fdd6879af7215438e4b51` plus local branch
-`feat/sky-service-container-ci` changes. Nothing has been pushed to GitHub.
+Initial baseline: `27ffe75712d292539b4fdd6879af7215438e4b51` plus branch
+`feat/sky-service-container-ci` changes. The initial checks below happened before
+GitHub publication; PR preparation results are recorded separately.
 
 ## Environment
 
@@ -64,3 +65,23 @@ approval review; the isolated check is a narrower alternative.
 No AWS resources were created and no keys were copied into the source/image.
 Smoke containers and their named resources were removed; service/test images and
 build cache remain available for continued development.
+
+## PR preparation after integrating main
+
+Integrated upstream `8a7f1d7` (five new deployment/recovery commits) without
+conflicts. Rechecked the resulting code on the same Linux VM:
+
+- Python default suite: **554 passed**, 66.54 seconds.
+- JavaScript suites: **27 passed** (22 UI, 2 migrator, 3 restore verifier).
+- Ruff lint/format and workflow YAML parsing passed.
+- Linux service/test image builds passed.
+- Restricted service container: HTTP/UI, public health, protected API and runtime
+  CLI checks passed. It had no host Docker socket, host networking, or host path
+  mounts; its port was published only on loopback. The container was removed.
+
+The full host-Docker ZIP smoke was **not rerun after integrating main**: automatic
+approval review rejected the broad host-control surface. The narrower HTTP check
+above does not replace that end-to-end check. The earlier full ZIP result belongs
+to the initial baseline; GitHub Actions must still verify the updated workflow.
+Real OpenAI, ECR publication, ECS rollout/rollback and external game access remain
+unverified.
