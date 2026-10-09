@@ -341,7 +341,13 @@ function compatibilityPreviewText(result){
  const sqliteNextStep=(inspection.requirements||[]).includes('sqlite')?
   (result.local_sqlite_binding?'\n\nLocal Docker DB 볼륨 '+result.local_sqlite_binding.volume_name+' → '+result.local_sqlite_binding.mount_path+' 경로를 확인했습니다. 이 결과는 실제 Docker 연결·앱 동작의 검증은 아닙니다.':
   '\n\n다음 조치: Local Docker에서는 DB 경로를 확인하고 영속 볼륨을 선택할 수 있습니다. AWS ECS Express에서는 인터넷 공개와 "SQLite 파일을 PostgreSQL로 이전하기" 및 RDS 연결을 선택할 수 있습니다. 일반 자동 배포는 SQLite를 지원하지 않습니다.'):'';
- return basis+candidates.join('\n\n')+sqliteNextStep+'\n\n정적 탐지만으로 앱의 무상태성이나 실제 배포 성공을 증명하지 않습니다.';
+ const staticSite=result.static_site;
+ const staticNote=staticSite?.status==='eligible'
+  ?'\n\nAWS S3 + CloudFront · 정적 파일 후보 (현재 배포 미지원)\n  근거: '+staticSite.evidence_files.join(', ')+'\n  컨테이너 없이 배포할 수 있는지 확인했습니다. 실제 공개 배포는 아직 구현되지 않았습니다.'
+  :staticSite?.status==='needs_build'
+   ?'\n\nAWS S3 + CloudFront · 빌드 산출물 확인 필요 (현재 배포 미지원)\n  근거: '+staticSite.evidence_files.join(', ')
+   :'';
+ return basis+candidates.join('\n\n')+staticNote+sqliteNextStep+'\n\n정적 탐지만으로 앱의 무상태성이나 실제 배포 성공을 증명하지 않습니다.';
 }
 el('compatibilityPreview').onclick=async()=>{
  const output=el('compatibilityMap');output.hidden=false;output.textContent='앱 요구와 대상 기능을 비교하는 중입니다.';

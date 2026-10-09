@@ -22,6 +22,7 @@ from engine.architecture_decision import architecture_decision, verify_architect
 from engine.compilation import compile_decision, verify_compilation
 from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
+from engine.static_site import assess_static_site
 from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
@@ -1882,6 +1883,7 @@ def handler_for(app: App):
                             archive.write_bytes(body)
                         project = extract_project(archive, Path(temporary) / 'source')
                         profile = inspect_infrastructure(project)
+                        static_site = assess_static_site(project, profile)
                         local_sqlite_mount = self.headers.get('X-Local-Sqlite-Mount')
                         local_sqlite_binding = None
                         if local_sqlite_mount is not None:
@@ -1909,6 +1911,9 @@ def handler_for(app: App):
                                                  'evidence_files': list(profile.evidence),
                                                  'scanned_files': profile.scanned_files,
                                              },
+                                             'static_site': {**static_site.as_dict(),
+                                                 'target': 'aws-s3-cloudfront',
+                                                 'adapter_status': 'not_implemented'},
                                              'reports': reports,
                                              'local_sqlite_binding': local_sqlite_binding,
                                              'candidates': candidates})
