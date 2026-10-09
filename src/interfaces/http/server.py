@@ -36,6 +36,7 @@ from application.source_transform import source_transform_record, verify_source_
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_target_resource_consistency, require_health_result)
+from application.source_secrets import reject_supplied_secrets_in_source
 from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
@@ -324,6 +325,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             validated_environment = validate_environment(environment, plan.required_env)
             if set(validated_environment) != set(plan.required_env):
                 raise ValueError('AWS 승격에는 계획에 선언된 환경변수만 입력하세요.')
+            reject_supplied_secrets_in_source(work, validated_environment)
             with self.lock:
                 if job.get('cancel_requested'):
                     raise DeploymentCancelled()

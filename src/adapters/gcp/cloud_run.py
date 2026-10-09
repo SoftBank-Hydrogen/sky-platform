@@ -16,6 +16,7 @@ from pathlib import Path
 
 from application.analysis import redact
 from application.deployment_core import validate_environment
+from application.source_secrets import reject_supplied_secrets_in_source
 from adapters.build.image import ImageBuilder
 
 
@@ -124,6 +125,7 @@ class CloudRunAdapter:
         if plan.target != 'cloud-run':
             raise ValueError('Cloud Run adapter requires a cloud-run plan')
         environment = validate_environment(environment, plan.required_env)
+        reject_supplied_secrets_in_source(project, environment)
         self.sensitive.extend(environment.values())
         self.prepare_infrastructure()
         service = f'sky-{attempt_id}'

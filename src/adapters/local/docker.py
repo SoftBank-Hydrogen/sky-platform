@@ -14,6 +14,7 @@ from pathlib import Path
 from adapters.build.image import ImageBuilder
 from adapters.local.rehearsal import inspect_image_id
 from application.deployment_core import DeploymentPlan, source_digest, validate_environment
+from application.source_secrets import reject_supplied_secrets_in_source
 from application.execution import ExecutionCapabilities
 from engine.compatibility import TARGET_CAPABILITIES
 
@@ -84,6 +85,7 @@ class LocalDockerAdapter:
         if not plan.source_digest or source_digest(project) != plan.source_digest:
             raise ValueError("Source changed after analysis; upload and analyze again")
         environment = validate_environment(environment, plan.required_env)
+        reject_supplied_secrets_in_source(project, environment)
         original_event = self.event
         def masked_event(stage, message):
             for value in sorted(set(environment.values()), key=len, reverse=True):

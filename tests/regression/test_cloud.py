@@ -81,6 +81,14 @@ class CloudTests(unittest.TestCase):
             result = self.adapter.deploy(self.project, self.plan, self.attempt, {'APP_SECRET': 'private-app-value'})
             return result, verify
 
+    def test_supplied_secret_in_source_stops_before_gcp_setup(self):
+        (self.project / 'server.js').write_text('const token = "private-app-value";\n')
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-07'):
+                self.adapter.deploy(self.project, self.plan, self.attempt,
+                                    {'APP_SECRET': 'private-app-value'})
+        prepare.assert_not_called()
+
     def test_full_private_deployment_build_push_infrastructure_and_probe(self):
         result, verify = self.deploy()
         self.assertEqual(result['target'], 'cloud-run')

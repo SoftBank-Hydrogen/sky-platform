@@ -24,6 +24,7 @@ from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_sqlite_migration_consistency,
     check_target_resource_consistency, require_health_result)
+from application.source_secrets import reject_supplied_secrets_in_source
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
@@ -445,6 +446,7 @@ class DeploymentTools:
         migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
         if source_digest(self.work) != self.plan.source_digest:
             raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
+        reject_supplied_secrets_in_source(self.work, self.environment)
         if self.compilation is not None:
             verify_source_transform(
                 self.source_transform, self.compilation, self.original, self.work, self.plan)

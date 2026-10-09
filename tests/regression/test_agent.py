@@ -129,6 +129,20 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.tools.attempts, 0)
         deploy.assert_not_called()
 
+    def test_supplied_secret_in_working_source_stops_before_adapter(self):
+        self.tools.environment['APP_SECRET'] = 'synthetic-private-value'
+        self.tools.read_project_files(['package.json', 'server.js'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        self.tools.apply_project_patch('server.js', 'const http = require',
+                                       '// synthetic-private-value\nconst http = require')
+        self.tools.configure_deployment('start', None, 3000, '/', [])
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'CV-07'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

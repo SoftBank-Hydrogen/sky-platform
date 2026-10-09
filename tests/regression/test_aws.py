@@ -34,6 +34,14 @@ class AwsTests(unittest.TestCase):
         self.adapter = AwsExpressAdapter(lambda stage, message: self.events.append((stage, message)),
                                          AwsSettings(REGION))
 
+    def test_supplied_secret_in_source_stops_before_aws_setup(self):
+        (self.project / 'server.js').write_text('const token = "synthetic-private-value";\n')
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-07'):
+                self.adapter.deploy(self.project, self.plan, ATTEMPT,
+                                    environment={'APP_SECRET': 'synthetic-private-value'})
+        prepare.assert_not_called()
+
     def test_server_aws_target_requires_pinned_account(self):
         with patch.dict(os.environ, {'SKY_AWS_REGION': REGION,
                                       'SKY_AWS_ACCOUNT_ID': ''}):

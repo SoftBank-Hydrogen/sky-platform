@@ -15,6 +15,7 @@ from pathlib import Path
 from adapters.build.image import ImageBuilder
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import DeploymentPlan, source_digest, validate_environment
+from application.source_secrets import reject_supplied_secrets_in_source
 from application.execution import ExecutionCapabilities
 from engine.compatibility import TARGET_CAPABILITIES
 
@@ -112,6 +113,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
         if not plan.source_digest or source_digest(project) != plan.source_digest:
             raise ValueError("배포 설정 이후 소스가 변경됐습니다.")
         environment = validate_environment(environment, plan.required_env)
+        reject_supplied_secrets_in_source(project, environment)
         image = f"sky/{attempt_id}:latest"
         name = f"sky-{attempt_id}"
         if self.inspect_resource("container", name) or self.inspect_resource("image", image):
