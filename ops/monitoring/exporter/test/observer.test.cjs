@@ -75,3 +75,45 @@ test('malformed responses and unreadable credentials are classified without leak
   assert.match(metrics,/reason="credentials"} 1/);
   assert.ok(!metrics.includes('/missing/private-cookie'));
 });
+
+test('stats failure does not skip healthy scoreboard or WebSocket observations', async t => {
+  let malformed = false, connections = 0;
+  const server = http.createServer((req,res) => {
+    if (req.url === '/stats') {
+      if (!malformed) res.writeHead(503);
+      return res.end(malformed ? '{"connections":{"players":0,"others":0},"totals":{"messages":1}}' : '{}');
+    }
+    res.end('{"rounds":4}');
+  });
+  const wss = new WebSocketServer({server});
+  wss.on('connection',socket => {connections++; socket.on('message',raw => {
+    const message = JSON.parse(raw);
+    socket.send(JSON.stringify({type:'sky.probe.ack',nonce:message.nonce}));
+  });});
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
+  t.after(() => {wss.close(); return new Promise(resolve => server.close(resolve));});
+  const port = server.address().port;
+  const target = {name:'game',kind:'game',httpUrl:`http://127.0.0.1:${port}`,wsUrl:`ws://127.0.0.1:${port}/ws`};
+  for (const reason of ['http','schema']) {
+    const snapshot = await collect(target);
+    assert.equal(snapshot.sky_observed_collection_up,0);
+    assert.equal(snapshot.sky_observed_collection_error,reason);
+    assert.equal(snapshot.sky_observed_http_up,0);
+    assert.equal(snapshot.sky_observed_websocket_up,1);
+    assert.equal(snapshot.sky_game_scoreboard_up,1);
+    assert.equal(snapshot.sky_game_stored_rounds,4);
+    assert.equal(snapshot.sky_game_players,undefined);
+    assert.equal(snapshot.sky_game_messages,undefined);
+    assert.equal(snapshot.sky_observed_last_success_timestamp_seconds,undefined);
+    malformed = true;
+  }
+  assert.equal(connections,2);
+});
+
+test('missing credentials report collection failure without a fictitious WS result', async () => {
+  const snapshot = await collect({name:'game',kind:'game',httpUrl:'http://127.0.0.1:1',
+    wsUrl:'ws://127.0.0.1:1/ws',cookieFile:'/missing/private-cookie'});
+  assert.equal(snapshot.sky_observed_collection_up,0);
+  assert.equal(snapshot.sky_observed_collection_error,'credentials');
+  assert.equal(snapshot.sky_observed_websocket_up,undefined);
+});

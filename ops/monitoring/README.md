@@ -89,6 +89,8 @@ Grafana의 CloudWatch 데이터 소스는 기본 AWS 인증 체인을 사용한�
 | `sky_game_scoreboard_up`, `sky_game_stored_rounds` | 점수판 읽기 성공·보관 라운드 수. 쓰기와 재시작 후 영속성은 별도 기능 검증 |
 | `sky_observed_last_success_timestamp_seconds` | 마지막 수집 성공 시각. 오래된 데이터와 정상 상태를 구분 |
 
+게임 통계·점수판·WebSocket은 각각 검사한다. `/stats` 실패나 형식 오류만으로 WS/점수판을 실패로 표시하지 않는다. 쿠키 파일 오류처럼 WS 검사를 시작하지 못한 경우에는 WS 결과를 내보내지 않고 수집 실패 원인을 표시한다.
+
 수집이 실패하면 이전 앱 지표를 재사용하지 않는다. 무응답·잘못된 JSON·토큰 실패를 정상 0명/0건으로 표시하지 않는다. 작업 성공률과 단계별 시간은 아직 이벤트 기반 지표가 없으므로 별도 코드 작업이 필요하다. 게임 메시지 처리 시간·DB 쓰기 오류도 기존 API에서 제공하지 않아 아직 수집하지 않는다.
 
 알람 규칙은 Prometheus에서 평가하고 Alertmanager로 전달한다. 기본 receiver는 외부 전송이 비활성화된 상태이며 Slack 연결은 아래 override로 명시적으로 켠다. 규칙 등록만으로 Slack에 메시지가 발송되지 않는다. CloudWatch 자체 알람의 Slack 연결은 아직 포함하지 않았다.
