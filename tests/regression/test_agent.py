@@ -143,6 +143,17 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.tools.attempts, 0)
         deploy.assert_not_called()
 
+    def test_cloud_secret_without_reference_stops_before_deployment_attempt(self):
+        self.tools.target = 'aws-ecs-express'
+        self.tools.environment['APP_SECRET'] = 'synthetic-private-value'
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        with self.assertRaisesRegex(ValueError, 'CV-07.*SecretRef'):
+            self.tools.configure_deployment('start', None, 3000, '/', ['APP_SECRET'])
+        self.assertIsNone(self.tools.plan)
+        self.assertEqual(self.tools.attempts, 0)
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

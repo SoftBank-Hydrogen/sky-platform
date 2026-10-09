@@ -63,28 +63,35 @@ class CloudTests(unittest.TestCase):
         elif args[1:3] == ['run', 'deploy']:
             path = Path(args[args.index('--env-vars-file') + 1])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(json.loads(path.read_text()), {'APP_SECRET': 'private-app-value'})
+            self.assertEqual(json.loads(path.read_text()), {'APP_MODE': 'demo-mode-value'})
             self.private_files.append(path)
             self.deployed = True
             if self.fail_deploy:
                 return subprocess.CompletedProcess(args, 1, '', 'container failed to start')
             output = json.dumps({'status': {'url': 'https://sky-example.a.run.app', 'latestReadyRevisionName': 'revision-1'},
-                                 'spec': {'sensitive': 'private-app-value'}})
+                                 'spec': {'sensitive': 'demo-mode-value'}})
         elif args[1:4] == ['run', 'services', 'delete']:
             self.deployed = False
         elif args[1:3] == ['logging', 'read']:
-            output = 'application error private-app-value'
+            output = 'application error demo-mode-value'
         return subprocess.CompletedProcess(args, 0, output, '')
 
     def deploy(self):
         with patch('adapters.gcp.cloud_run.shutil.which', return_value='/bin/gcloud'), patch('adapters.gcp.cloud_run.subprocess.run', side_effect=self.execute), patch.object(self.adapter, 'verify') as verify:
-            result = self.adapter.deploy(self.project, self.plan, self.attempt, {'APP_SECRET': 'private-app-value'})
+            result = self.adapter.deploy(self.project, self.plan, self.attempt, {'APP_MODE': 'demo-mode-value'})
             return result, verify
 
     def test_supplied_secret_in_source_stops_before_gcp_setup(self):
         (self.project / 'server.js').write_text('const token = "private-app-value";\n')
         with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
             with self.assertRaisesRegex(ValueError, 'CV-07'):
+                self.adapter.deploy(self.project, self.plan, self.attempt,
+                                    {'APP_SECRET': 'private-app-value'})
+        prepare.assert_not_called()
+
+    def test_supplied_secret_runtime_value_stops_before_gcp_setup(self):
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-07.*SecretRef'):
                 self.adapter.deploy(self.project, self.plan, self.attempt,
                                     {'APP_SECRET': 'private-app-value'})
         prepare.assert_not_called()
@@ -105,7 +112,7 @@ class CloudTests(unittest.TestCase):
         self.assertTrue(any(args[1:4] == ['iam', 'service-accounts', 'create'] for args, _ in self.commands))
         self.assertTrue(all(not p.exists() for p in self.private_files))
         logged = json.dumps(self.events)
-        for value in ('private-access-token', 'private-identity-token', 'private-app-value'):
+        for value in ('private-access-token', 'private-identity-token', 'demo-mode-value'):
             self.assertNotIn(value, logged)
             self.assertFalse(any(value in ' '.join(args) for args, _ in self.commands))
 
@@ -139,7 +146,7 @@ class CloudTests(unittest.TestCase):
         self.assertTrue(any(args[1:4] == ['run', 'services', 'delete'] for args, _ in self.commands))
         self.assertTrue(any(args[1:5] == ['artifacts', 'docker', 'images', 'delete'] for args, _ in self.commands))
         self.assertIn('[REDACTED]', str(self.events))
-        self.assertNotIn('private-app-value', str(self.events))
+        self.assertNotIn('demo-mode-value', str(self.events))
         self.assertTrue(all(not p.exists() for p in self.private_files))
 
     def test_cleanup_does_not_delete_foreign_service(self):

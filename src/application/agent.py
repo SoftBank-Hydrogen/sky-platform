@@ -24,7 +24,8 @@ from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_sqlite_migration_consistency,
     check_target_resource_consistency, require_health_result)
-from application.source_secrets import reject_supplied_secrets_in_source
+from application.source_secrets import (reject_plaintext_cloud_secret_names,
+                                        reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source)
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
@@ -390,6 +391,9 @@ class DeploymentTools:
         validate_environment({name: "placeholder" for name in required_env}, [])
         if self.postgres_request is not None and 'DATABASE_URL' in required_env:
             raise ValueError('이 PostgreSQL 경로는 DATABASE_URL 대신 PG 환경변수를 사용하는 앱만 지원합니다.')
+        reject_plaintext_cloud_secret_names(
+            [name for name in required_env if self.postgres_request is None or name not in MANAGED_POSTGRES_ENV],
+            self.target)
         self.plan = make_plan(self.work, start_script, build_script, port, health_path,
                               target=self.target,
                               required_env=sorted(set(required_env)), analyzer="agent",
@@ -447,6 +451,7 @@ class DeploymentTools:
         if source_digest(self.work) != self.plan.source_digest:
             raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
         reject_supplied_secrets_in_source(self.work, self.environment)
+        reject_plaintext_cloud_secrets(self.environment, self.target)
         if self.compilation is not None:
             verify_source_transform(
                 self.source_transform, self.compilation, self.original, self.work, self.plan)

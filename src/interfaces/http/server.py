@@ -36,7 +36,8 @@ from application.source_transform import source_transform_record, verify_source_
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
     check_target_resource_consistency, require_health_result)
-from application.source_secrets import reject_supplied_secrets_in_source
+from application.source_secrets import (reject_plaintext_cloud_secret_names,
+                                        reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source)
 from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
@@ -311,6 +312,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             promotion = {'source_job_id': local_job_id, 'attempt_id': local_attempt,
                          'image': result['image'], 'image_id': result['image_id'],
                          'platform': result['platform']}
+            reject_plaintext_cloud_secret_names(plan.required_env, 'aws-ecs-express')
             if plan.required_env and environment is None:
                 with self.lock:
                     if job.get('cancel_requested'):
@@ -326,6 +328,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             if set(validated_environment) != set(plan.required_env):
                 raise ValueError('AWS 승격에는 계획에 선언된 환경변수만 입력하세요.')
             reject_supplied_secrets_in_source(work, validated_environment)
+            reject_plaintext_cloud_secrets(validated_environment, 'aws-ecs-express')
             with self.lock:
                 if job.get('cancel_requested'):
                     raise DeploymentCancelled()

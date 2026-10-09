@@ -248,7 +248,7 @@ class DeploymentGroupTests(unittest.TestCase):
             work = self.app.root / job_id / 'work'
             shutil.copytree(Path(job['project']), work)
             plan = analyze(work)
-            plan.required_env = ['APP_SECRET']
+            plan.required_env = ['APP_MODE']
             job.update(status='succeeded', plan=plan.__dict__, attempts=1,
                        result={'image': f'sky/{local_id}-a1:latest', 'image_id': image_id,
                                'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
@@ -258,7 +258,7 @@ class DeploymentGroupTests(unittest.TestCase):
         run.assert_called_once_with(local_id)
         waiting = self.app.jobs[aws_id]
         self.assertEqual(waiting['status'], 'waiting_input')
-        self.assertEqual(waiting['missing_environment'], ['APP_SECRET'])
+        self.assertEqual(waiting['missing_environment'], ['APP_MODE'])
         self.assertEqual(waiting['attempts'], 0)
         self.assertEqual(waiting['promotion_source_job_id'], local_id)
         self.assertEqual(waiting['source_transform']['target_plan_id'],
@@ -271,7 +271,7 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(restored.jobs[aws_id]['status'], 'waiting_input')
         restored.jobs[aws_id]['status'] = 'running'
         restored.save(aws_id)
-        supplied = {'APP_SECRET': secret}
+        supplied = {'APP_MODE': secret}
         received = []
         def deploy(_project, _plan, _attempt_id, environment):
             received.append(dict(environment))
@@ -281,7 +281,7 @@ class DeploymentGroupTests(unittest.TestCase):
                 patch.object(restored, 'start_group_worker') as continue_group:
             restored.resume_promoted_aws(aws_id, supplied)
         self.assertEqual(aws_deploy.call_count, 1)
-        self.assertEqual(received, [{'APP_SECRET': secret}])
+        self.assertEqual(received, [{'APP_MODE': secret}])
         self.assertEqual(supplied, {})
         self.assertEqual(restored.jobs[aws_id]['status'], 'succeeded')
         self.assertEqual(restored.jobs[aws_id]['attempts'], 1)
@@ -295,7 +295,7 @@ class DeploymentGroupTests(unittest.TestCase):
         work = self.app.root / local_id / 'work'
         shutil.copytree(Path(self.app.jobs[local_id]['project']), work)
         plan = analyze(work)
-        plan.required_env = ['APP_SECRET']
+        plan.required_env = ['APP_MODE']
         self.app.jobs[local_id].update(status='succeeded', plan=plan.__dict__, attempts=1,
             result={'image': f'sky/{local_id}-a1:latest', 'image_id': 'sha256:' + 'a' * 64,
                     'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
@@ -307,7 +307,7 @@ class DeploymentGroupTests(unittest.TestCase):
         (aws_work / 'server.js').write_text('changed after waiting')
         self.app.jobs[aws_id]['status'] = 'running'
         self.app.save(aws_id)
-        supplied = {'APP_SECRET': 'synthetic-private-value'}
+        supplied = {'APP_MODE': 'synthetic-private-value'}
         with patch('interfaces.http.server.AwsExpressAdapter.deploy') as deploy, \
                 patch.object(self.app, 'start_group_worker'):
             self.app.resume_promoted_aws(aws_id, supplied)
@@ -347,7 +347,7 @@ class DeploymentGroupTests(unittest.TestCase):
         work = self.app.root / local_id / 'work'
         shutil.copytree(Path(local['project']), work)
         plan = analyze(work)
-        plan.required_env = ['APP_SECRET']
+        plan.required_env = ['APP_MODE']
         local.update(status='succeeded', plan=plan.__dict__, attempts=1,
                      result={'image': f'sky/{local_id}-a1:latest',
                              'image_id': 'sha256:' + 'a' * 64,
@@ -356,7 +356,7 @@ class DeploymentGroupTests(unittest.TestCase):
         self.app.jobs[aws_id]['status'] = 'running'
         self.app.save(aws_id)
         secret = 'synthetic-private-value'
-        supplied = {'APP_SECRET': secret}
+        supplied = {'APP_MODE': secret}
         with patch('interfaces.http.server.AwsExpressAdapter.deploy',
                    side_effect=RuntimeError('failed: ' + secret)), \
                 patch('interfaces.http.server.AwsExpressAdapter.cleanup_failure'):
@@ -366,6 +366,32 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertNotIn(secret, str(self.app.jobs[aws_id]))
         self.assertNotIn(secret, (self.app.root / aws_id / 'job.json').read_text())
         self.assertIn('[REDACTED]', self.app.jobs[aws_id]['events'][-1]['message'])
+
+    def test_promotion_rejects_supplied_secret_before_aws_attempt(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        local = self.app.jobs[local_id]
+        work = self.app.root / local_id / 'work'
+        shutil.copytree(Path(local['project']), work)
+        plan = analyze(work)
+        plan.required_env = ['APP_SECRET']
+        local.update(status='succeeded', plan=plan.__dict__, attempts=1,
+                     result={'image': f'sky/{local_id}-a1:latest',
+                             'image_id': 'sha256:' + 'a' * 64,
+                             'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+        self.app.save(local_id)
+        self.app.jobs[aws_id]['status'] = 'running'
+        self.app.save(aws_id)
+        value = 'synthetic-private-value'
+        supplied = {'APP_SECRET': value}
+        with patch('interfaces.http.server.AwsExpressAdapter.deploy') as deploy:
+            self.app.run_promoted_aws(aws_id, local_id, supplied)
+        deploy.assert_not_called()
+        self.assertEqual(self.app.jobs[aws_id]['attempts'], 0)
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'failed')
+        self.assertEqual(supplied, {})
+        self.assertNotIn(value, str(self.app.jobs[aws_id]))
+        self.assertIn('CV-07', self.app.jobs[aws_id]['events'][-1]['message'])
 
     def test_waiting_for_environment_pauses_next_target(self):
         group = self.create()

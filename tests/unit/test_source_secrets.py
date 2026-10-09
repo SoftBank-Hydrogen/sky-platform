@@ -2,7 +2,11 @@
 
 import pytest
 
-from application.source_secrets import reject_supplied_secrets_in_source
+from application.source_secrets import (
+    reject_plaintext_cloud_secret_names,
+    reject_plaintext_cloud_secrets,
+    reject_supplied_secrets_in_source,
+)
 
 
 def test_supplied_credential_in_source_is_rejected_without_echoing_value(tmp_path):
@@ -30,3 +34,19 @@ def test_supplied_credential_scan_fails_closed_for_symbolic_links(tmp_path):
     (tmp_path / "linked.py").symlink_to(tmp_path / "real.py")
     with pytest.raises(ValueError, match="CV-07"):
         reject_supplied_secrets_in_source(tmp_path, {"APP_SECRET": "synthetic-private-value"})
+
+
+@pytest.mark.parametrize("target", ["aws-ecs-express", "cloud-run"])
+def test_cloud_requires_secret_reference_for_supplied_credentials(target):
+    value = "synthetic-private-value"
+    with pytest.raises(ValueError, match="CV-07.*SecretRef") as error:
+        reject_plaintext_cloud_secrets({"APP_SECRET": value}, target)
+    assert value not in str(error.value)
+    reject_plaintext_cloud_secrets({"APP_MODE": "production"}, target)
+    reject_plaintext_cloud_secrets({"APP_SECRET": value}, "local-docker")
+
+
+def test_cloud_secret_name_is_rejected_before_requesting_its_value():
+    with pytest.raises(ValueError, match="CV-07.*SecretRef"):
+        reject_plaintext_cloud_secret_names(["APP_SECRET"], "aws-ecs-express")
+    reject_plaintext_cloud_secret_names(["APP_MODE"], "aws-ecs-express")

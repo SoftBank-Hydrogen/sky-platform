@@ -42,6 +42,13 @@ class AwsTests(unittest.TestCase):
                                     environment={'APP_SECRET': 'synthetic-private-value'})
         prepare.assert_not_called()
 
+    def test_supplied_secret_runtime_value_stops_before_aws_setup(self):
+        with patch.object(self.adapter, 'prepare_infrastructure') as prepare:
+            with self.assertRaisesRegex(ValueError, 'CV-07.*SecretRef'):
+                self.adapter.deploy(self.project, self.plan, ATTEMPT,
+                                    environment={'APP_SECRET': 'synthetic-private-value'})
+        prepare.assert_not_called()
+
     def test_server_aws_target_requires_pinned_account(self):
         with patch.dict(os.environ, {'SKY_AWS_REGION': REGION,
                                       'SKY_AWS_ACCOUNT_ID': ''}):
@@ -405,7 +412,7 @@ class AwsTests(unittest.TestCase):
                 self.assertEqual(payload['scalingTarget'], {'minTaskCount': 1, 'maxTaskCount': 1})
                 self.assertEqual(payload['primaryContainer']['environment'],
                                  [{'name': 'PORT', 'value': '3000'},
-                                  {'name': 'APP_SECRET', 'value': 'synthetic-value'}])
+                                  {'name': 'APP_MODE', 'value': 'synthetic-value'}])
                 return json.dumps({'service': {'serviceArn': ARN}})
             if args[:2] == ['ecs', 'describe-express-gateway-service']:
                 return json.dumps({'service': {'status': {'statusCode': 'ACTIVE'},
@@ -421,12 +428,12 @@ class AwsTests(unittest.TestCase):
                 return json.dumps({'serviceDeployments': [{'status': 'IN_PROGRESS' if deployment_checks == 1
                                                                 else 'SUCCESSFUL'}]})
             raise AssertionError(args)
-        self.plan.required_env = ['APP_SECRET']
+        self.plan.required_env = ['APP_MODE']
         with patch.object(self.adapter, 'prepare_infrastructure', return_value=(ACCOUNT, REPOSITORY, 'execution', 'infra')), \
                 patch('adapters.aws.ecs.ImageBuilder.build'), patch.object(self.adapter, 'command', side_effect=command), \
                 patch.object(self.adapter, 'aws', side_effect=aws), patch.object(self.adapter, 'verify') as verify, \
                 patch('adapters.aws.ecs.time.sleep'):
-            result = self.adapter.deploy(self.project, self.plan, ATTEMPT, {'APP_SECRET': 'synthetic-value'})
+            result = self.adapter.deploy(self.project, self.plan, ATTEMPT, {'APP_MODE': 'synthetic-value'})
         self.assertEqual(result['url'], url)
         self.assertEqual(result['service_arn'], ARN)
         self.assertIn('task-definition/', result['task_definition_arn'])

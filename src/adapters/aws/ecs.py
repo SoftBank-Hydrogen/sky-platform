@@ -22,7 +22,7 @@ from pathlib import Path
 from assets import ASSET_ROOT
 from application.analysis import redact
 from application.deployment_core import source_digest, validate_environment
-from application.source_secrets import reject_supplied_secrets_in_source
+from application.source_secrets import reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source
 from application.execution import ExecutionCapabilities
 from adapters.build.image import ImageBuilder, RDS_CA_CONTAINER_PATH
 from adapters.local.rehearsal import inspect_image_id, rehearse_image
@@ -285,6 +285,7 @@ class AwsExpressAdapter:
         else:
             environment = validate_environment(environment, plan.required_env)
         reject_supplied_secrets_in_source(project, environment)
+        reject_plaintext_cloud_secrets(environment, 'aws-ecs-express')
         if self.existing is not None and self.existing.get('database') != database:
             raise AwsConfigurationError('기존 AWS 서비스의 PostgreSQL 연결 구성이 배포 기록과 다릅니다.')
         self.sensitive.extend(environment.values())

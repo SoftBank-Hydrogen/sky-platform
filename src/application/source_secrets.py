@@ -12,10 +12,29 @@ _SENSITIVE_ENV_NAME = re.compile(
 _SENSITIVE_ENV_EXACT = {"PGPASSWORD", "MYSQL_PWD"}
 
 
+def sensitive_environment_names(environment: dict[str, str]) -> list[str]:
+    """Identify supplied values that require a secret reference in a cloud target."""
+    return sorted(name for name, value in environment.items()
+                  if value and is_sensitive_environment_name(name))
+
+
+def is_sensitive_environment_name(name: str) -> bool:
+    return name in _SENSITIVE_ENV_EXACT or bool(_SENSITIVE_ENV_NAME.search(name))
+
+
+def reject_plaintext_cloud_secret_names(names: list[str], target: str) -> None:
+    if target in {"aws-ecs-express", "cloud-run"} and any(is_sensitive_environment_name(name) for name in names):
+        raise ValueError("CV-07: Cloud deployment of supplied credentials requires SecretRef support")
+
+
+def reject_plaintext_cloud_secrets(environment: dict[str, str], target: str) -> None:
+    """Fail closed until the target supports secret references for user credentials."""
+    reject_plaintext_cloud_secret_names(sensitive_environment_names(environment), target)
+
+
 def reject_supplied_secrets_in_source(project: Path, environment: dict[str, str]) -> None:
     """Reject a supplied credential value found anywhere in the deployment source."""
-    secrets = [value.encode() for name, value in environment.items()
-               if value and (name in _SENSITIVE_ENV_EXACT or _SENSITIVE_ENV_NAME.search(name))]
+    secrets = [environment[name].encode() for name in sensitive_environment_names(environment)]
     if not secrets:
         return
     for path in project.rglob("*"):
