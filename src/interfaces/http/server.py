@@ -20,6 +20,7 @@ from assets import ASSET_ROOT
 from engine.application_ir import application_ir
 from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
+from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
@@ -235,6 +236,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
         try:
             if self.cancel_requested(job_id):
                 raise DeploymentCancelled()
+            if 'deployment_policy' in job:
+                policy_from_record(job['deployment_policy']).require(
+                    job.get('target'), (job.get('infrastructure_plan') or {}).get('compatibility', {}).get('access_mode'))
             if (not isinstance(local, dict) or job.get('target') != 'aws-ecs-express'
                     or job.get('status') != 'running' or job.get('attempts') != 0
                     or not job.get('group_id') or local.get('group_id') != job['group_id']
@@ -359,6 +363,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             raise ValueError('서로 다른 배포 대상 2~3개를 선택하세요.')
         if not re.fullmatch(r'[a-z][a-z0-9-]{2,30}', application_id):
             raise ValueError('올바른 앱 ID가 필요합니다.')
+        policy = deployment_policy(tuple(targets), public)
         profile = inspect_infrastructure(project)
         digest = source_digest(project)
         plans = []
@@ -372,6 +377,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             plan['compatibility'] = infrastructure_compatibility(profile, target, public_access=public)
             if plan['compatibility']['access_mode'] is None:
                 raise ValueError(f'{target}의 공개 접근 설정을 지원하지 않습니다.')
+            policy.require(target, plan['compatibility']['access_mode'])
             plans.append(plan)
         group_id = uuid.uuid4().hex[:16]
         jobs = []
@@ -394,6 +400,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                        'plan': None, 'diff': '', 'changes': [], 'steps': 0, 'attempts': 0,
                        'project': str(copied_source), 'infrastructure_profile': profile.as_dict(),
                        'application_ir': application_ir(profile, digest).as_dict(),
+                       'deployment_policy': policy.as_dict(),
                        'events': [], 'source_digest': digest,
                        'group_id': group_id, 'group_order': order}
                 if target == 'cloud-run':
@@ -619,6 +626,13 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                     and source_digest(Path(job['project'])) != job['source_digest']):
                 raise ValueError('업로드한 앱 소스가 변경됐습니다. 새 배포를 시작하세요.')
             target = job.get("target", "local-docker")
+            policy = (policy_from_record(job['deployment_policy'])
+                      if 'deployment_policy' in job else None)
+            if policy is not None:
+                policy.require(
+                    target, (job.get('infrastructure_plan') or {}).get('compatibility', {}).get('access_mode'),
+                    new_managed_database=job.get('postgres_creation_id') is not None,
+                    data_migration=job.get('sqlite_conversion') is not None)
             adapter_factory = LocalDockerAdapter
             if target == 'local-docker' and job.get('group_id'):
                 with self.lock:
@@ -649,6 +663,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     postgres_request=postgres_request_from_job(job),
                                     sqlite_conversion=job.get('sqlite_conversion'),
                                     local_sqlite_binding=job.get('local_sqlite_binding'),
+                                    deployment_policy=policy,
+                                    new_managed_database=job.get('postgres_creation_id') is not None,
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))
@@ -1898,8 +1914,10 @@ def handler_for(app: App):
                         reports, candidates = compare_targets(
                             profile, availability, public_access=public_flag == 'true',
                             local_sqlite=local_sqlite_binding is not None, include_compose=True)
+                        policy = deployment_policy('auto', public_flag == 'true')
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile, digest).as_dict(),
+                                             'deployment_policy': policy.as_dict(),
                                              'capability_models': {
                                                  target: target_capability_model(target).as_dict()
                                                  for target in availability
@@ -2012,6 +2030,11 @@ def handler_for(app: App):
                         raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
                     if create_plan_id is not None and postgres_flag == 'true':
                         raise ValueError('기존 DB 사용과 신규 DB 생성을 동시에 선택할 수 없습니다.')
+                    policy = deployment_policy(
+                        requested_target, public_flag == 'true',
+                        new_managed_database_approved=create_plan_id is not None,
+                        allow_data_migration=sqlite_flag == 'true',
+                    )
                     postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
                     supplied_postgres_network = tuple(name in self.headers for name in postgres_headers)
                     if postgres_flag != 'true' and any(supplied_postgres_network):
@@ -2140,6 +2163,11 @@ def handler_for(app: App):
                         access_mode = infrastructure_plan['compatibility']['access_mode']
                         if access_mode is None:
                             raise ValueError('선택한 배포 대상의 공개 범위를 지원하지 않습니다.')
+                        policy.require(
+                            target, access_mode,
+                            new_managed_database=create_plan_id is not None,
+                            data_migration=sqlite_conversion is not None,
+                        )
                         with app.lock:
                             app.ensure_application_available(application_id, target)
                             if local_sqlite_binding is not None and any(
@@ -2178,6 +2206,7 @@ def handler_for(app: App):
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
                                 "application_ir": application_ir(infrastructure_profile, digest).as_dict(),
+                                "deployment_policy": policy.as_dict(),
                                 "events": []}
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion

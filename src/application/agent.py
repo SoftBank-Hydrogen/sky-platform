@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from application.analysis import AISettings, redact
 from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
 from application.execution import ExecutionRequest, ExecutionState, execute
+from engine.deployment_policy import DeploymentPolicy
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
@@ -192,6 +193,8 @@ class DeploymentTools:
                  infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
                  sqlite_conversion: dict | None = None,
                  local_sqlite_binding: dict | None = None,
+                 deployment_policy: DeploymentPolicy | None = None,
+                 new_managed_database: bool = False,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -211,6 +214,8 @@ class DeploymentTools:
         self.sqlite_conversion = sqlite_conversion
         self.local_sqlite_binding = local_sqlite_binding
         self.infrastructure_plan = infrastructure_plan
+        self.deployment_policy = deployment_policy
+        self.new_managed_database = new_managed_database
         self.plan = None
         self.result = None
         self.logs = []
@@ -404,6 +409,13 @@ class DeploymentTools:
     def deploy_application(self):
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
+        if self.deployment_policy is not None:
+            access_mode = (self.infrastructure_plan or {}).get('compatibility', {}).get('access_mode')
+            self.deployment_policy.require(
+                self.target, access_mode,
+                new_managed_database=self.new_managed_database,
+                data_migration=self.sqlite_conversion is not None,
+            )
         if self.local_sqlite_binding:
             checked = preflight_local_sqlite(
                 self.work, inspect_infrastructure(self.work),

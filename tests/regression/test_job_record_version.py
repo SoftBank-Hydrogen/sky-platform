@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from engine.deployment_policy import deployment_policy
 from interfaces.http.server import App
 
 
@@ -70,6 +71,18 @@ class JobRecordVersionTests(unittest.TestCase):
                 self.record.write_text(json.dumps({**self.legacy, "attempts": attempts}))
                 restored = App(self.root, monitor_interval=0, github_poll_interval=0)
                 self.assertNotIn(JOB_ID, restored.jobs)
+
+    def test_invalid_stored_policy_is_not_loaded_or_rewritten(self):
+        policy = deployment_policy('local-docker', False).as_dict()
+        policy['allowed_targets'] = ['imaginary-cloud']
+        for invalid in (policy, None):
+            with self.subTest(policy=invalid):
+                self.record.write_text(json.dumps({**self.legacy, 'deployment_policy': invalid}))
+                original = self.record.read_bytes()
+                restored = App(self.root, monitor_interval=0, github_poll_interval=0)
+                self.assertNotIn(JOB_ID, restored.jobs)
+                self.assertTrue(any(JOB_ID in item for item in restored.recovery_warnings))
+                self.assertEqual(self.record.read_bytes(), original)
 
 
 if __name__ == "__main__":

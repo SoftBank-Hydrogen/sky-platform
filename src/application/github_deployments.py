@@ -29,6 +29,7 @@ from application.infrastructure import (
     plan_infrastructure,
     validate_infrastructure,
 )
+from engine.deployment_policy import deployment_policy
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
 
@@ -170,6 +171,7 @@ class GitHubDeploymentsMixin:
     def _reserve_single_github_job(
         self, project: Path, application_id: str, requested_target: str, public: bool, source: dict
     ) -> dict:
+        policy = deployment_policy(requested_target, public)
         profile = inspect_infrastructure(project)
         validate_infrastructure(profile, requested_target)
         if requested_target == "auto":
@@ -189,6 +191,7 @@ class GitHubDeploymentsMixin:
         plan["compatibility"] = infrastructure_compatibility(profile, target, public_access=public)
         if plan["compatibility"]["access_mode"] is None:
             raise ValueError("선택한 배포 대상의 공개 범위를 지원하지 않습니다.")
+        policy.require(target, plan["compatibility"]["access_mode"])
         digest = source_digest(project)
         job_id = uuid.uuid4().hex[:16]
         directory = self.root / job_id
@@ -216,6 +219,7 @@ class GitHubDeploymentsMixin:
                 "attempts": 0,
                 "project": str(copied),
                 "infrastructure_profile": profile.as_dict(),
+                "deployment_policy": policy.as_dict(),
                 "events": [],
                 "source_digest": digest,
                 "github_source": source,

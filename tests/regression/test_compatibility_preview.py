@@ -54,6 +54,10 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(payload['application_ir']['schema_version'], 2)
         self.assertEqual(payload['application_ir']['source_revision'], payload['source_digest'])
         self.assertEqual(payload['application_ir']['unknowns'], ('component_topology', 'statelessness'))
+        self.assertEqual(payload['deployment_policy']['selection_mode'], 'auto_target')
+        self.assertTrue(payload['deployment_policy']['public_access_allowed'])
+        self.assertIn('aws-ecs-express', payload['deployment_policy']['allowed_targets'])
+        self.assertIsNone(payload['deployment_policy']['max_monthly_cost_usd'])
         capability_models = payload['capability_models']
         self.assertEqual(set(capability_models), set(reports))
         self.assertTrue(all(model['schema_version'] == 1 for model in capability_models.values()))
