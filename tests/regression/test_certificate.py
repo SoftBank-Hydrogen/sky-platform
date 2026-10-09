@@ -5,6 +5,8 @@ from unittest.mock import Mock
 
 from application.analysis import AISettings
 from application.certificate import deployment_certificate
+from engine.application_ir import application_ir
+from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
 from interfaces.http.server import App, handler_for
 
 
@@ -119,6 +121,46 @@ class CertificateTests(unittest.TestCase):
         self.assertTrue(trace['candidate_evaluations'][0]['selected'])
         self.assertEqual(trace['selection_basis'], 'openai')
         self.assertNotIn('private-value', str(trace))
+
+    def test_versioned_evidence_connects_source_constraint_and_runtime_scope(self):
+        revision = 'a' * 64
+        profile = InfrastructureProfile(
+            'unconfirmed', ('server.js',), 1,
+            source_signals=(('websocket', ('server.js',)),),
+        )
+        ir = application_ir(profile, revision).as_dict()
+        compatibility = infrastructure_compatibility(profile, 'local-docker', public_access=False)
+        job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'local-docker',
+               'source_digest': revision, 'application_ir': ir,
+               'infrastructure_plan': {'target': 'local-docker', 'planner': 'user',
+                                       'compatibility': compatibility},
+               'result': {'url': 'http://127.0.0.1:1234'},
+               'websocket_verification': {'status': 'passed',
+                                          'checked_at': '2026-10-09T00:00:00+00:00'}}
+        certificate = deployment_certificate(job)
+        trace = certificate['decision_trace']
+        evidence_id = ir['evidence'][0]['id']
+        self.assertEqual(trace['status'], 'recorded')
+        self.assertEqual(trace['ir_source_revision'], revision)
+        self.assertEqual(trace['source_evidence'][0]['id'], evidence_id)
+        self.assertEqual(trace['source_evidence'][0]['signal'], 'websocket')
+        self.assertEqual(trace['source_evidence'][0]['status'], 'inferred')
+        self.assertEqual(trace['unresolved_evidence_ids'], [])
+        self.assertEqual(next(item for item in trace['constraint_results']
+                              if item['rule_id'] == 'PROTOCOL-WS-01')['evidence_ids'], [evidence_id])
+        websocket = next(item for item in certificate['verification']
+                         if item['name'] == 'websocket_round_trip')
+        self.assertEqual(websocket['status'], 'passed')
+        self.assertEqual(websocket['source_evidence_ids'], [evidence_id])
+        self.assertEqual(ir['evidence'][0]['verified_by'], ())
+        ir['evidence'][0]['source']['revision'] = 'b' * 64
+        tampered = deployment_certificate(job)['decision_trace']
+        self.assertEqual(tampered['status'], 'incomplete')
+        self.assertEqual(tampered['source_evidence'], [])
+        self.assertEqual(tampered['unresolved_evidence_ids'], [evidence_id])
+        tampered_probe = next(item for item in deployment_certificate(job)['verification']
+                              if item['name'] == 'websocket_round_trip')
+        self.assertEqual(tampered_probe['source_evidence_ids'], [])
 
     def test_certificate_api_requires_session_and_existing_job(self):
         with tempfile.TemporaryDirectory() as directory:
