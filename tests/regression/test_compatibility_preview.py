@@ -199,7 +199,7 @@ class CompatibilityPreviewTests(unittest.TestCase):
         static = candidates['aws-s3-cloudfront']
         self.assertEqual((static['provider'], static['backend']), ('aws', 'static_hosting'))
         self.assertEqual(static['structural_status'], 'compatible')
-        self.assertEqual(static['selection_mode'], 'automatic_upload_only')
+        self.assertEqual(static['selection_mode'], 'automatic')
         self.assertEqual(static['status'], 'eligible')
         self.assertEqual(payload['static_site']['adapter_status'], 'available')
         self.assertFalse(static['selected'])

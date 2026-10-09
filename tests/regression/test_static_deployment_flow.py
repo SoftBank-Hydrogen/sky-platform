@@ -126,7 +126,7 @@ class StaticDeploymentFlowTests(unittest.TestCase):
             self.app.run_static_site(job_id)
         adapter.assert_not_called()
         self.assertEqual(self.app.jobs[job_id]["status"], "failed")
-        self.assertEqual(self.app.jobs[job_id]["deployment_state"], "active")
+        self.assertEqual(self.app.jobs[job_id]["deployment_state"], "deleted")
         certificate = deployment_certificate(self.app.jobs[job_id])
         self.assertEqual(certificate["compilation_status"], "incomplete")
 

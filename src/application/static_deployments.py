@@ -16,7 +16,8 @@ from application.static_compilation import static_compilation, verify_static_com
 
 class StaticDeploymentsMixin:
     def create_static_job(
-        self, job_id: str, project: Path, application_id: str, *, requested_target: str
+        self, job_id: str, project: Path, application_id: str, *, requested_target: str,
+        source: dict | None = None,
     ) -> None:
         """Persist one static release before starting its cloud worker."""
         attempt_id = job_id + "-a1"
@@ -26,13 +27,22 @@ class StaticDeploymentsMixin:
         )
         with self.lock:
             self.ensure_application_available(application_id, "aws-s3-cloudfront")
-            if any(
+            existing = [old for old in self.jobs.values() if (
                 old.get("application_id") == application_id
                 and old.get("target") == "aws-s3-cloudfront"
                 and old.get("deployment_state", "active") != "deleted"
-                for old in self.jobs.values()
-            ):
-                raise ValueError("기존 정적 사이트 릴리스를 종료한 뒤 새 배포를 시작하세요.")
+            )]
+            replacement = None
+            if existing:
+                subscription_id = (source or {}).get("subscription_id")
+                if (subscription_id and len(existing) == 1
+                        and existing[0].get("status") == "succeeded"
+                        and existing[0].get("deployment_state") == "active"
+                        and existing[0].get("static_stack_id")
+                        and existing[0].get("github_source", {}).get("subscription_id") == subscription_id):
+                    replacement = existing[0]["id"]
+                else:
+                    raise ValueError("기존 정적 사이트 릴리스를 종료한 뒤 새 배포를 시작하세요.")
             self.jobs[job_id] = {
                 "id": job_id, "mode": "static_site", "target": "aws-s3-cloudfront",
                 "requested_target": requested_target,
@@ -43,6 +53,8 @@ class StaticDeploymentsMixin:
                 "static_preflight": preflight, "plan": None, "attempts": 1,
                 "steps": 0, "changes": [], "diff": "", "events": [],
                 "aws": asdict(self.aws_settings),
+                **({"github_source": source} if source else {}),
+                **({"replaces_job_id": replacement} if replacement else {}),
                 **records,
             }
             self.save(job_id)
@@ -81,8 +93,38 @@ class StaticDeploymentsMixin:
                 current["status"] = "failed"
                 if current.get("static_stack_name"):
                     current["deployment_state"] = "needs_attention"
+                else:
+                    current["deployment_state"] = "deleted"
                 self.save(job_id)
             self.event(job_id, "error", redact(str(exc))[:300])
+            return
+        try:
+            self.retire_replaced_github_static(job_id)
+        except Exception as exc:
+            self.event(job_id, "previous_static_cleanup_failed", redact(str(exc))[:300])
+
+    def retire_replaced_github_static(self, job_id: str) -> None:
+        with self.lock:
+            current = self.jobs.get(job_id)
+            previous = self.jobs.get(current.get("replaces_job_id")) if current else None
+            if not current or not previous or current.get("status") != "succeeded":
+                return
+            subscription = (current.get("github_source") or {}).get("subscription_id")
+            if (not subscription or current.get("target") != "aws-s3-cloudfront"
+                    or previous.get("target") != "aws-s3-cloudfront"
+                    or current.get("application_id") != previous.get("application_id")
+                    or (previous.get("github_source") or {}).get("subscription_id") != subscription
+                    or previous.get("status") != "succeeded"
+                    or previous.get("deployment_state") != "active"
+                    or not previous.get("static_stack_id")):
+                return
+            previous_id = previous["id"]
+        self.retire_static_site(previous_id)
+        with self.lock:
+            retired = self.jobs[previous_id].get("deployment_state") == "deleted"
+        self.event(job_id, "previous_static_retired" if retired else "previous_static_cleanup_failed",
+                   "이전 GitHub 정적 릴리스를 종료했습니다." if retired else
+                   "이전 정적 릴리스 종료를 확인하지 못했습니다. 리소스 상태를 확인하세요.")
 
     def reconcile_static_site(self, job_id: str) -> dict:
         with self.lock:

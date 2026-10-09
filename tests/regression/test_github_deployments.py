@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from application.analysis import AISettings
+from application.deployment_core import source_digest
 from application.github_source import parse_repository_url, resolve_revision, validate_branch
+from adapters.aws.ecs import AwsSettings
 from adapters.gcp.cloud_run import CloudRunSettings
 from interfaces.http.server import App
 
@@ -26,7 +28,142 @@ def write_app_archive(_repository, commit, destination):
         )
 
 
+def write_static_archive(_repository, commit, destination):
+    with zipfile.ZipFile(destination, "w") as archive:
+        archive.writestr("site-" + commit[:7] + "/index.html", "<h1>" + commit[:7] + "</h1>")
+
+
 class GitHubSourceTests(unittest.TestCase):
+    def test_static_push_preserves_old_release_until_new_one_is_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(
+                Path(directory), AISettings("fixture-key", "fixture-model"),
+                aws_settings=AwsSettings("ap-northeast-2", expected_account="123456789012"),
+                monitor_interval=0, github_poll_interval=60,
+            )
+
+            def preflight(_adapter, project, _app_id, _attempt_id):
+                return {"source_digest": source_digest(project)}
+
+            with (
+                patch("application.github_deployments.resolve_revision",
+                      side_effect=[("main", FIRST), ("main", SECOND), ("main", SECOND)]),
+                patch("application.github_deployments.download_revision", side_effect=write_static_archive),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.unavailable_reason", return_value=None),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.preflight", preflight),
+                patch.object(app, "start_job_worker", return_value=True) as worker,
+            ):
+                created = app.create_github_deployment(
+                    "https://github.com/team/site", None, "site-app", ["auto"], True, True
+                )
+                source_id = created["source_id"]
+                old_id = created["deployment"]["id"]
+                old = app.jobs[old_id]
+                self.assertEqual(old["mode"], "static_site")
+                self.assertEqual(old["requested_target"], "auto")
+                self.assertEqual(old["architecture_decision"]["selection_mode"], "auto_target")
+                self.assertEqual(worker.call_args.args[1], app.run_static_site)
+                old.update(status="succeeded", static_stack_id="old-stack", result={
+                    "stack_id": "old-stack", "url": "https://old.example.invalid",
+                    "source_digest": old["source_digest"], "source_index_sha256": "a" * 64,
+                })
+                app.save(old_id)
+                changed = app.poll_github_source(source_id)
+                new_id = changed["job_ids"][0]
+                self.assertEqual(app.jobs[new_id]["replaces_job_id"], old_id)
+                self.assertEqual(app.jobs[old_id]["deployment_state"], "active")
+
+                def adapter(_snapshot, checkpoint=None):
+                    class FakeAdapter:
+                        def deploy(self, project, *_args):
+                            checkpoint(static_stack_id="new-stack")
+                            return {"stack_id": "new-stack", "url": "https://new.example.invalid",
+                                    "source_digest": source_digest(project),
+                                    "source_index_sha256": "b" * 64}
+
+                        def retire(self, *_args):
+                            return None
+
+                    return FakeAdapter()
+
+                with patch.object(app, "static_adapter", side_effect=adapter):
+                    app.run_static_site(new_id)
+                self.assertEqual(app.jobs[new_id]["status"], "succeeded")
+                self.assertEqual(app.jobs[old_id]["deployment_state"], "deleted")
+                self.assertEqual(app.jobs[new_id]["result"]["url"], "https://new.example.invalid")
+
+    def test_failed_static_push_keeps_old_release_and_can_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(
+                Path(directory), AISettings("fixture-key", "fixture-model"),
+                aws_settings=AwsSettings("ap-northeast-2", expected_account="123456789012"),
+                monitor_interval=0, github_poll_interval=60,
+            )
+
+            def preflight(_adapter, project, _app_id, _attempt_id):
+                return {"source_digest": source_digest(project)}
+
+            with (
+                patch("application.github_deployments.resolve_revision",
+                      side_effect=[("main", FIRST), ("main", SECOND), ("main", SECOND)]),
+                patch("application.github_deployments.download_revision", side_effect=write_static_archive),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.unavailable_reason", return_value=None),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.preflight", preflight),
+                patch.object(app, "start_job_worker", return_value=True),
+            ):
+                created = app.create_github_deployment(
+                    "https://github.com/team/site", None, "site-app", ["auto"], True, True
+                )
+                old_id = created["deployment"]["id"]
+                old = app.jobs[old_id]
+                old.update(status="succeeded", static_stack_id="old-stack", result={
+                    "stack_id": "old-stack", "url": "https://old.example.invalid",
+                    "source_digest": old["source_digest"], "source_index_sha256": "a" * 64,
+                })
+                app.save(old_id)
+                new_id = app.poll_github_source(created["source_id"])["job_ids"][0]
+                with patch.object(app, "static_adapter") as adapter:
+                    adapter.return_value.deploy.side_effect = RuntimeError("failed before create")
+                    app.run_static_site(new_id)
+                self.assertEqual(app.jobs[new_id]["status"], "failed")
+                self.assertEqual(app.jobs[new_id]["deployment_state"], "deleted")
+                self.assertEqual(app.jobs[old_id]["deployment_state"], "active")
+                retry = app.poll_github_source(created["source_id"], retry_failed=True)
+                self.assertNotEqual(retry["job_ids"], [new_id])
+                self.assertEqual(app.jobs[retry["job_ids"][0]]["replaces_job_id"], old_id)
+
+    def test_static_to_server_push_requires_review_and_preserves_current_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(
+                Path(directory), AISettings("fixture-key", "fixture-model"),
+                aws_settings=AwsSettings("ap-northeast-2", expected_account="123456789012"),
+                monitor_interval=0, github_poll_interval=60,
+            )
+            with (
+                patch("application.github_deployments.resolve_revision",
+                      side_effect=[("main", FIRST), ("main", SECOND)]),
+                patch("application.github_deployments.download_revision",
+                      side_effect=lambda repo, commit, path: (
+                          write_static_archive(repo, commit, path) if commit == FIRST
+                          else write_app_archive(repo, commit, path)
+                      )),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.unavailable_reason", return_value=None),
+                patch("adapters.aws.static_site.AwsStaticSiteAdapter.preflight",
+                      side_effect=lambda project, *_: {"source_digest": source_digest(project)}),
+                patch.object(app, "start_job_worker", return_value=True),
+            ):
+                created = app.create_github_deployment(
+                    "https://github.com/team/site", None, "site-app", ["auto"], True, True
+                )
+                old_id = created["deployment"]["id"]
+                app.jobs[old_id].update(status="succeeded", static_stack_id="old-stack")
+                app.save(old_id)
+                with self.assertRaisesRegex(ValueError, "수동 확인"):
+                    app.poll_github_source(created["source_id"])
+                self.assertEqual(app.jobs[old_id]["deployment_state"], "active")
+                self.assertEqual(app.github_sources[created["source_id"]]["last_revision"], FIRST)
+                self.assertIn("수동 확인", app.github_sources[created["source_id"]]["last_error"])
+
     def test_restricts_urls_and_branch_names(self):
         self.assertEqual(
             parse_repository_url("https://github.com/team/demo.git/").url, "https://github.com/team/demo"

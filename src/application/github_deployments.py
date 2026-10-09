@@ -13,6 +13,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import extract_project, source_digest
 from application.github_source import (
@@ -33,6 +34,7 @@ from engine.application_ir import application_ir
 from engine.architecture_decision import architecture_decision
 from engine.compilation import compile_decision
 from engine.deployment_policy import deployment_policy
+from engine.static_site import assess_static_site
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
 
@@ -174,8 +176,31 @@ class GitHubDeploymentsMixin:
     def _reserve_single_github_job(
         self, project: Path, application_id: str, requested_target: str, public: bool, source: dict
     ) -> dict:
-        policy = deployment_policy(requested_target, public)
         profile = inspect_infrastructure(project)
+        subscription_id = source.get("subscription_id")
+        previous_target = None
+        if subscription_id:
+            with self.lock:
+                previous = [job for job in self.jobs.values()
+                            if job.get("application_id") == application_id
+                            and (job.get("github_source") or {}).get("subscription_id") == subscription_id
+                            and job.get("status") == "succeeded"
+                            and job.get("deployment_state", "active") == "active"]
+            if len({job["target"] for job in previous}) > 1:
+                raise ValueError("GitHub 앱에 여러 활성 백엔드가 있어 수동 확인이 필요합니다.")
+            previous_target = previous[0]["target"] if previous else None
+        static_selected = (
+            requested_target == "auto" and public
+            and assess_static_site(project, profile).status == "eligible"
+            and AwsStaticSiteAdapter.unavailable_reason(self.aws_settings) is None
+        )
+        if previous_target == "aws-s3-cloudfront" and not static_selected:
+            raise ValueError("GitHub 앱의 정적 구조 또는 AWS 설정이 바뀌었습니다. 기존 사이트를 유지하고 수동 확인이 필요합니다.")
+        if static_selected:
+            if previous_target and previous_target != "aws-s3-cloudfront":
+                raise ValueError("GitHub 앱의 실행 백엔드가 바뀌어 수동 확인이 필요합니다.")
+            return self._reserve_static_github_job(project, application_id, source)
+        policy = deployment_policy(requested_target, public)
         validate_infrastructure(profile, requested_target)
         if requested_target == "auto":
             available = ["local-docker"]
@@ -276,6 +301,29 @@ class GitHubDeploymentsMixin:
                 shutil.rmtree(directory, ignore_errors=True)
             raise
 
+    def _reserve_static_github_job(self, project: Path, application_id: str, source: dict) -> dict:
+        digest = source_digest(project)
+        job_id = uuid.uuid4().hex[:16]
+        directory = self.root / job_id
+        directory.mkdir()
+        (directory / ".uncommitted-upload").touch(mode=0o600)
+        try:
+            copied = directory / "source"
+            shutil.copytree(project, copied)
+            if source_digest(copied) != digest:
+                raise ValueError("GitHub 소스가 복사 중 변경됐습니다.")
+            self.create_static_job(
+                job_id, copied, application_id, requested_target="auto", source=source
+            )
+            self.clear_upload_marker(directory)
+            return {"id": job_id, "status": "running", "target": "aws-s3-cloudfront"}
+        except Exception:
+            with self.lock:
+                self.jobs.pop(job_id, None)
+            if not (directory / "job.json").exists():
+                shutil.rmtree(directory, ignore_errors=True)
+            raise
+
     def _reserve_github_revision(
         self,
         repository: GitHubRepository,
@@ -306,7 +354,9 @@ class GitHubDeploymentsMixin:
 
     def _start_github_jobs(self, result: dict, job_ids: list[str]):
         if len(job_ids) == 1:
-            self.start_job_worker(job_ids[0], self.run_agent)
+            with self.lock:
+                static_site = self.jobs[job_ids[0]].get("mode") == "static_site"
+            self.start_job_worker(job_ids[0], self.run_static_site if static_site else self.run_agent)
         else:
             self.start_group_worker(result["id"])
 
