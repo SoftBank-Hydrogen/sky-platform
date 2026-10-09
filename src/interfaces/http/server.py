@@ -1499,6 +1499,10 @@ def handler_for(app: App):
             self.wfile.write(payload)
 
         def do_GET(self):
+            if self.path == "/health":
+                # Service liveness only; user-app readiness is checked separately.
+                self.json_response(200, {"status": "ok"})
+                return
             if self.path == "/":
                 content = (ASSET_ROOT / "static/index.html").read_text()
                 payload = content.replace("__TOKEN__", app.token).encode()
@@ -2447,6 +2451,8 @@ def handler_for(app: App):
 
 def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     parser = argparse.ArgumentParser(description=f"{product_name} local development server")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="HTTP bind address; use 0.0.0.0 behind the service load balancer")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--state-dir", type=Path, default=Path(default_state_dir))
     parser.add_argument("--monitor-interval", type=int, default=300,
@@ -2461,14 +2467,14 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     with StateDirectoryLock(args.state_dir) as state_dir:
         app = App(state_dir, monitor_interval=args.monitor_interval,
                   github_poll_interval=args.github_poll_interval)
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(app))
+        server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
         stop_monitor = threading.Event()
         if app.monitor_interval:
             threading.Thread(target=app.monitor_loop, args=(stop_monitor,), daemon=True).start()
         if app.github_poll_interval:
             threading.Thread(target=app.github_poll_loop,
                              args=(stop_monitor, app.github_poll_interval), daemon=True).start()
-        print(f"{product_name}: http://127.0.0.1:{args.port}", flush=True)
+        print(f"{product_name}: http://{args.host}:{args.port}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

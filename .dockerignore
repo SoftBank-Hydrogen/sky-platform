@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!pyproject.toml
+!src/
+!src/**
+!tests/
+!tests/**
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+**/node_modules
+**/.sky

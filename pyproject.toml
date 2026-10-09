@@ -10,6 +10,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 sky-platform = "sky_platform:main"
+sky-service = "interfaces.service:main"
 
 [build-system]
 requires = ["setuptools>=69"]
