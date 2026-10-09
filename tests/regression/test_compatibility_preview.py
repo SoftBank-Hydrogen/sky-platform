@@ -124,6 +124,8 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertIn('session_affinity_behavior', ir['unknowns'])
         self.assertIn('target_websocket_round_trip', ir['unknowns'])
         self.assertEqual({item['status'] for item in payload['candidates']}, {'needs_review'})
+        self.assertTrue(all('PROTOCOL-WS-01' in item['unknown_rule_ids']
+                            and item['evidence_ids'] for item in payload['candidates']))
         self.assertTrue(all(not item['preview_eligible'] for item in payload['reports']))
         self.assertTrue(all(any(rule['rule_id'] == 'PROTOCOL-WS-01' and rule['status'] == 'unknown'
                                 for rule in report['constraint_results']) for report in payload['reports']))

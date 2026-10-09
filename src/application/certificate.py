@@ -8,6 +8,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from engine.architecture_decision import verify_architecture_decision
+from engine.deployment_policy import policy_from_record
+
 
 _SHA256 = re.compile(r'[a-f0-9]{64}')
 
@@ -61,12 +64,26 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
     decision_consistent = (not candidates or len(selected) == 1 and selected[0].get('id') == job.get('target'))
     if infrastructure.get('target') is not None and infrastructure['target'] != job.get('target'):
         decision_consistent = False
+    decision = job.get('architecture_decision')
+    validated_decision = None
+    if decision is not None:
+        try:
+            verify_architecture_decision(decision, ir,
+                                         policy_from_record(job.get('deployment_policy')), infrastructure)
+        except (ValueError, TypeError, KeyError):
+            decision_consistent = False
+        else:
+            validated_decision = decision
     return {
         'status': ('recorded' if ir and constraints and decision_consistent
                    and not mismatched_evidence and not (referenced_ids - evidence_ids)
                    and (ir_revision is None or ir_revision == source_revision) else 'incomplete'),
         'applies_to_uploaded_source_sha256': source_revision,
         'ir_source_revision': ir_revision,
+        'decision_id': validated_decision['decision_id'] if validated_decision else None,
+        'decision_revision': validated_decision['decision_revision'] if validated_decision else None,
+        'pending_verification_rule_ids': (validated_decision['pending_verification_rule_ids']
+                                           if validated_decision else []),
         'topology_status': ir.get('topology_status', 'unresolved'),
         'source_evidence': source_evidence,
         'unresolved_evidence_ids': sorted(referenced_ids - evidence_ids),

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from engine.application_ir import application_ir
+from engine.architecture_decision import architecture_decision, verify_architecture_decision
 from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
 from engine.deployment_policy import deployment_policy, policy_from_record
@@ -236,9 +237,15 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
         try:
             if self.cancel_requested(job_id):
                 raise DeploymentCancelled()
+            if 'architecture_decision' in job and 'deployment_policy' not in job:
+                raise ValueError('Architecture decision requires a deployment policy')
             if 'deployment_policy' in job:
-                policy_from_record(job['deployment_policy']).require(
+                policy = policy_from_record(job['deployment_policy'])
+                policy.require(
                     job.get('target'), (job.get('infrastructure_plan') or {}).get('compatibility', {}).get('access_mode'))
+                if 'architecture_decision' in job:
+                    verify_architecture_decision(job['architecture_decision'], job.get('application_ir'),
+                                                 policy, job.get('infrastructure_plan'))
             if (not isinstance(local, dict) or job.get('target') != 'aws-ecs-express'
                     or job.get('status') != 'running' or job.get('attempts') != 0
                     or not job.get('group_id') or local.get('group_id') != job['group_id']
@@ -403,6 +410,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                        'deployment_policy': policy.as_dict(),
                        'events': [], 'source_digest': digest,
                        'group_id': group_id, 'group_order': order}
+                job['architecture_decision'] = architecture_decision(
+                    job['application_ir'], policy, plan).as_dict()
                 if target == 'cloud-run':
                     job['cloud'] = asdict(self.cloud_settings)
                 elif target == 'aws-ecs-express':
@@ -628,11 +637,16 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             target = job.get("target", "local-docker")
             policy = (policy_from_record(job['deployment_policy'])
                       if 'deployment_policy' in job else None)
+            if 'architecture_decision' in job and policy is None:
+                raise ValueError('Architecture decision requires a deployment policy')
             if policy is not None:
                 policy.require(
                     target, (job.get('infrastructure_plan') or {}).get('compatibility', {}).get('access_mode'),
                     new_managed_database=job.get('postgres_creation_id') is not None,
                     data_migration=job.get('sqlite_conversion') is not None)
+                if 'architecture_decision' in job:
+                    verify_architecture_decision(job['architecture_decision'], job.get('application_ir'),
+                                                 policy, job.get('infrastructure_plan'))
             adapter_factory = LocalDockerAdapter
             if target == 'local-docker' and job.get('group_id'):
                 with self.lock:
@@ -2208,6 +2222,8 @@ def handler_for(app: App):
                                 "application_ir": application_ir(infrastructure_profile, digest).as_dict(),
                                 "deployment_policy": policy.as_dict(),
                                 "events": []}
+                            app.jobs[job_id]['architecture_decision'] = architecture_decision(
+                                app.jobs[job_id]['application_ir'], policy, infrastructure_plan).as_dict()
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion
                             if local_sqlite_binding is not None:

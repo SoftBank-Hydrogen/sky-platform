@@ -91,6 +91,10 @@ class StateRecoveryMixin:
                     raise ValueError("Invalid job record")
                 if 'deployment_policy' in job:
                     policy_from_record(job['deployment_policy'])
+                elif 'architecture_decision' in job:
+                    raise ValueError('Architecture decision requires a deployment policy')
+                if 'architecture_decision' in job and not isinstance(job['architecture_decision'], dict):
+                    raise ValueError('Invalid architecture decision record')
                 version = job.get('job_record_version', 0)
                 if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
                     raise ValueError('Unsupported job record version')

@@ -422,6 +422,7 @@ class PostgresServerTests(unittest.TestCase):
         job = self.app.jobs[response['id']]
         self.assertEqual(job['sqlite_conversion']['row_counts'], {'posts': 1})
         self.assertEqual(job['infrastructure_plan']['conversion_pending'], 'sqlite-to-postgresql')
+        self.assertTrue(job['architecture_decision']['unresolved_evidence_ids'])
         self.assertEqual(job['status'], 'provisioning')
         self.assertEqual(job['postgres_creation_id'], 'a' * 16)
         with self.assertRaisesRegex(ValueError, '이미 진행 중'):

@@ -82,6 +82,8 @@ class GitHubSourceTests(unittest.TestCase):
                                  ("local-docker",))
                 self.assertEqual(app.jobs[first_job]["application_ir"]["source_revision"],
                                  app.jobs[first_job]["source_digest"])
+                self.assertEqual(app.jobs[first_job]["architecture_decision"]["selected_candidate"],
+                                 "local-docker")
                 self.assertFalse(app.poll_github_source(source_id)["changed"])
                 app.jobs[first_job]["status"] = "succeeded"
                 app.jobs[first_job]["result"] = {"container": "sky-" + first_job + "-a1"}

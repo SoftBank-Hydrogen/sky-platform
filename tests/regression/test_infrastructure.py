@@ -117,6 +117,8 @@ class InfrastructureTests(unittest.TestCase):
             self.assertFalse(job['public'])
             self.assertEqual(job['infrastructure_plan']['compatibility']['access_mode'], 'loopback')
             self.assertEqual(job['application_ir']['topology_status'], 'unresolved')
+            self.assertEqual(job['architecture_decision']['selected_candidate'], 'local-docker')
+            self.assertEqual(job['architecture_decision']['source_revision'], job['source_digest'])
             access = next(item for item in job['infrastructure_plan']['compatibility']['constraint_results']
                           if item['rule_id'] == 'ACCESS-01')
             self.assertEqual(access['status'], 'satisfied')
