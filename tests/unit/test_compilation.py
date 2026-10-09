@@ -9,6 +9,7 @@ from engine.architecture_decision import architecture_decision
 from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
 from engine.compilation import compile_decision, verify_compilation
 from engine.deployment_policy import deployment_policy
+from engine.target_lowering import lower_target_configuration
 
 
 def test_compilation_binds_both_outputs_to_one_decision():
@@ -23,6 +24,15 @@ def test_compilation_binds_both_outputs_to_one_decision():
     }
     decision = architecture_decision(ir, policy, plan).as_dict()
     record = compile_decision(decision, ir, policy, plan)
+    assert record["schema_version"] == 2
+    assert record["target_plan"]["execution_configuration"] == {
+        "service": "source-bundle",
+        "replicas": 1,
+        "access_mode": "loopback",
+        "database_mode": "none",
+        "required_image_platform": None,
+        "port_source": "executable_deployment_plan",
+    }
     assert record == compile_decision(decision, ir, policy, plan)
     for output in (record["source_patch_plan"], record["deployment_ir"], record["target_plan"]):
         assert output["compilation_id"] == record["compilation_id"]
@@ -40,6 +50,65 @@ def test_compilation_binds_both_outputs_to_one_decision():
     changed["source_patch_plan"]["changes"].append({"path": "server.js"})
     with pytest.raises(ValueError, match="Stored compilation"):
         verify_compilation(changed, decision, ir, policy, plan)
+    changed_configuration = copy.deepcopy(record)
+    changed_configuration["target_plan"]["execution_configuration"]["database_mode"] = "create_rds"
+    with pytest.raises(ValueError, match="Stored compilation"):
+        verify_compilation(changed_configuration, decision, ir, policy, plan)
+    legacy = copy.deepcopy(record)
+    legacy.pop("schema_version")
+    legacy["target_plan"].pop("execution_configuration")
+    verify_compilation(legacy, decision, ir, policy, plan)
     plan["resources"].append("unplanned resource")
     with pytest.raises(ValueError, match="source and plan"):
         verify_compilation(record, decision, ir, policy, plan)
+
+
+@pytest.mark.parametrize(
+    "binding,resource,mode",
+    [
+        ("create", "new RDS PostgreSQL", "create_rds"),
+        ("existing", "existing RDS PostgreSQL", "existing_rds"),
+    ],
+)
+def test_lowering_requires_matching_database_resource(binding, resource, mode):
+    plan = {
+        "target": "aws-ecs-express",
+        "resources": [
+            "CloudFormation base stack",
+            "ECR repository",
+            "ECS Express service",
+            resource,
+            "one-off SQL migration task",
+        ],
+        "compatibility": {
+            "target": "aws-ecs-express",
+            "compatible": True,
+            "access_mode": "public",
+            "postgres_binding": True,
+        },
+        "database": {"binding": binding, "database_id": "sky-game"},
+    }
+    deployment_ir = {"services": [{"id": "source-bundle", "kind": "container_service", "replicas": 1}]}
+    lowered = lower_target_configuration(plan, deployment_ir)
+    assert lowered["database_mode"] == mode
+    assert lowered["required_image_platform"] == "linux/amd64"
+    plan["resources"].remove(resource)
+    with pytest.raises(ValueError, match="CV-09.*PostgreSQL resources"):
+        lower_target_configuration(plan, deployment_ir)
+
+
+def test_lowering_rejects_database_without_binding_and_extra_replicas():
+    plan = {
+        "target": "local-docker",
+        "resources": ["Docker image", "local container"],
+        "compatibility": {"target": "local-docker", "compatible": True, "access_mode": "loopback"},
+    }
+    deployment_ir = {"services": [{"id": "source-bundle", "kind": "container_service", "replicas": 1}]}
+    plan["sqlite_volume"] = {"mount_path": "/data"}
+    with pytest.raises(ValueError, match="CV-09.*no selected binding"):
+        lower_target_configuration(plan, deployment_ir)
+    plan["compatibility"]["local_sqlite_binding"] = True
+    assert lower_target_configuration(plan, deployment_ir)["database_mode"] == "sqlite_volume"
+    deployment_ir["services"][0]["replicas"] = 2
+    with pytest.raises(ValueError, match="CV-09.*selected service"):
+        lower_target_configuration(plan, deployment_ir)

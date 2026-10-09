@@ -7,13 +7,16 @@ import json
 
 from engine.architecture_decision import verify_architecture_decision
 from engine.deployment_policy import DeploymentPolicy
+from engine.target_lowering import lower_target_configuration
 
 
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def compile_decision(decision: dict, ir: dict, policy: DeploymentPolicy, infrastructure_plan: dict) -> dict:
+def _compile_decision(
+    decision: dict, ir: dict, policy: DeploymentPolicy, infrastructure_plan: dict, *, legacy: bool
+) -> dict:
     """Compile the known requirements; source edits remain pending until applied."""
     verify_architecture_decision(decision, ir, policy, infrastructure_plan)
     compilation_id = "comp-" + _digest(decision)[:16]
@@ -47,8 +50,13 @@ def compile_decision(decision: dict, ir: dict, policy: DeploymentPolicy, infrast
         "access_mode": infrastructure_plan["compatibility"]["access_mode"],
         "infrastructure_plan_digest": decision["target_plan_digest"],
     }
+    if not legacy:
+        target_plan["execution_configuration"] = lower_target_configuration(
+            infrastructure_plan, deployment_ir
+        )
     return {
         **common,
+        **({} if legacy else {"schema_version": 2}),
         "architecture_decision_id": decision["decision_id"],
         "source_patch_plan": patch_plan,
         "deployment_ir": deployment_ir,
@@ -56,10 +64,16 @@ def compile_decision(decision: dict, ir: dict, policy: DeploymentPolicy, infrast
     }
 
 
+def compile_decision(decision: dict, ir: dict, policy: DeploymentPolicy, infrastructure_plan: dict) -> dict:
+    """Compile a versioned plan with explicit, capability-checked target settings."""
+    return _compile_decision(decision, ir, policy, infrastructure_plan, legacy=False)
+
+
 def verify_compilation(
     record: dict, decision: dict, ir: dict, policy: DeploymentPolicy, infrastructure_plan: dict
 ) -> None:
     """Reject missing, mixed, or edited compilation outputs before adapter use."""
-    expected = compile_decision(decision, ir, policy, infrastructure_plan)
+    legacy = isinstance(record, dict) and "schema_version" not in record
+    expected = _compile_decision(decision, ir, policy, infrastructure_plan, legacy=legacy)
     if not isinstance(record, dict) or _digest(record) != _digest(expected):
         raise ValueError("Stored compilation does not match its architecture decision")

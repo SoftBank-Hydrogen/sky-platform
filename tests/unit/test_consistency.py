@@ -291,6 +291,33 @@ def test_aws_database_and_migration_resources_have_separate_adapter_capabilities
     assert check_target_resource_consistency(compilation, plan, target)["status"] == "pass"
 
 
+def test_versioned_target_configuration_must_match_lowered_plan():
+    target = "local-docker"
+    plan = {
+        "target": target,
+        "resources": list(TARGET_RESOURCES[target]),
+        "compatibility": {"target": target, "compatible": True, "access_mode": "loopback"},
+    }
+    compilation = {
+        "schema_version": 2,
+        "deployment_ir": {"services": [
+            {"id": "source-bundle", "kind": "container_service", "replicas": 1}
+        ]},
+        "target_plan": {
+            "target": target, "resources": list(plan["resources"]), "access_mode": "loopback",
+            "execution_configuration": {
+                "service": "source-bundle", "replicas": 1, "access_mode": "loopback",
+                "database_mode": "none", "required_image_platform": None,
+                "port_source": "executable_deployment_plan",
+            },
+        },
+    }
+    assert check_target_resource_consistency(compilation, plan, target)["status"] == "pass"
+    compilation["target_plan"]["execution_configuration"]["replicas"] = 2
+    with pytest.raises(ValueError, match="CV-09.*execution configuration"):
+        check_target_resource_consistency(compilation, plan, target)
+
+
 def test_applied_source_changes_must_follow_agent_file_scope(tmp_path):
     (tmp_path / "server.js").write_text("before")
     record = {"changes": [{"path": "server.js", "before_sha256": "a", "after_sha256": "b"}]}

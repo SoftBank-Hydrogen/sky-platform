@@ -16,6 +16,7 @@ from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import DATABASE_ENGINE_SOURCE, SQLITE_SOURCE, InfrastructureProfile
 from engine.deployment_policy import DeploymentPolicy
+from engine.target_lowering import lower_target_configuration
 
 
 class HealthResultMismatch(ValueError):
@@ -339,6 +340,10 @@ def check_target_resource_consistency(compilation: dict, infrastructure_plan: di
         or len(set(resources)) != len(resources)
     ):
         raise ValueError("CV-09: Target resources disagree with the compiled execution target")
+    if compilation.get("schema_version") == 2:
+        expected = lower_target_configuration(infrastructure_plan, compilation.get("deployment_ir"))
+        if target_plan.get("execution_configuration") != expected:
+            raise ValueError("CV-09: Compiled execution configuration disagrees with the target")
     try:
         capabilities = {item.id: item for item in target_capability_model(target).capabilities}
     except ValueError:
