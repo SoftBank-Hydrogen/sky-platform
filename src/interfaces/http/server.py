@@ -1291,14 +1291,17 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin):
             current['release_rollback_state'] = 'running'
             current['release_rollback_target_id'] = previous['id']
             current.pop('release_rollback_submitted', None)
+            current.pop('release_rollback_verification', None)
             current.pop('release_rollback_failed_at', None)
             self.save(job_id)
         threading.Thread(target=self.run_release_rollback, args=(job_id,), daemon=True).start()
 
-    def finish_release_rollback(self, job_id, previous_id):
+    def finish_release_rollback(self, job_id, previous_id, verification=None):
         with self.lock:
             current = self.jobs[job_id]
             previous = self.jobs[previous_id]
+            if verification is not None:
+                current['release_rollback_verification'] = verification
             current['release_rollback_state'] = 'succeeded'
             current['deployment_state'] = 'superseded'
             current['release_rollback_restore_pending'] = True
@@ -1323,9 +1326,21 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin):
         try:
             adapter = AwsExpressAdapter(lambda stage, message: self.event(job_id, stage, message),
                                         AwsSettings(**current['aws']))
-            adapter.rollback_release(current['result'], previous['result'],
-                                     (previous.get('plan') or {}).get('health_path', '/'), checkpoint)
-            self.finish_release_rollback(job_id, previous['id'])
+            outcome = adapter.rollback_release(current['result'], previous['result'],
+                                               (previous.get('plan') or {}).get('health_path', '/'), checkpoint)
+            verification = None
+            if (isinstance(outcome, dict) and outcome.get('state') == 'successful'
+                    and outcome.get('url') == previous['result'].get('url')
+                    and outcome.get('image') == previous['result'].get('image')
+                    and isinstance(outcome.get('service_deployment_arn'), str)):
+                verification = {
+                    'target_job_id': previous['id'], 'source': 'adapter',
+                    'service_deployment_arn': outcome['service_deployment_arn'],
+                    'image': outcome['image'], 'url': outcome['url'],
+                    'task_definition_arn': previous['result'].get('task_definition_arn'),
+                    'checked_at': datetime.now(timezone.utc).isoformat(),
+                }
+            self.finish_release_rollback(job_id, previous['id'], verification)
         except Exception as exc:
             self.event(job_id, 'release_rollback_failed', str(exc)[:300])
             with self.lock:
@@ -1393,7 +1408,14 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin):
             previous_snapshot['deployment_state'] = 'active'
             health = check_deployment(previous_snapshot)
             if health['healthy']:
-                self.finish_release_rollback(job_id, previous_snapshot['id'])
+                verification = {
+                    'target_job_id': previous_snapshot['id'], 'source': 'reconcile',
+                    'service_deployment_arn': arn,
+                    'image': previous_result['image'], 'url': previous_result['url'],
+                    'task_definition_arn': previous_task_arn,
+                    'checked_at': datetime.now(timezone.utc).isoformat(),
+                }
+                self.finish_release_rollback(job_id, previous_snapshot['id'], verification)
                 return {'reconciled': True, 'release': 'previous', 'health': health}
         if (active.get('primaryContainer', {}).get('image') == result['image']
                 and result.get('task_definition_arn')

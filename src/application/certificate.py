@@ -236,6 +236,52 @@ def _schema_migration_task_verified(job: dict, result: dict) -> bool:
     )
 
 
+def _release_rollback_verified(job: dict, result: dict) -> bool:
+    """Check the saved result of restoring a prior ECS release, not a rehearsal."""
+    record = job.get('release_rollback_verification')
+    if (not isinstance(record, dict) or job.get('target') != 'aws-ecs-express'
+            or job.get('release_rollback_state') != 'succeeded'
+            or job.get('deployment_state') != 'superseded'
+            or job.get('release_rollback_restore_pending') is not False
+            or job.get('release_rollback_submitted') is not True):
+        return False
+    account, region = result.get('account'), result.get('region')
+    service, owner = result.get('service'), result.get('owner_attempt')
+    target_id = job.get('release_rollback_target_id')
+    if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+            or not isinstance(region, str) or not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', region)
+            or not isinstance(owner, str) or not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', owner)
+            or service != 'sky-' + owner
+            or result.get('service_arn') != f'arn:aws:ecs:{region}:{account}:service/default/{service}'
+            or not isinstance(target_id, str) or not re.fullmatch(r'[a-f0-9]{16}', target_id)
+            or record.get('target_job_id') != target_id
+            or record.get('source') not in {'adapter', 'reconcile'}
+            or record.get('url') != result.get('url')
+            or record.get('image') == result.get('image')
+            or not isinstance(result.get('images'), list)
+            or record.get('image') not in result['images']):
+        return False
+    repository = f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed'
+    deployment_prefix = f'arn:aws:ecs:{region}:{account}:service-deployment/default/{service}/'
+    definition_prefix = f'arn:aws:ecs:{region}:{account}:task-definition/'
+    deployment = record.get('service_deployment_arn')
+    definition = record.get('task_definition_arn')
+    checked_at = record.get('checked_at')
+    try:
+        timestamp = datetime.fromisoformat(checked_at)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(record.get('image'), str)
+        and re.fullmatch(re.escape(repository) + r':[a-f0-9]{16}-a[1-3]', record['image'])
+        and isinstance(deployment, str) and deployment.startswith(deployment_prefix)
+        and re.fullmatch(r'[A-Za-z0-9_-]+', deployment.removeprefix(deployment_prefix))
+        and isinstance(definition, str) and definition.startswith(definition_prefix)
+        and re.fullmatch(r'[A-Za-z0-9_-]+:\d+', definition.removeprefix(definition_prefix))
+        and timestamp.tzinfo is not None
+    )
+
+
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
@@ -295,6 +341,16 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         {'name': 'rollback_rehearsal', 'status': 'unverified',
          'detail': '롤백을 실행하고 원래 릴리스로 복귀한 리허설 결과가 없습니다.'},
     ]
+    if job.get('release_rollback_state') is not None or job.get('release_rollback_verification') is not None:
+        rollback_status = ('passed' if _release_rollback_verified(job, result) else
+                           'failed' if job.get('release_rollback_state') == 'failed' else 'unverified')
+        checks.append({'name': 'release_rollback_execution', 'status': rollback_status,
+                       'checked_at': ((job.get('release_rollback_verification') or {}).get('checked_at')
+                                      if rollback_status == 'passed' else None),
+                       'detail': ('이전 ECS 릴리스 복귀와 HTTP 확인 기록이 작업에 남아 있습니다. 현재 상태의 재확인은 아닙니다.'
+                                  if rollback_status == 'passed' else
+                                  '이전 릴리스 복귀에 실패했습니다.' if rollback_status == 'failed' else
+                                  '이전 릴리스 복귀의 검증 결과가 확정되지 않았습니다.')})
     if latest_health:
         checks.append({'name': 'latest_health',
                        'status': 'passed' if latest_health.get('healthy') is True else 'failed',
@@ -379,7 +435,8 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'] + unresolved_checks,
         'rollback': {'previous_job_id': job.get('replaces_job_id'),
-                     'state': job.get('release_rollback_state'), 'rehearsed': False},
+                     'state': job.get('release_rollback_state'), 'rehearsed': False,
+                     'target_job_id': job.get('release_rollback_target_id')},
         'cost': {'estimated_total': None, 'actual_total': None,
                  'detail': '이 작업 전체의 비용 견적과 실제 청구액은 기록되지 않았습니다.'},
         'limitations': ['서버의 작업 기록에서 생성한 읽기 전용 스냅샷입니다.',

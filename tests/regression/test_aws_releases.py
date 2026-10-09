@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from application.analysis import AISettings
+from application.certificate import deployment_certificate
 from adapters.aws.ecs import AwsSettings
 from application.deployment_core import DeploymentPlan
 from interfaces.http.server import App, handler_for
@@ -370,6 +371,40 @@ class AwsReleaseTests(unittest.TestCase):
             self.assertEqual(app.jobs[old_id]['result']['images'], app.jobs[new_id]['result']['images'])
             restarted = App(root, AISettings('fixture-key', 'fixture-model'), aws_settings=AwsSettings(REGION))
             self.assertEqual(restarted.jobs[old_id]['deployment_state'], 'active')
+
+    def test_release_rollback_evidence_survives_restart_without_claiming_rehearsal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app, old_id, new_id = self.completed_release(root)
+            old_result = app.jobs[old_id]['result']
+            deployment_arn = f'arn:aws:ecs:{REGION}:{ACCOUNT}:service-deployment/default/{SERVICE}/rollback'
+            with patch('interfaces.http.server.threading.Thread'):
+                app.start_release_rollback(new_id)
+
+            def rollback(_adapter, _current, _previous, _health_path, checkpoint):
+                checkpoint(release_rollback_submitted=True,
+                           release_rollback_previous_deployment_arn='old-deployment')
+                return {'state': 'successful', 'service_deployment_arn': deployment_arn,
+                        'image': old_result['image'], 'url': old_result['url']}
+
+            with patch('interfaces.http.server.AwsExpressAdapter.rollback_release', autospec=True,
+                       side_effect=rollback):
+                app.run_release_rollback(new_id)
+            restarted = App(root, AISettings('fixture-key', 'fixture-model'),
+                            aws_settings=AwsSettings(REGION))
+            job = restarted.jobs[new_id]
+
+            def statuses():
+                return {item['name']: item['status'] for item in deployment_certificate(job)['verification']}
+
+            self.assertEqual(statuses()['release_rollback_execution'], 'passed')
+            self.assertEqual(statuses()['rollback_rehearsal'], 'unverified')
+            self.assertFalse(deployment_certificate(job)['rollback']['rehearsed'])
+            job['release_rollback_verification']['image'] = REPOSITORY + ':other-a1'
+            self.assertEqual(statuses()['release_rollback_execution'], 'unverified')
+            job['release_rollback_verification']['image'] = old_result['image']
+            job['release_rollback_state'] = 'needs_attention'
+            self.assertEqual(statuses()['release_rollback_execution'], 'unverified')
 
     def test_restart_preserves_release_after_prior_rollback_and_redeploy(self):
         for successor_id, successor_state in [('0' * 16, 'active'), ('f' * 16, 'deleted')]:
