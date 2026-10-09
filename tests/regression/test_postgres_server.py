@@ -392,6 +392,8 @@ class PostgresServerTests(unittest.TestCase):
         job = self.app.jobs[payload['id']]
         self.assertEqual(job['infrastructure_plan']['database'],
                          {'binding': 'create', 'database_id': 'sky-demo-app'})
+        self.assertTrue(job['deployment_policy']['new_managed_database_approved'])
+        self.assertFalse(job['deployment_policy']['allow_data_migration'])
 
     def test_sqlite_upload_requires_explicit_conversion_and_preflight_before_rds_start(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -420,6 +422,7 @@ class PostgresServerTests(unittest.TestCase):
         job = self.app.jobs[response['id']]
         self.assertEqual(job['sqlite_conversion']['row_counts'], {'posts': 1})
         self.assertEqual(job['infrastructure_plan']['conversion_pending'], 'sqlite-to-postgresql')
+        self.assertTrue(job['architecture_decision']['unresolved_evidence_ids'])
         self.assertEqual(job['status'], 'provisioning')
         self.assertEqual(job['postgres_creation_id'], 'a' * 16)
         with self.assertRaisesRegex(ValueError, '이미 진행 중'):
@@ -1113,6 +1116,8 @@ class PostgresServerTests(unittest.TestCase):
         planner.assert_not_called()
         job = self.app.jobs[payload['id']]
         self.assertEqual(job['requested_target'], 'auto')
+        self.assertEqual(job['deployment_policy']['selection_mode'], 'auto_target')
+        self.assertFalse(job['deployment_policy']['new_managed_database_approved'])
         self.assertEqual(job['target'], 'aws-ecs-express')
         self.assertEqual(job['infrastructure_plan']['planner'], 'policy')
         self.assertEqual(job['infrastructure_plan']['database']['binding'], 'existing')

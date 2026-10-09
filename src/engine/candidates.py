@@ -43,6 +43,7 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
     candidates = []
     for report in reports:
         violations = [result for result in report["constraint_results"] if result["status"] == "violated"]
+        unknown_rules = [result for result in report["constraint_results"] if result["status"] == "unknown"]
         database_binding_only = (
             report["target"] == "aws-ecs-express"
             and report["database_engines"] == ["postgresql"]
@@ -78,8 +79,18 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
                 "status": status,
                 "reasons": reasons,
                 "violated_rule_ids": [result["rule_id"] for result in violations],
+                "unknown_rule_ids": [result["rule_id"] for result in unknown_rules],
+                "reason_codes": sorted(
+                    {result["rule_id"] for result in (*violations, *unknown_rules)}
+                    | ({"SETUP_REQUIRED"} if status == "requires_setup" else set())
+                    | ({"DATABASE_BINDING_REQUIRED"} if status == "requires_database_binding" else set())
+                ),
                 "evidence_ids": sorted(
-                    {identifier for result in violations for identifier in result["evidence_ids"]}
+                    {
+                        identifier
+                        for result in (*violations, *unknown_rules)
+                        for identifier in result["evidence_ids"]
+                    }
                 ),
                 "cost_estimate": None,
                 "selected": False,

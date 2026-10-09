@@ -54,6 +54,10 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(payload['application_ir']['schema_version'], 2)
         self.assertEqual(payload['application_ir']['source_revision'], payload['source_digest'])
         self.assertEqual(payload['application_ir']['unknowns'], ('component_topology', 'statelessness'))
+        self.assertEqual(payload['deployment_policy']['selection_mode'], 'auto_target')
+        self.assertTrue(payload['deployment_policy']['public_access_allowed'])
+        self.assertIn('aws-ecs-express', payload['deployment_policy']['allowed_targets'])
+        self.assertIsNone(payload['deployment_policy']['max_monthly_cost_usd'])
         capability_models = payload['capability_models']
         self.assertEqual(set(capability_models), set(reports))
         self.assertTrue(all(model['schema_version'] == 1 for model in capability_models.values()))
@@ -89,6 +93,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(evidence_ids)
         self.assertEqual({item['path'] for item in ir['evidence'] if item['id'] in evidence_ids},
                          {'package.json', 'server.js'})
+        self.assertTrue(all(item['source']['revision'] == ir['source_revision']
+                            and item['source']['line'] is None
+                            and item['verified_by'] == () for item in ir['evidence']))
         for report in payload['reports']:
             decision = next(item for item in report['constraint_results']
                             if item['rule_id'] == 'DATA-SQLITE-01')
@@ -117,6 +124,8 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertIn('session_affinity_behavior', ir['unknowns'])
         self.assertIn('target_websocket_round_trip', ir['unknowns'])
         self.assertEqual({item['status'] for item in payload['candidates']}, {'needs_review'})
+        self.assertTrue(all('PROTOCOL-WS-01' in item['unknown_rule_ids']
+                            and item['evidence_ids'] for item in payload['candidates']))
         self.assertTrue(all(not item['preview_eligible'] for item in payload['reports']))
         self.assertTrue(all(any(rule['rule_id'] == 'PROTOCOL-WS-01' and rule['status'] == 'unknown'
                                 for rule in report['constraint_results']) for report in payload['reports']))

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from application.deployment_core import DeploymentPlan
 from adapters.aws.postgres import PostgresRequest
+from engine.deployment_policy import policy_from_record
 
 
 JOB_RECORD_VERSION = 1
@@ -88,6 +89,12 @@ class StateRecoveryMixin:
                 job = json.loads(path.read_text())
                 if not isinstance(job, dict):
                     raise ValueError("Invalid job record")
+                if 'deployment_policy' in job:
+                    policy_from_record(job['deployment_policy'])
+                elif 'architecture_decision' in job:
+                    raise ValueError('Architecture decision requires a deployment policy')
+                if 'architecture_decision' in job and not isinstance(job['architecture_decision'], dict):
+                    raise ValueError('Invalid architecture decision record')
                 version = job.get('job_record_version', 0)
                 if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
                     raise ValueError('Unsupported job record version')

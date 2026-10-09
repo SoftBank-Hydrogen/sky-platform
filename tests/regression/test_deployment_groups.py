@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from adapters.aws.ecs import AwsSettings
 from application.analysis import AISettings
+from application.certificate import deployment_certificate
 from application.deployment_core import analyze
 from interfaces.http.server import App, handler_for
 
@@ -50,6 +51,18 @@ class DeploymentGroupTests(unittest.TestCase):
                          ['local-docker', 'aws-ecs-express'])
         self.assertEqual(self.app.jobs[first['job_id']]['source_digest'],
                          self.app.jobs[second['job_id']]['source_digest'])
+        self.assertEqual(self.app.jobs[first['job_id']]['deployment_policy']['allowed_targets'],
+                         ('local-docker', 'aws-ecs-express'))
+        self.assertEqual(self.app.jobs[first['job_id']]['deployment_policy'],
+                         self.app.jobs[second['job_id']]['deployment_policy'])
+        self.assertEqual(self.app.jobs[first['job_id']]['architecture_decision']['source_revision'],
+                         self.app.jobs[first['job_id']]['source_digest'])
+        self.assertEqual(self.app.jobs[second['job_id']]['architecture_decision']['selected_candidate'],
+                         'aws-ecs-express')
+        trace = deployment_certificate(self.app.jobs[first['job_id']])['decision_trace']
+        self.assertEqual(trace['status'], 'recorded')
+        self.assertEqual(trace['decision_id'],
+                         self.app.jobs[first['job_id']]['architecture_decision']['decision_id'])
         calls = []
         def run(job_id):
             calls.append(job_id)
@@ -67,6 +80,38 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(result['targets'][1]['url'], 'https://example.test')
         self.app.jobs[second['job_id']]['deployment_state'] = 'deleted'
         self.assertIsNone(self.app.deployment_group(group['id'])['targets'][1]['url'])
+
+    def test_changed_target_is_blocked_before_agent_runs(self):
+        group = self.create()
+        job_id = group['targets'][0]['job_id']
+        self.app.jobs[job_id]['target'] = 'cloud-run'
+        self.app.save(job_id)
+        with patch('interfaces.http.server.DeploymentAgent.run') as run, \
+                patch.object(self.app, 'start_group_worker'):
+            self.app.run_agent(job_id)
+        run.assert_not_called()
+        self.assertEqual(self.app.jobs[job_id]['status'], 'failed')
+        self.assertEqual(self.app.jobs[job_id]['attempts'], 0)
+        self.assertIn('허용 범위', self.app.jobs[job_id]['events'][-1]['message'])
+
+    def test_changed_architecture_decision_is_blocked_before_agent_runs(self):
+        group = self.create()
+        job_id = group['targets'][0]['job_id']
+        self.app.jobs[job_id]['architecture_decision']['decision_id'] = 'D-' + '0' * 16
+        self.app.save(job_id)
+        restored = App(self.app.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.app.aws_settings, monitor_interval=0)
+        self.assertIn(job_id, restored.jobs)
+        trace = deployment_certificate(restored.jobs[job_id])['decision_trace']
+        self.assertEqual(trace['status'], 'incomplete')
+        self.assertIsNone(trace['decision_id'])
+        with patch('interfaces.http.server.DeploymentAgent.run') as run, \
+                patch.object(restored, 'start_group_worker'):
+            restored.run_agent(job_id)
+        run.assert_not_called()
+        self.assertEqual(restored.jobs[job_id]['status'], 'failed')
+        self.assertEqual(restored.jobs[job_id]['attempts'], 0)
+        self.assertIn('Stored architecture decision', restored.jobs[job_id]['events'][-1]['message'])
 
     def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
         group = self.create()

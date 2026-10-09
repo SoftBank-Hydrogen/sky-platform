@@ -6,15 +6,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from engine.compatibility import InfrastructureProfile, evidence_id
-
-
-@dataclass(frozen=True)
-class SourceEvidence:
-    id: str
-    path: str
-    signal: str
-    origin: str = "source_static"
-    status: str = "confirmed"
+from engine.evidence_record import EvidenceRecord, source_evidence
 
 
 @dataclass(frozen=True)
@@ -45,7 +37,7 @@ class ApplicationIR:
     source_revision: str
     components: tuple[Component, ...]
     requirements: tuple[Requirement, ...]
-    evidence: tuple[SourceEvidence, ...]
+    evidence: tuple[EvidenceRecord, ...]
     database_engines: tuple[str, ...]
     declared_image_platform: str | None
     topology_status: str = "unresolved"
@@ -53,7 +45,7 @@ class ApplicationIR:
     unknowns: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        return {**asdict(self), "evidence": tuple(item.as_dict() for item in self.evidence)}
 
 
 def application_ir(profile: InfrastructureProfile, source_revision: str) -> ApplicationIR:
@@ -70,14 +62,14 @@ def application_ir(profile: InfrastructureProfile, source_revision: str) -> Appl
         ids = []
         for path in by_requirement.get(name, ()):
             identifier = evidence_id(name, path)
-            evidence.append(SourceEvidence(identifier, path, name))
+            evidence.append(source_evidence(identifier, path, name, source_revision))
             ids.append(identifier)
         requirements.append(Requirement("R-" + name, name, tuple(ids)))
     hypotheses = []
     for name, paths in profile.source_signals:
         ids = tuple(evidence_id(name, path) for path in paths)
         evidence.extend(
-            SourceEvidence(identifier, path, name, status="inferred")
+            source_evidence(identifier, path, name, source_revision, inferred=True)
             for identifier, path in zip(ids, paths, strict=True)
         )
         hypotheses.append(Hypothesis("H-" + name, name, ids))

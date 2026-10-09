@@ -8,6 +8,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from engine.architecture_decision import verify_architecture_decision
+from engine.deployment_policy import policy_from_record
+
 
 _SHA256 = re.compile(r'[a-f0-9]{64}')
 
@@ -16,26 +19,74 @@ def _digest(value: object) -> str | None:
     return value if isinstance(value, str) and _SHA256.fullmatch(value) else None
 
 
+def _items(value: object) -> list | tuple:
+    return value if isinstance(value, (list, tuple)) else ()
+
+
 def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dict:
     """Expose recorded decisions, not unverified source or cloud claims."""
     ir = job.get('application_ir') if isinstance(job.get('application_ir'), dict) else {}
-    evidence = ir.get('evidence') if isinstance(ir.get('evidence'), list) else []
-    requirements = ir.get('requirements') if isinstance(ir.get('requirements'), list) else []
-    hypotheses = ir.get('hypotheses') if isinstance(ir.get('hypotheses'), list) else []
-    constraints = compatibility.get('constraint_results')
-    constraints = constraints if isinstance(constraints, list) else []
-    candidates = infrastructure.get('candidates')
-    candidates = candidates if isinstance(candidates, list) else []
+    evidence = _items(ir.get('evidence'))
+    requirements = _items(ir.get('requirements'))
+    hypotheses = _items(ir.get('hypotheses'))
+    constraints = _items(compatibility.get('constraint_results'))
+    candidates = _items(infrastructure.get('candidates'))
+    source_revision = _digest(job.get('source_digest'))
+    ir_revision = _digest(ir.get('source_revision'))
+    source_evidence = []
+    mismatched_evidence = False
+    for item in evidence:
+        if not isinstance(item, dict) or not isinstance(item.get('id'), str):
+            continue
+        source = item.get('source') if isinstance(item.get('source'), dict) else {}
+        path = item.get('path') or source.get('path')
+        signal = item.get('signal') or item.get('interpretation') or item.get('observation')
+        if not isinstance(path, str) or not isinstance(signal, str):
+            continue
+        record_revision = source.get('revision')
+        if record_revision is not None and record_revision != source_revision:
+            mismatched_evidence = True
+            continue
+        source_evidence.append({
+            'id': item['id'], 'path': path, 'signal': signal,
+            'origin': item.get('origin'), 'status': item.get('status', 'confirmed'),
+            'source_revision': _digest(record_revision),
+        })
+    evidence_ids = {item['id'] for item in source_evidence}
+    referenced_ids = {
+        identifier
+        for record in (*requirements, *hypotheses, *constraints)
+        if isinstance(record, dict)
+        for identifier in _items(record.get('evidence_ids'))
+        if isinstance(identifier, str)
+    }
+    selected = [item for item in candidates if isinstance(item, dict) and item.get('selected') is True]
+    decision_consistent = (not candidates or len(selected) == 1 and selected[0].get('id') == job.get('target'))
+    if infrastructure.get('target') is not None and infrastructure['target'] != job.get('target'):
+        decision_consistent = False
+    decision = job.get('architecture_decision')
+    validated_decision = None
+    if decision is not None:
+        try:
+            verify_architecture_decision(decision, ir,
+                                         policy_from_record(job.get('deployment_policy')), infrastructure)
+        except (ValueError, TypeError, KeyError):
+            decision_consistent = False
+        else:
+            validated_decision = decision
     return {
-        'status': 'recorded' if ir and constraints else 'incomplete',
-        'applies_to_uploaded_source_sha256': _digest(job.get('source_digest')),
+        'status': ('recorded' if ir and constraints and decision_consistent
+                   and not mismatched_evidence and not (referenced_ids - evidence_ids)
+                   and (ir_revision is None or ir_revision == source_revision) else 'incomplete'),
+        'applies_to_uploaded_source_sha256': source_revision,
+        'ir_source_revision': ir_revision,
+        'decision_id': validated_decision['decision_id'] if validated_decision else None,
+        'decision_revision': validated_decision['decision_revision'] if validated_decision else None,
+        'pending_verification_rule_ids': (validated_decision['pending_verification_rule_ids']
+                                           if validated_decision else []),
         'topology_status': ir.get('topology_status', 'unresolved'),
-        'source_evidence': [
-            {'id': item['id'], 'path': item['path'], 'signal': item['signal'],
-             'status': item.get('status', 'confirmed')}
-            for item in evidence if isinstance(item, dict)
-            and all(isinstance(item.get(key), str) for key in ('id', 'path', 'signal'))
-        ],
+        'source_evidence': source_evidence,
+        'unresolved_evidence_ids': sorted(referenced_ids - evidence_ids),
         'requirements': [
             {'id': item['id'], 'kind': item['kind'], 'evidence_ids': item.get('evidence_ids', [])}
             for item in requirements if isinstance(item, dict)
@@ -147,12 +198,16 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                        'detail': '이 앱의 DB 기록을 재시작 전후에 대조한 작업별 증거가 없습니다.'})
 
     ir = job.get('application_ir')
-    hypotheses = ir.get('hypotheses') or [] if isinstance(ir, dict) else []
+    hypotheses = _items(ir.get('hypotheses')) if isinstance(ir, dict) else ()
     if any(item.get('kind') == 'websocket' for item in hypotheses if isinstance(item, dict)):
+        websocket_evidence_ids = sorted({identifier for item in hypotheses
+            if isinstance(item, dict) and item.get('kind') == 'websocket'
+            for identifier in _items(item.get('evidence_ids')) if isinstance(identifier, str)})
         websocket = job.get('websocket_verification') or {}
         recorded = websocket.get('status') if completed else None
         checks.append({'name': 'websocket_round_trip',
                        'status': recorded if recorded in {'passed', 'failed'} else 'unverified',
+                       'source_evidence_ids': websocket_evidence_ids,
                        'checked_at': websocket.get('checked_at') if recorded else None,
                        'detail': ('실제 대상에서 sky.probe nonce 왕복을 확인한 당시 기록입니다.'
                                   if recorded == 'passed' else
@@ -162,6 +217,12 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes
                             if isinstance(item, dict) and isinstance(item.get('path'), str)})
+    decision_trace = _decision_trace(job, infrastructure, compatibility)
+    valid_evidence_ids = {item['id'] for item in decision_trace['source_evidence']}
+    for check in checks:
+        if 'source_evidence_ids' in check:
+            check['source_evidence_ids'] = [identifier for identifier in check['source_evidence_ids']
+                                            if identifier in valid_evidence_ids]
     return {
         'schema_version': 1,
         'kind': 'sky-record-snapshot',
@@ -183,7 +244,7 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                         rehearsal.get('image_id') if rehearsal_passed else None),
                      'promoted_from_job_id': promotion.get('source_job_id') if promoted else None,
                      'registry_manifest_digest': registry_digest},
-        'decision_trace': _decision_trace(job, infrastructure, compatibility),
+        'decision_trace': decision_trace,
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],
         'rollback': {'previous_job_id': job.get('replaces_job_id'),
