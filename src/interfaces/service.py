@@ -32,5 +32,6 @@ def main():
     # Preserve the existing local CLI; the container always uses this guard.
     from interfaces.cli import main as run_platform
 
-    sys.argv = [sys.argv[0], "--state-dir", str(root), *server_args]
+    # The validated path must win even over abbreviated flags in the old parser.
+    sys.argv = [sys.argv[0], *server_args, "--state-dir", str(root)]
     run_platform()

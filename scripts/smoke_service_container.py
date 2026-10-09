@@ -118,6 +118,9 @@ def main():
             "0",
             "--github-poll-interval",
             "0",
+            # Forwarded server flags must not override the guarded state path.
+            "--state-d",
+            "/tmp/sky-smoke-unverified-state",
         ]
         base = f"http://127.0.0.1:{port}"
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -175,6 +178,13 @@ def main():
             )
             docker(*args)
             ready()
+            docker(
+                "exec",
+                name,
+                "python",
+                "-c",
+                "from pathlib import Path; assert not Path('/tmp/sky-smoke-unverified-state').exists()",
+            )
             assert not request("/api/config")["ai_available"]
             docker("exec", name, "aws", "--version")
             docker("exec", name, "docker", "--version")
