@@ -14,6 +14,11 @@ from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 
+def owned_local_result(_project, _plan, attempt_id, _environment):
+    return {'url': 'http://127.0.0.1:12345', 'container': f'sky-{attempt_id}',
+            'image': f'sky/{attempt_id}:latest'}
+
+
 class OpenAIWireTests(unittest.TestCase):
     def test_compacted_history_continues_repair_and_deploys_once(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -24,8 +29,7 @@ class OpenAIWireTests(unittest.TestCase):
                 lambda *_: None, lambda **update: changes.append(update), adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, compact_after_first=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
-                    patch.object(LocalDockerAdapter, 'deploy', return_value={
-                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                    patch.object(LocalDockerAdapter, 'deploy', side_effect=owned_local_result) as deploy:
                 result = DeploymentAgent(OpenAIDeployAgent(AISettings(
                     'wire-fixture-key', 'wire-fixture-model')), tools).run()
             fixture.assert_complete()
@@ -44,8 +48,7 @@ class OpenAIWireTests(unittest.TestCase):
                 lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, python_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
-                    patch.object(LocalDockerAdapter, 'deploy', return_value={
-                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                    patch.object(LocalDockerAdapter, 'deploy', side_effect=owned_local_result) as deploy:
                 result = DeploymentAgent(OpenAIDeployAgent(AISettings(
                     'wire-fixture-key', 'wire-fixture-model')), tools).run()
             fixture.assert_complete()
@@ -63,8 +66,7 @@ class OpenAIWireTests(unittest.TestCase):
                 lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, asgi_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
-                    patch.object(LocalDockerAdapter, 'deploy', return_value={
-                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                    patch.object(LocalDockerAdapter, 'deploy', side_effect=owned_local_result) as deploy:
                 result = DeploymentAgent(OpenAIDeployAgent(AISettings(
                     'wire-fixture-key', 'wire-fixture-model')), tools).run()
             fixture.assert_complete()
@@ -84,8 +86,7 @@ class OpenAIWireTests(unittest.TestCase):
                 lambda *_: None, lambda **_: None, adapter_factory=LocalDockerAdapter)
             fixture = ResponsesWireFixture(planner_requests=0, wsgi_generated=True)
             with patch('urllib.request.build_opener', return_value=fixture), \
-                    patch.object(LocalDockerAdapter, 'deploy', return_value={
-                        'url': 'http://127.0.0.1:12345'}) as deploy:
+                    patch.object(LocalDockerAdapter, 'deploy', side_effect=owned_local_result) as deploy:
                 result = DeploymentAgent(OpenAIDeployAgent(AISettings(
                     'wire-fixture-key', 'wire-fixture-model')), tools).run()
             fixture.assert_complete()
@@ -106,7 +107,7 @@ class OpenAIWireTests(unittest.TestCase):
                     bundle.write(source, source.name)
             fixture = ResponsesWireFixture(expected_model=DEFAULT_AI_MODEL)
             with patch('urllib.request.build_opener', return_value=fixture), \
-                    patch.object(LocalDockerAdapter, 'deploy', return_value={'url': 'http://127.0.0.1:12345'}) as deploy, \
+                    patch.object(LocalDockerAdapter, 'deploy', side_effect=owned_local_result) as deploy, \
                     patch('interfaces.http.server.threading.Thread') as worker, \
                     patch.dict('os.environ', {'OPENAI_API_KEY': 'wire-fixture-key',
                                               'SKY_AI_MODEL': ''}):

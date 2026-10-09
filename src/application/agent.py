@@ -432,7 +432,7 @@ class DeploymentTools:
         adapter = self.adapter_factory(self.event)
         self.event("deploying", f"실제 배포 시도 {self.attempts}/3")
         try:
-            if self.target == "onprem-compose":
+            if self.target in {"local-docker", "onprem-compose"}:
                 self.result = execute(ExecutionRequest(
                     target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
                     environment=self.environment, sqlite_binding=self.local_sqlite_binding,

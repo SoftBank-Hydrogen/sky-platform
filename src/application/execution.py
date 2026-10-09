@@ -62,7 +62,7 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
     if request.remote_host and not capabilities.remote_host:
         raise ValueError("선택한 배포 대상은 원격 호스트를 지원하지 않습니다.")
     result = state.adapter.deploy(request.project, request.plan, request.attempt_id, request.environment)
-    if request.target == "onprem-compose":
+    if request.target in {"local-docker", "onprem-compose"}:
         expected = f"sky-{request.attempt_id}"
         url = result.get("url") if isinstance(result, dict) else None
         try:
@@ -83,15 +83,18 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
         if (
             not local_url
             or result.get("container") != expected
-            or result.get("compose_project") != expected
             or result.get("image") != f"sky/{request.attempt_id}:latest"
+        ):
+            raise ValueError("로컬 배포 결과의 소유권 또는 루프백 주소가 올바르지 않습니다.")
+        if request.target == "onprem-compose" and (
+            result.get("compose_project") != expected
             or not isinstance(result.get("compose_sha256"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", result["compose_sha256"])
         ):
-            raise ValueError("Compose 배포 결과의 소유권 또는 루프백 주소가 올바르지 않습니다.")
+            raise ValueError("Compose 배포 결과의 소유권 또는 설정 해시가 올바르지 않습니다.")
         if request.sqlite_binding and (
             result.get("sqlite_volume") != request.sqlite_binding.get("volume_name")
             or result.get("sqlite_mount") != request.sqlite_binding.get("mount_path")
         ):
-            raise ValueError("Compose 배포 결과의 SQLite 볼륨이 요청과 다릅니다.")
+            raise ValueError("로컬 배포 결과의 SQLite 볼륨이 요청과 다릅니다.")
     return result

@@ -143,7 +143,8 @@ class AgentResumeTests(unittest.TestCase):
                 seen_environment = []
                 def deployed(_project, _plan, _attempt_id, environment):
                     seen_environment.append(dict(environment))
-                    return {'url': 'http://127.0.0.1:12345'}
+                    return {'url': 'http://127.0.0.1:12345',
+                            'container': f'sky-{_attempt_id}', 'image': f'sky/{_attempt_id}:latest'}
                 deploy.side_effect = deployed
                 restored.run_agent(job_id, supplied)
                 self.assertEqual(supplied, {})
