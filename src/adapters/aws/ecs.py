@@ -141,6 +141,7 @@ class AwsExpressAdapter:
             target='aws-ecs-express',
             access_modes=frozenset(declared['access_modes']),
             postgresql_binding=declared['postgresql_binding'],
+            remote_host=declared['remote_host'],
         )
 
     def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None,

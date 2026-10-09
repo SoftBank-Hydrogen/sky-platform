@@ -123,6 +123,10 @@ TARGET_RESOURCES = {
 TARGET_CAPABILITIES = {
     "local-docker": {
         "postgresql_binding": False,
+        "existing_rds_binding": False,
+        "new_rds_provisioning": False,
+        "sqlite_volume": True,
+        "remote_host": False,
         "durable_files": False,
         "background_worker": False,
         "image_platform": None,
@@ -130,6 +134,10 @@ TARGET_CAPABILITIES = {
     },
     "onprem-compose": {
         "postgresql_binding": False,
+        "existing_rds_binding": False,
+        "new_rds_provisioning": False,
+        "sqlite_volume": True,
+        "remote_host": False,
         "durable_files": False,
         "background_worker": False,
         "image_platform": None,
@@ -137,6 +145,10 @@ TARGET_CAPABILITIES = {
     },
     "cloud-run": {
         "postgresql_binding": False,
+        "existing_rds_binding": False,
+        "new_rds_provisioning": False,
+        "sqlite_volume": False,
+        "remote_host": False,
         "durable_files": False,
         "background_worker": False,
         "image_platform": "linux/amd64",
@@ -144,6 +156,10 @@ TARGET_CAPABILITIES = {
     },
     "aws-ecs-express": {
         "postgresql_binding": True,
+        "existing_rds_binding": True,
+        "new_rds_provisioning": True,
+        "sqlite_volume": False,
+        "remote_host": False,
         "durable_files": False,
         "background_worker": False,
         "image_platform": "linux/amd64",

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from engine.application_ir import application_ir
+from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
@@ -1899,6 +1900,10 @@ def handler_for(app: App):
                             local_sqlite=local_sqlite_binding is not None, include_compose=True)
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile, digest).as_dict(),
+                                             'capability_models': {
+                                                 target: target_capability_model(target).as_dict()
+                                                 for target in availability
+                                             },
                                              'inspection': {
                                                  'requirements': list(profile.requirements),
                                                  'evidence_files': list(profile.evidence),

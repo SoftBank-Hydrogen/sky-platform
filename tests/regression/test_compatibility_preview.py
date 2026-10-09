@@ -54,6 +54,14 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(payload['application_ir']['schema_version'], 2)
         self.assertEqual(payload['application_ir']['source_revision'], payload['source_digest'])
         self.assertEqual(payload['application_ir']['unknowns'], ('component_topology', 'statelessness'))
+        capability_models = payload['capability_models']
+        self.assertEqual(set(capability_models), set(reports))
+        self.assertTrue(all(model['schema_version'] == 1 for model in capability_models.values()))
+        aws_capabilities = {item['id']: item for item in capability_models['aws-ecs-express']['capabilities']}
+        self.assertEqual(aws_capabilities['existing_rds_binding']['display_status'], 'implemented_unverified')
+        self.assertEqual(aws_capabilities['new_rds_provisioning']['display_status'], 'implemented_unverified')
+        self.assertEqual(aws_capabilities['sqlite_volume']['display_status'], 'unsupported_by_sky')
+        self.assertTrue(all(not item['verification_refs'] for item in aws_capabilities.values()))
         candidates = {item['id']: item for item in payload['candidates']}
         self.assertEqual(candidates['local-docker']['status'], 'eligible')
         self.assertEqual(candidates['local-docker']['cost_estimate'], None)
