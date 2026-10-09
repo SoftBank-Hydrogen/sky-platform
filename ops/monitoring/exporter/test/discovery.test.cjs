@@ -28,3 +28,24 @@ test('discovery API failures do not produce an empty successful reconciliation',
  await assert.rejects(discover(source,[candidate],async()=>{throw new Error('offline');}));
  assert.throws(()=>validateDiscovery({...source,discovery:{allowedHosts:['*']}}));
 });
+
+test('non-game deployments do not consume discovery capacity; detail concurrency is bounded',async()=>{
+ const many=Array.from({length:41},(_,i)=>({...job(i.toString(16).padStart(16,'0'),`https://app${i}.example.test/`),
+  application_id:`app-${i}`,application_ir:{hypotheses:i===40?[{kind:'sky-probe-protocol'}]:[]}}));
+ const all={...source,discovery:{allowedHosts:['*.example.test']}};
+ let active=0,peak=0,loaded=0;
+ const result=await discover(all,many,async id=>{
+  active++;peak=Math.max(peak,active);loaded++;
+  await new Promise(resolve=>setImmediate(resolve));active--;
+  return many.find(item=>item.id===id);
+ });
+ assert.equal(result.targets.length,1);assert.equal(result.targets[0].httpUrl,'https://app40.example.test');
+ assert.equal(result.rejected,0);assert.equal(loaded,41);assert.ok(peak<=20);
+});
+test('failure in a later detail batch aborts the entire reconciliation',async()=>{
+ const many=Array.from({length:21},(_,i)=>({...job(i.toString(16).padStart(16,'0'),`https://app${i}.example.test/`),application_id:`app-${i}`}));
+ const all={...source,discovery:{allowedHosts:['*.example.test']}};
+ await assert.rejects(discover(all,many,async id=>{
+  if(id===many[20].id)throw new Error('offline');return many.find(item=>item.id===id);
+ }));
+});
