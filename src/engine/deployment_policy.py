@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 
 from engine.compatibility import TARGET_CAPABILITIES, deployment_access_mode
 
-AUTO_TARGETS = ("local-docker", "cloud-run", "aws-ecs-express")
+AUTO_TARGETS = ("local-docker", "cloud-run", "aws-ecs-express", "aws-s3-cloudfront")
 EXPLICIT_TARGETS = frozenset(TARGET_CAPABILITIES) | {"aws-s3-cloudfront"}
 
 

@@ -16,8 +16,10 @@ from engine.evidence_record import source_evidence
 from engine.static_site import assess_static_site
 
 
-def static_compilation(project: Path, source_revision: str) -> dict:
+def static_compilation(project: Path, source_revision: str, *, requested_target: str = "aws-s3-cloudfront") -> dict:
     """Recompute the source-bound choice without calling AWS or changing files."""
+    if requested_target not in {"auto", "aws-s3-cloudfront"}:
+        raise ValueError("Unsupported static selection request")
     profile = inspect_infrastructure(project)
     assessment = assess_static_site(project, profile)
     if assessment.status != "eligible":
@@ -34,12 +36,12 @@ def static_compilation(project: Path, source_revision: str) -> dict:
         topology_status="resolved_static",
         unknowns=("browser_behavior",),
     ).as_dict()
-    policy = deployment_policy("aws-s3-cloudfront", True)
+    policy = deployment_policy(requested_target, True)
     candidate = static_hosting_candidate(assessment, configured=True, public_access=True)
     candidate["selected"] = True
     plan = {
         "target": "aws-s3-cloudfront",
-        "planner": "user",
+        "planner": "static-source-rule" if requested_target == "auto" else "user",
         "rationale": "검사된 정적 파일을 공개 HTTPS 주소로 배포합니다.",
         "resources": ["private S3 bucket", "CloudFront distribution"],
         "compatibility": {
@@ -80,7 +82,9 @@ def verify_static_compilation(job: dict, project: Path, source_revision: str) ->
         return False
     if len(present) != len(new_record_fields) or "infrastructure_plan" not in job:
         raise ValueError("Incomplete static architecture record")
-    expected = static_compilation(project, source_revision)
+    expected = static_compilation(
+        project, source_revision, requested_target=job.get("requested_target", "aws-s3-cloudfront")
+    )
     if any(json.dumps(job[field], sort_keys=True) != json.dumps(expected[field], sort_keys=True)
            for field in fields):
         raise ValueError("Stored static architecture disagrees with its source")

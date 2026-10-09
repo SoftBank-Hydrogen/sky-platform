@@ -118,8 +118,8 @@ def static_hosting_candidate(
 ) -> dict:
     """Evaluate static hosting without treating a source tree as a built bundle.
 
-    This backend has an explicit upload workflow. It must not enter the legacy
-    automatic container-target list until static lowering is implemented.
+    The static backend can be selected from an upload after classification.
+    GitHub and deployment-group paths still use their separate target lists.
     """
     identity = backend_identity("aws-s3-cloudfront")
     if assessment.status == "server_or_mixed":

@@ -22,7 +22,7 @@ class StaticDeploymentFlowTests(unittest.TestCase):
         self.settings = AwsSettings("ap-northeast-2", expected_account="123456789012")
         self.app = App(self.root, AISettings("", ""), aws_settings=self.settings, monitor_interval=0)
 
-    def request(self, path, body=b"", public="true"):
+    def request(self, path, body=b"", public="true", target=None):
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = path
         handler.headers = {
@@ -32,6 +32,8 @@ class StaticDeploymentFlowTests(unittest.TestCase):
             "Content-Length": str(len(body)),
         }
         handler.rfile = io.BytesIO(body)
+        if target is not None:
+            handler.headers["X-Deploy-Target"] = target
         handler.json_response = Mock()
         handler.do_POST()
         return handler.json_response.call_args.args
@@ -72,6 +74,49 @@ class StaticDeploymentFlowTests(unittest.TestCase):
         restored = App(self.root, AISettings("", ""), aws_settings=self.settings, monitor_interval=0)
         self.assertEqual(restored.jobs[job_id]["status"], "interrupted")
         self.assertEqual(restored.jobs[job_id]["target"], "aws-s3-cloudfront")
+
+    def test_public_auto_upload_selects_static_without_ai_planner(self):
+        self.app.ai_settings = AISettings("fixture-key", "fixture-model")
+
+        def preflight(_adapter, project, _application_id, _attempt_id):
+            return {"source_digest": source_digest(project)}
+
+        with patch("interfaces.http.server.AwsStaticSiteAdapter.unavailable_reason", return_value=None), \
+                patch("application.static_deployments.AwsStaticSiteAdapter.preflight", preflight), \
+                patch("interfaces.http.server.plan_infrastructure") as ai_planner, \
+                patch.object(self.app, "start_job_worker", return_value=True):
+            status, response = self.request(
+                "/api/deployments", self.archive({"index.html": "<h1>Hello</h1>"}), target="auto"
+            )
+        self.assertEqual(status, 202)
+        ai_planner.assert_not_called()
+        job = self.app.jobs[response["id"]]
+        self.assertEqual(job["target"], "aws-s3-cloudfront")
+        self.assertEqual(job["requested_target"], "auto")
+        self.assertEqual(job["architecture_decision"]["selection_mode"], "auto_target")
+        self.assertEqual(job["infrastructure_plan"]["planner"], "static-source-rule")
+        self.assertEqual(deployment_certificate(job)["compilation_status"], "recorded")
+
+    def test_private_or_nonstatic_auto_upload_stays_in_existing_planner(self):
+        self.app.ai_settings = AISettings("fixture-key", "fixture-model")
+        cases = (
+            ({"index.html": "<h1>Hello</h1>"}, "false"),
+            ({"index.html": "<div id='root'></div>",
+              "package.json": '{"scripts":{"build":"vite build"}}'}, "true"),
+            ({"index.html": "<h1>Hello</h1>", "server.js": "require('node:http')"}, "true"),
+        )
+        for files, public in cases:
+            with self.subTest(files=files, public=public), \
+                    patch("interfaces.http.server.AwsStaticSiteAdapter.unavailable_reason", return_value=None), \
+                    patch("interfaces.http.server.plan_infrastructure", side_effect=ValueError("planner reached")) \
+                    as planner:
+                status, response = self.request(
+                    "/api/deployments", self.archive(files), public=public, target="auto"
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("planner reached", response["error"])
+                planner.assert_called_once()
+                self.assertFalse(self.app.jobs)
 
     def test_changed_compilation_is_rejected_before_cloud_adapter(self):
         job_id = self.create_job()

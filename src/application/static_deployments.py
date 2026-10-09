@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,10 +11,42 @@ from adapters.aws.ecs import AwsSettings
 from adapters.aws.static_site import AwsStaticSiteAdapter
 from application.analysis import redact
 from application.deployment_core import source_digest
-from application.static_compilation import verify_static_compilation
+from application.static_compilation import static_compilation, verify_static_compilation
 
 
 class StaticDeploymentsMixin:
+    def create_static_job(
+        self, job_id: str, project: Path, application_id: str, *, requested_target: str
+    ) -> None:
+        """Persist one static release before starting its cloud worker."""
+        attempt_id = job_id + "-a1"
+        preflight = AwsStaticSiteAdapter(self.aws_settings).preflight(project, application_id, attempt_id)
+        records = static_compilation(
+            project, preflight["source_digest"], requested_target=requested_target
+        )
+        with self.lock:
+            self.ensure_application_available(application_id, "aws-s3-cloudfront")
+            if any(
+                old.get("application_id") == application_id
+                and old.get("target") == "aws-s3-cloudfront"
+                and old.get("deployment_state", "active") != "deleted"
+                for old in self.jobs.values()
+            ):
+                raise ValueError("기존 정적 사이트 릴리스를 종료한 뒤 새 배포를 시작하세요.")
+            self.jobs[job_id] = {
+                "id": job_id, "mode": "static_site", "target": "aws-s3-cloudfront",
+                "requested_target": requested_target,
+                "application_id": application_id, "attempt_id": attempt_id,
+                "status": "running", "deployment_state": "active", "public": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "project": str(project), "source_digest": preflight["source_digest"],
+                "static_preflight": preflight, "plan": None, "attempts": 1,
+                "steps": 0, "changes": [], "diff": "", "events": [],
+                "aws": asdict(self.aws_settings),
+                **records,
+            }
+            self.save(job_id)
+
     def static_adapter(self, job: dict, checkpoint=None) -> AwsStaticSiteAdapter:
         return AwsStaticSiteAdapter(
             AwsSettings(**job["aws"]), checkpoint=checkpoint,

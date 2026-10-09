@@ -26,7 +26,7 @@ BACKENDS = {
         BackendIdentity("onprem-compose", "onprem", "compose_same_host", "implemented", "explicit_only"),
         BackendIdentity("cloud-run", "gcp", "cloud_run", "implemented", "automatic"),
         BackendIdentity("aws-ecs-express", "aws", "ecs_express", "implemented", "automatic"),
-        BackendIdentity("aws-s3-cloudfront", "aws", "static_hosting", "implemented", "explicit_only"),
+        BackendIdentity("aws-s3-cloudfront", "aws", "static_hosting", "implemented", "automatic_upload_only"),
         BackendIdentity("aws-ecs-standard", "aws", "ecs_standard", "unimplemented", "unavailable"),
     )
 }

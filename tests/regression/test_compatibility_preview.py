@@ -188,7 +188,7 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(candidates['local-docker']['status'], 'rejected')
         self.assertEqual(candidates['cloud-run']['status'], 'rejected')
 
-    def test_static_bundle_is_aws_candidate_but_explicit_only(self):
+    def test_static_bundle_is_aws_candidate_for_upload_auto_selection(self):
         with patch('interfaces.http.server.AwsStaticSiteAdapter.unavailable_reason', return_value=None):
             status, payload = self.preview(archive({
                 'index.html': '<h1>Sky</h1>',
@@ -199,7 +199,7 @@ class CompatibilityPreviewTests(unittest.TestCase):
         static = candidates['aws-s3-cloudfront']
         self.assertEqual((static['provider'], static['backend']), ('aws', 'static_hosting'))
         self.assertEqual(static['structural_status'], 'compatible')
-        self.assertEqual(static['selection_mode'], 'explicit_only')
+        self.assertEqual(static['selection_mode'], 'automatic_upload_only')
         self.assertEqual(static['status'], 'eligible')
         self.assertEqual(payload['static_site']['adapter_status'], 'available')
         self.assertFalse(static['selected'])

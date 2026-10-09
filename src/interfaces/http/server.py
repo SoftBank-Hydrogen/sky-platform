@@ -35,7 +35,6 @@ from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
-from application.static_compilation import static_compilation
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
@@ -1471,7 +1470,7 @@ def handler_for(app: App):
                     "ai_model": app.ai_settings.model if app.ai_settings.available else None,
                     "monitor_interval": app.monitor_interval,
                     "github_poll_interval": app.github_poll_interval,
-                    "targets": [{"id": "auto", "name": "AI 자동 선택", "available": app.ai_settings.available},
+                    "targets": [{"id": "auto", "name": "자동 선택 (AI·정적 규칙)", "available": app.ai_settings.available},
                                 {"id": "local-docker", "name": "Local Docker", "available": True},
                                 {"id": "onprem-compose", "name": "On-prem Compose (same PC)",
                                  "available": LocalComposeAdapter.unavailable_reason() is None,
@@ -2024,29 +2023,9 @@ def handler_for(app: App):
                             project = extract_project(archive, directory / "source")
                         finally:
                             archive.unlink(missing_ok=True)
-                        attempt_id = job_id + "-a1"
-                        preflight = AwsStaticSiteAdapter(app.aws_settings).preflight(
-                            project, application_id, attempt_id)
-                        static_records = static_compilation(project, preflight["source_digest"])
-                        with app.lock:
-                            app.ensure_application_available(application_id, "aws-s3-cloudfront")
-                            if any(old.get("application_id") == application_id
-                                   and old.get("target") == "aws-s3-cloudfront"
-                                   and old.get("deployment_state", "active") != "deleted"
-                                   for old in app.jobs.values()):
-                                raise ValueError("기존 정적 사이트 릴리스를 종료한 뒤 새 배포를 시작하세요.")
-                            app.jobs[job_id] = {
-                                "id": job_id, "mode": "static_site", "target": "aws-s3-cloudfront",
-                                "application_id": application_id, "attempt_id": attempt_id,
-                                "status": "running", "deployment_state": "active", "public": True,
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "project": str(project), "source_digest": preflight["source_digest"],
-                                "static_preflight": preflight, "plan": None, "attempts": 1,
-                                "steps": 0, "changes": [], "diff": "", "events": [],
-                                "aws": asdict(app.aws_settings),
-                                **static_records,
-                            }
-                            app.save(job_id)
+                        app.create_static_job(
+                            job_id, project, application_id, requested_target="aws-s3-cloudfront"
+                        )
                         app.clear_upload_marker(directory)
                     except Exception:
                         if not (directory / "job.json").is_file():
@@ -2167,6 +2146,20 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         infrastructure_profile = inspect_infrastructure(project)
+                        if (target == 'auto' and public_flag == 'true'
+                                and postgres_request is None and local_sqlite_mount is None
+                                and sqlite_flag == 'false'
+                                and AwsStaticSiteAdapter.unavailable_reason(app.aws_settings) is None
+                                and assess_static_site(project, infrastructure_profile).status == 'eligible'):
+                            app.create_static_job(
+                                job_id, project, application_id, requested_target='auto'
+                            )
+                            app.clear_upload_marker(directory)
+                            started = app.start_job_worker(job_id, app.run_static_site)
+                            self.json_response(202, {
+                                'id': job_id, 'status': 'running' if started else 'interrupted'
+                            })
+                            return
                         sqlite_conversion = None
                         local_sqlite_binding = None
                         deployment_profile = infrastructure_profile
