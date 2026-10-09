@@ -144,15 +144,41 @@ def rehearse(
         value = client.request(f"/api/jobs/{job_id}")
         if not isinstance(value, dict) or value.get("id") != job_id:
             raise RehearsalError("job_response_identity_mismatch")
+        # Validate every snapshot, including polling and final restoration reads.
+        # A partial response must become reportable failure, never KeyError/TypeError.
+        for field in ("status", "deployment_state", "application_id", "target"):
+            if not isinstance(value.get(field), str) or not value[field]:
+                raise RehearsalError("job_response_schema_invalid")
+        result = value.get("result")
+        if not isinstance(result, dict):
+            raise RehearsalError("job_response_schema_invalid")
+        for field in ("account", "region", "service", "service_arn", "url", "image", "task_definition_arn"):
+            if not isinstance(result.get(field), str) or not result[field]:
+                raise RehearsalError("job_response_schema_invalid")
+        if "images" in result and (
+            not isinstance(result["images"], list)
+            or any(not isinstance(image, str) or not image for image in result["images"])
+        ):
+            raise RehearsalError("job_response_schema_invalid")
+        rollback_state = value.get("release_rollback_state")
+        if rollback_state is not None and not isinstance(rollback_state, str):
+            raise RehearsalError("job_response_schema_invalid")
+        evidence = value.get("release_rollback_verification")
+        if evidence is not None and not isinstance(evidence, dict):
+            raise RehearsalError("rollback_evidence_missing")
         return value
 
     def check(job_id, stage):
         started = time.monotonic()
         health = client.request(f"/api/jobs/{job_id}/health")
+        if not isinstance(health, dict) or not isinstance(health.get("healthy"), bool):
+            raise RehearsalError("health_response_schema_invalid")
         if health.get("healthy") is not True:
             raise RehearsalError("deployment_health_failed")
         if require_websocket:
             probe = client.request(f"/api/jobs/{job_id}/websocket-probe", b"")
+            if not isinstance(probe, dict):
+                raise RehearsalError("websocket_response_schema_invalid")
             if probe.get("status") != "passed" or probe.get("protocol") != "sky.probe.v1":
                 raise RehearsalError("websocket_exchange_failed")
         report["checks"].append(
@@ -182,6 +208,17 @@ def rehearse(
                 and target.get("deployment_state") == "active"
             ):
                 evidence = source.get("release_rollback_verification") or {}
+                if any(
+                    not isinstance(evidence.get(field), str) or not evidence[field]
+                    for field in (
+                        "target_job_id",
+                        "image",
+                        "task_definition_arn",
+                        "url",
+                        "service_deployment_arn",
+                    )
+                ):
+                    raise RehearsalError("rollback_evidence_missing")
                 if (
                     target["result"]["image"] != expected_image
                     or target["result"]["task_definition_arn"] != expected_task

@@ -46,6 +46,8 @@ python scripts/rollback_rehearsal.py \
 - `failed`: 단계 실패. `restoration=verified`면 B 복귀는 확인했지만 리허설은 실패다.
 - `restoration=needs_attention`: 현재 상태 확인이 필요하다. Sky 작업 상세·AWS 실제 서비스 상태를 확인하고 기존 reconcile 흐름으로 처리한다.
 
+조회·전환 대기·최종 복귀 확인마다 작업 응답의 필수 필드와 타입을 검증한다. 응답이 누락되거나 잘못된 형식이면 `job_response_schema_invalid` 등 고정된 오류로 보고서에 남긴다. 이후 상태가 정상 응답으로 확인되면 복귀를 시도하되, 복귀 응답도 불완전하면 `restoration=needs_attention`으로 기록하고 성공으로 처리하지 않는다.
+
 보고서에는 작업 ID·검사 단계·소요 시간·복귀 여부만 남기며 쿠키·토큰·응답 원문은 저장하지 않는다. Sky의 `rollback_rehearsal` 인증서 상태를 덮어쓰지 않는 독립 검증 도구다. 게임 판 상태/SQLite·RDS 데이터 보존과 DB 스키마 롤백은 별도 검증해야 한다.
 
 ## 준비 단계 검증

@@ -1,6 +1,8 @@
 """Exercise the real Sky HTTP API and release state machine; stub only AWS/probes."""
 
+import copy
 import json
+import sys
 import threading
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -235,3 +237,130 @@ def test_restore_failure_cannot_be_reported_as_success(environment):
     assert report["status"] == "failed"
     assert report["restoration"] == "needs_attention"
     assert calls == 2
+
+
+def malformed_job_response(value, kind):
+    value = copy.deepcopy(value)
+    if kind == "missing_task":
+        del value["result"]["task_definition_arn"]
+    elif kind == "null_result":
+        value["result"] = None
+    elif kind == "wrong_image_type":
+        value["result"]["image"] = {"private": "must-not-appear"}
+    elif kind == "wrong_images_type":
+        value["result"]["images"] = "must-not-appear"
+    elif kind == "wrong_evidence_type":
+        value["release_rollback_verification"] = ["must-not-appear"]
+    return value
+
+
+@pytest.mark.parametrize(
+    "kind", ["missing_task", "null_result", "wrong_image_type", "wrong_images_type", "wrong_evidence_type"]
+)
+@pytest.mark.parametrize("stage", ["preflight", "poll", "restore"])
+def test_malformed_snapshots_preserve_failure_and_restoration_evidence(environment, kind, stage):
+    _, client = environment
+    request = client.request
+    posts = 0
+    corrupted = False
+
+    def response(path, body=None, **kwargs):
+        nonlocal posts, corrupted
+        value = request(path, body, **kwargs)
+        if path.endswith("/rollback-release"):
+            posts += 1
+        should_corrupt = (
+            (stage == "preflight" and posts == 0 and path == f"/api/jobs/{A}")
+            or (stage == "poll" and posts == 1 and path == f"/api/jobs/{A}")
+            or (stage == "restore" and posts == 2 and path == f"/api/jobs/{B}")
+        )
+        if should_corrupt and not corrupted:
+            corrupted = True
+            return malformed_job_response(value, kind)
+        return value
+
+    with (
+        patch.object(client, "request", side_effect=response),
+        patch(
+            "interfaces.http.server.AwsExpressAdapter.rollback_release",
+            autospec=True,
+            side_effect=rollback_stub,
+        ),
+        patch("application.monitoring.check_deployment", return_value={"healthy": True}),
+    ):
+        report = execute(client, execute=True, confirm_application=APPLICATION)
+    assert corrupted
+    assert report["status"] == "failed"
+    assert report["finished_at"]
+    if stage == "preflight":
+        assert posts == 0
+        assert report["restoration"] == "not_needed"
+    elif stage == "poll":
+        assert posts == 2
+        assert report["restoration"] == "verified"
+    else:
+        assert posts == 2
+        assert report["restoration"] == "needs_attention"
+        assert report["restoration_error"]
+    assert "must-not-appear" not in json.dumps(report)
+
+
+def test_cli_writes_nonempty_json_after_partial_poll_response(environment, tmp_path, monkeypatch):
+    from scripts.rollback_rehearsal import main
+
+    app, client = environment
+    request = client.request
+    posted = False
+    corrupted = False
+
+    def response(path, body=None, **kwargs):
+        nonlocal posted, corrupted
+        value = request(path, body, **kwargs)
+        if path.endswith("/rollback-release"):
+            posted = True
+        if posted and not corrupted and path == f"/api/jobs/{A}":
+            corrupted = True
+            return malformed_job_response(value, "missing_task")
+        return value
+
+    output = tmp_path / "rehearsal.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rehearsal",
+            "--sky-url",
+            "https://example.test",
+            "--current-job",
+            B,
+            "--previous-job",
+            A,
+            "--application-id",
+            APPLICATION,
+            "--account",
+            ACCOUNT,
+            "--region",
+            REGION,
+            "--output",
+            str(output),
+            "--execute",
+            "--confirm-application",
+            APPLICATION,
+        ],
+    )
+    with (
+        patch("scripts.rollback_rehearsal.SkyClient", return_value=client),
+        patch.object(client, "request", side_effect=response),
+        patch(
+            "interfaces.http.server.AwsExpressAdapter.rollback_release",
+            autospec=True,
+            side_effect=rollback_stub,
+        ),
+        patch("application.monitoring.check_deployment", return_value={"healthy": True}),
+    ):
+        assert main() == 1
+    report = json.loads(output.read_text())
+    assert report["status"] == "failed"
+    assert report["error"] == "job_response_schema_invalid"
+    assert report["restoration"] == "verified"
+    assert app.jobs[B]["deployment_state"] == "active"
