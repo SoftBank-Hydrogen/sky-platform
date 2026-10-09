@@ -180,6 +180,7 @@ def main():
                                side_effect=RuntimeError('simulated worker start failure')):
                         return start_worker(job_id, worker, environment)
                 app.start_job_worker = fail_worker_start
+            deployment_started = time.monotonic()
             uploaded = request('/api/deployments', upload, content_type)
             job_id = uploaded['id']
             if args.resume_unstarted:
@@ -262,6 +263,7 @@ def main():
                     containers = subprocess.check_output(['docker', 'ps', '-a', '--format', '{{.Names}}'], text=True)
                     assert f'sky-{job_id}-a1' not in containers.splitlines()
             print('PASS: one request -> source edits -> real Docker -> HTTP URL', flush=True)
+            print(f'DEPLOY_TOTAL_SECONDS {time.monotonic() - deployment_started:.1f}', flush=True)
             print('AI mode: ' + ('LIVE' if args.live else 'RESPONSES WIRE FIXTURE (not live AI)'
                                   if wire else 'SCRIPTED TEST FIXTURE (not live AI)'), flush=True)
             if wire:

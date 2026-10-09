@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 import zipfile
+from datetime import datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,6 +22,20 @@ from interfaces.http.server import App, handler_for
 
 
 SAMPLE = Path(__file__).resolve().parents[2] / 'tests' / 'fixtures' / 'apps' / 'unready-node'
+
+
+def deployment_timing(job: dict) -> dict:
+    """Report first observable milestone times, without logging source or secrets."""
+    created = datetime.fromisoformat(job['created_at'])
+    stages = {'starting', 'preparing', 'deploying', 'building', 'uploading',
+              'migrating', 'verifying', 'succeeded'}
+    first = {}
+    for event in job.get('events', []):
+        stage = event.get('stage')
+        if stage in stages and stage not in first:
+            elapsed = (datetime.fromisoformat(event['time']) - created).total_seconds()
+            first[stage] = round(elapsed, 1)
+    return {'total_seconds': first.get('succeeded'), 'first_stage_seconds': first}
 
 
 def preflight(account: str, region: str, ai: AISettings) -> AwsSettings:
@@ -133,6 +148,7 @@ def run_live(settings: AwsSettings, ai: AISettings, timeout: int) -> None:
             body = json.load(response)
             if response.status != 200 or body.get('message') != 'Original application is running':
                 raise AssertionError('공개 AWS URL의 앱 응답이 예상과 다릅니다.')
+        print('DEPLOY_TIMING', json.dumps(deployment_timing(job), sort_keys=True), flush=True)
         print('PASS: live AI -> source edits -> AWS service -> public HTTP 200 -> health API', flush=True)
         request('/api/jobs/' + job_id + '/retire', b'')
         retire_deadline = time.monotonic() + 1200
