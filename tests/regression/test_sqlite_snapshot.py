@@ -9,10 +9,11 @@ from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.aws.postgres import PostgresRequest
 from adapters.local.docker import LocalDockerAdapter
 from application.agent import DeploymentTools
-from application.consistency import check_source_change_scope
+from application.consistency import check_source_change_scope, check_sqlite_migration_consistency
 from application.deployment_core import make_plan, source_digest
 from application.infrastructure import inspect_infrastructure, preflight_sqlite_conversion, validate_infrastructure
 from application.source_transform import source_transform_record
+from engine.deployment_policy import deployment_policy
 
 
 class SqliteSnapshotTests(unittest.TestCase):
@@ -130,6 +131,35 @@ class SqliteSnapshotTests(unittest.TestCase):
             plan = make_plan(tools.work, 'server.py', None, target='aws-ecs-express')
             record = source_transform_record(compilation, source, tools.work, plan)
             self.assertEqual(check_source_change_scope(record, source, conversion)['status'], 'pass')
+            infrastructure_plan = {
+                'target': 'aws-ecs-express',
+                'conversion_pending': 'sqlite-to-postgresql',
+                'database': {'binding': 'create', 'database_id': request.database_id},
+                'resources': ['new RDS PostgreSQL', 'one-off SQL migration task'],
+            }
+            bundle = collect_sql_migrations(tools.work)
+            policy = deployment_policy('aws-ecs-express', True, allow_data_migration=True)
+            final_profile = inspect_infrastructure(tools.work)
+            self.assertEqual(check_sqlite_migration_consistency(
+                infrastructure_plan, final_profile, source, conversion, bundle, request, policy)['status'], 'pass')
+            with self.assertRaisesRegex(ValueError, 'CV-04.*approved'):
+                check_sqlite_migration_consistency(
+                    infrastructure_plan, final_profile, source, conversion, bundle, request,
+                    deployment_policy('aws-ecs-express', True))
+            with self.assertRaisesRegex(ValueError, 'CV-04.*execution plan'):
+                check_sqlite_migration_consistency(
+                    {**infrastructure_plan, 'conversion_pending': None}, final_profile,
+                    source, conversion, bundle, request, policy)
+            with self.assertRaisesRegex(ValueError, 'CV-04.*execution plan'):
+                check_sqlite_migration_consistency(
+                    {**infrastructure_plan, 'resources': ['new RDS PostgreSQL']}, final_profile,
+                    source, conversion, bundle, request, policy)
+            migration = tools.work / 'migrations' / '0000_sky_sqlite_import.sql'
+            migration.write_text(migration.read_text() + '\nSELECT 1;\n')
+            with self.assertRaisesRegex(ValueError, 'CV-04.*Scheduled SQL'):
+                check_sqlite_migration_consistency(
+                    infrastructure_plan, final_profile, source, conversion,
+                    collect_sql_migrations(tools.work), request, policy)
 
 
 if __name__ == '__main__':

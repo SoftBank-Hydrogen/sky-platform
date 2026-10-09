@@ -22,6 +22,7 @@ from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
+    check_sqlite_migration_consistency,
     check_target_resource_consistency, require_health_result)
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
@@ -458,6 +459,10 @@ class DeploymentTools:
                       check_source_change_scope(self.source_transform, self.original, self.sqlite_conversion),
                       check_port_consistency(self.plan),
                       check_target_resource_consistency(self.compilation, self.infrastructure_plan, self.target)]
+            if self.sqlite_conversion is not None:
+                checks.append(check_sqlite_migration_consistency(
+                    self.infrastructure_plan, final_profile, self.original, self.sqlite_conversion,
+                    migrations, self.postgres_request, self.deployment_policy))
             gate = static_consistency_gate(
                 self.compilation, self.architecture_decision, checks)
             self.checkpoint(consistency_checks=checks, static_consistency_gate=gate)

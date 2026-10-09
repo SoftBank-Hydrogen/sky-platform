@@ -8,10 +8,12 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from adapters.aws.postgres import PostgresRequest
+from adapters.database.migrations import MigrationBundle
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE_SUFFIXES
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import InfrastructureProfile
+from engine.deployment_policy import DeploymentPolicy
 
 
 class HealthResultMismatch(ValueError):
@@ -71,6 +73,57 @@ def check_source_change_scope(record: dict, original: Path, sqlite_conversion: d
     if set(allowed_conversion) - observed:
         raise ValueError("CV-02: Approved SQLite conversion is incomplete")
     return {"id": "CV-02", "status": "pass", "source": "applied_source_transform"}
+
+
+def check_sqlite_migration_consistency(
+    plan: dict,
+    final_profile: InfrastructureProfile,
+    original: Path,
+    conversion: dict,
+    migrations: MigrationBundle | None,
+    postgres_request: PostgresRequest | None,
+    policy: DeploymentPolicy | None,
+) -> dict:
+    """Bind the approved SQLite snapshot to the exact SQL scheduled for PostgreSQL."""
+    if policy is None or not policy.allow_data_migration:
+        raise ValueError("CV-04: SQLite data migration was not approved")
+    database = plan.get("database") if isinstance(plan, dict) else None
+    resources = plan.get("resources") if isinstance(plan, dict) else None
+    if (not isinstance(plan, dict)
+            or plan.get("conversion_pending") != "sqlite-to-postgresql"
+            or plan.get("target") != "aws-ecs-express"
+            or not isinstance(database, dict)
+            or database.get("binding") not in {"create", "existing"}
+            or postgres_request is None
+            or database.get("database_id") != postgres_request.database_id
+            or not isinstance(resources, list)
+            or "one-off SQL migration task" not in resources
+            or ("new RDS PostgreSQL" if database.get("binding") == "create" else "existing RDS PostgreSQL")
+            not in resources
+            or final_profile.database_engines != ("postgresql",)
+            or "sqlite" in final_profile.requirements):
+        raise ValueError("CV-04: SQLite conversion and PostgreSQL execution plan disagree")
+    path = conversion.get("path") if isinstance(conversion, dict) else None
+    if not isinstance(path, str) or not path or "\\" in path:
+        raise ValueError("CV-04: Reviewed SQLite source path is invalid")
+    relative = PurePosixPath(path)
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != path:
+        raise ValueError("CV-04: Reviewed SQLite source path is invalid")
+    try:
+        snapshot = compile_sqlite_snapshot(original.joinpath(*relative.parts))
+    except ValueError:
+        raise ValueError("CV-04: Reviewed SQLite snapshot is no longer valid") from None
+    if (snapshot.source_sha256 != conversion.get("source_sha256")
+            or snapshot.schema != conversion.get("schema")
+            or snapshot.row_counts != conversion.get("row_counts")):
+        raise ValueError("CV-04: SQLite snapshot differs from the reviewed source")
+    expected_sql_hash = hashlib.sha256(snapshot.sql.encode()).hexdigest()
+    if (not isinstance(migrations, MigrationBundle)
+            or len(migrations.migrations) != 1
+            or migrations.migrations[0].name != "0000_sky_sqlite_import.sql"
+            or migrations.migrations[0].sha256 != expected_sql_hash):
+        raise ValueError("CV-04: Scheduled SQL does not match the reviewed SQLite snapshot")
+    return {"id": "CV-04", "status": "pass", "source": "reviewed_sqlite_migration"}
 
 
 def health_result_matches_plan(plan: dict, result: dict) -> bool:
