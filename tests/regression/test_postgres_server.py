@@ -532,7 +532,8 @@ class PostgresServerTests(unittest.TestCase):
                 calls.append((project, plan, attempt_id, environment, postgres, migrations))
                 assert "'0.0.0.0'" in (project / 'server.js').read_text()
                 assert 'FROM node:22' in plan.dockerfile
-                return {'url': 'https://example.test', 'target': 'aws-ecs-express',
+                return {'url': 'https://example.test', 'health_url': 'https://example.test' + plan.health_path,
+                        'target': 'aws-ecs-express',
                         'database': {'database_id': 'sky-demo-app'}}
         with patch('interfaces.http.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \
@@ -592,7 +593,8 @@ class PostgresServerTests(unittest.TestCase):
                 assert 'psycopg.connect(connect_timeout=5)' in (project / 'app.py').read_text()
                 assert plan.runtime == 'python-wsgi'
                 assert 'gunicorn' in plan.dockerfile
-                return {'url': 'https://example.test', 'target': 'aws-ecs-express',
+                return {'url': 'https://example.test', 'health_url': 'https://example.test' + plan.health_path,
+                        'target': 'aws-ecs-express',
                         'database': {'database_id': 'sky-demo-app'}}
         with patch('interfaces.http.server.AwsPostgresProvisioner.inspect_current',
                    return_value={'database_id': 'sky-demo-app'}), \

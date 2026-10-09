@@ -5,7 +5,11 @@ import copy
 import pytest
 
 from adapters.aws.postgres import PostgresRequest
-from application.consistency import check_database_consistency, check_port_consistency
+from application.consistency import (
+    check_database_consistency,
+    check_port_consistency,
+    health_result_matches_plan,
+)
 from application.deployment_core import make_plan
 from engine.compatibility import InfrastructureProfile
 
@@ -108,3 +112,15 @@ def test_udp_only_declaration_conflicts_with_http_port(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM node:22\nEXPOSE 8080/udp\n")
     with pytest.raises(ValueError, match="CV-06"):
         check_port_consistency(make_plan(tmp_path, "dockerfile", None, 8080))
+
+
+def test_http_result_must_reference_the_planned_health_endpoint():
+    plan = {"port": 8080, "health_path": "/ready"}
+    result = {"url": "https://example.test", "health_url": "https://example.test/ready"}
+    assert health_result_matches_plan(plan, result)
+    for changed in (
+        {**result, "health_url": "https://example.test/"},
+        {**result, "url": "https://example.test/other", "health_url": "https://example.test/other/ready"},
+        {**result, "url": "file://example.test", "health_url": "file://example.test/ready"},
+    ):
+        assert not health_result_matches_plan(plan, changed)

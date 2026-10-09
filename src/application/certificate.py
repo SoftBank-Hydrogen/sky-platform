@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from engine.architecture_decision import verify_architecture_decision
 from engine.compilation import verify_compilation
 from engine.deployment_policy import policy_from_record
+from application.consistency import health_result_matches_plan
 from application.verification_gates import static_consistency_gate, target_verification_obligations
 
 
@@ -139,14 +140,7 @@ def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
     observed = job.get('websocket_verification') if completed else None
     plan = job.get('plan') if isinstance(job.get('plan'), dict) else {}
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
-    url = result.get('url')
-    health_path = plan.get('health_path')
-    deployment_http_verified = bool(
-        completed and type(plan.get('port')) is int and 1024 <= plan['port'] <= 65535
-        and isinstance(url, str) and bool(url)
-        and isinstance(health_path, str) and health_path.startswith('/')
-        and result.get('health_url') == url + health_path
-    )
+    deployment_http_verified = completed and health_result_matches_plan(plan, result)
     obligations = target_verification_obligations(
         gate, observed, deployment_http_verified=deployment_http_verified)
     return {'status': 'recorded', 'static_consistency': gate,

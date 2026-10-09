@@ -78,6 +78,32 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.tools.attempts, 0)
         deploy.assert_not_called()
 
+    def test_compiled_deployment_rejects_missing_http_probe_result(self):
+        revision = source_digest(self.original)
+        self.tools.compilation = {
+            'compilation_id': 'comp-example', 'architecture_decision_id': 'decision-example',
+            'decision_revision': 1, 'source_revision': revision,
+            'target_plan': {'id': 'target-example', 'target': 'local-docker'},
+        }
+        self.tools.architecture_decision = {
+            'decision_id': 'decision-example', 'decision_revision': 1,
+            'source_revision': revision, 'pending_verification_rule_ids': [],
+        }
+        self.tools.infrastructure_plan = {'compatibility': {}}
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        self.tools.configure_deployment('start', None, 3000, '/', [])
+        attempt_id = 'a' * 16 + '-a1'
+        result = {'url': 'http://127.0.0.1:12345', 'container': f'sky-{attempt_id}',
+                  'image': f'sky/{attempt_id}:latest'}
+        with patch.object(LocalDockerAdapter, 'deploy', return_value=result), \
+                patch.object(LocalDockerAdapter, 'cleanup_failure') as cleanup:
+            with self.assertRaisesRegex(AgentError, 'CV-06'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 1)
+        cleanup.assert_called_once_with(attempt_id)
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

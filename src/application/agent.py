@@ -20,7 +20,7 @@ from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
-from application.consistency import check_database_consistency, check_port_consistency
+from application.consistency import check_database_consistency, check_port_consistency, require_health_result
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
@@ -487,6 +487,8 @@ class DeploymentTools:
                 ), ExecutionState(adapter))
             else:
                 self.result = adapter.deploy(context, self.plan, attempt_id, self.environment)
+            if self.compilation is not None:
+                require_health_result(asdict(self.plan), self.result)
             return {"verified": True, **self.result}
         except Exception as exc:
             self.event("attempt_failed", str(exc))

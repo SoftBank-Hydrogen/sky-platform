@@ -33,7 +33,7 @@ from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
-from application.consistency import check_database_consistency, check_port_consistency
+from application.consistency import check_database_consistency, check_port_consistency, require_health_result
 from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
@@ -340,6 +340,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                         AwsSettings(**job['aws']), existing=job.get('prior_result'),
                                         checkpoint=checkpoint, promoted_image=promotion)
             result = adapter.deploy(context, plan, attempt_id, validated_environment)
+            if 'compilation' in job:
+                require_health_result(asdict(plan), result)
             with self.lock:
                 job.update(status='succeeded', result=result, deployment_state='active',
                            missing_environment=[], input_reason=None)

@@ -203,6 +203,7 @@ class DeploymentGroupTests(unittest.TestCase):
         with patch.object(self.app, 'run_agent', side_effect=run_local), \
                 patch('interfaces.http.server.AwsExpressAdapter.deploy',
                       return_value={'url': 'https://example.test',
+                                    'health_url': 'https://example.test/',
                                     'promotion': {'image_id': image_id}}) as deploy:
             self.app.run_group(group['id'])
         self.assertEqual(calls, [local_id])
@@ -214,6 +215,28 @@ class DeploymentGroupTests(unittest.TestCase):
                          self.app.jobs[aws_id]['compilation']['compilation_id'])
         self.assertEqual(self.app.jobs[aws_id]['consistency_checks'][0]['status'], 'unknown')
         self.assertEqual(self.app.deployment_group(group['id'])['status'], 'succeeded')
+
+    def test_promoted_aws_result_without_health_path_cannot_finish_successfully(self):
+        group = self.create()
+        local_id, aws_id = [item['job_id'] for item in group['targets']]
+        image_id = 'sha256:' + 'a' * 64
+        def run_local(job_id):
+            job = self.app.jobs[job_id]
+            work = self.app.root / job_id / 'work'
+            shutil.copytree(Path(job['project']), work)
+            plan = analyze(work)
+            job.update(status='succeeded', plan=plan.__dict__, attempts=1,
+                       result={'image': f'sky/{local_id}-a1:latest', 'image_id': image_id,
+                               'platform': 'linux/amd64', 'url': 'http://127.0.0.1:12345'})
+            self.app.save(job_id)
+        with patch.object(self.app, 'run_agent', side_effect=run_local), \
+                patch('interfaces.http.server.AwsExpressAdapter.deploy',
+                      return_value={'url': 'https://example.test'}), \
+                patch('interfaces.http.server.AwsExpressAdapter.cleanup_failure'):
+            self.app.run_group(group['id'])
+        self.assertEqual(self.app.jobs[local_id]['status'], 'succeeded')
+        self.assertEqual(self.app.jobs[aws_id]['status'], 'failed')
+        self.assertFalse(self.app.jobs[aws_id].get('result'))
 
     def test_required_env_pauses_aws_then_resumes_same_image_after_restart(self):
         group = self.create()
@@ -252,7 +275,8 @@ class DeploymentGroupTests(unittest.TestCase):
         received = []
         def deploy(_project, _plan, _attempt_id, environment):
             received.append(dict(environment))
-            return {'url': 'https://example.test', 'promotion': {'source_job_id': local_id}}
+            return {'url': 'https://example.test', 'health_url': 'https://example.test/',
+                    'promotion': {'source_job_id': local_id}}
         with patch('interfaces.http.server.AwsExpressAdapter.deploy', side_effect=deploy) as aws_deploy, \
                 patch.object(restored, 'start_group_worker') as continue_group:
             restored.resume_promoted_aws(aws_id, supplied)

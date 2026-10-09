@@ -14,8 +14,10 @@ from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 
-def owned_local_result(_project, _plan, attempt_id, _environment):
-    return {'url': 'http://127.0.0.1:12345', 'container': f'sky-{attempt_id}',
+def owned_local_result(_project, plan, attempt_id, _environment):
+    return {'url': 'http://127.0.0.1:12345',
+            'health_url': 'http://127.0.0.1:12345' + plan.health_path,
+            'container': f'sky-{attempt_id}',
             'image': f'sky/{attempt_id}:latest'}
 
 
