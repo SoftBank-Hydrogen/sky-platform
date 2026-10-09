@@ -7,6 +7,7 @@ temporary path must have the same name inside Sky and on the Docker host.
 import argparse
 import io
 import json
+import os
 import re
 import socket
 import subprocess
@@ -23,6 +24,40 @@ def docker(*args, check=True):
     return subprocess.run(
         ["docker", *args], check=check, capture_output=True, text=True, timeout=300
     ).stdout.strip()
+
+
+def restore_temp_ownership(image, shared):
+    if os.name != "posix":
+        return
+    # Sky runs as root for Docker access and can create private root-owned state.
+    # Only this smoke's temporary tree is mounted; no socket or host networking.
+    docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "0:0",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--security-opt",
+        "no-new-privileges",
+        "--mount",
+        f"type=bind,source={shared},target=/smoke",
+        "--entrypoint",
+        "chown",
+        image,
+        "--recursive",
+        "--no-dereference",
+        "--",
+        f"{os.getuid()}:{os.getgid()}",
+        "/smoke",
+    )
 
 
 def main():
@@ -132,14 +167,6 @@ def main():
                 docker("restart", name)
                 ready()
                 assert request("/api/jobs/" + job_id)["status"] == "succeeded"
-            print(
-                "PASS: Sky HTTP/UI, API auth, AWS/Docker/Compose tools"
-                + (
-                    ", ZIP build/deploy and restart recovery (offline)"
-                    if options.full
-                    else " (UI smoke only)"
-                )
-            )
         except Exception:
             print(docker("logs", "--tail", "60", name, check=False))
             raise
@@ -149,6 +176,13 @@ def main():
                 # Only resources produced by this smoke job, never a global prune.
                 docker("rm", "-f", "sky-" + job_id, check=False)
                 docker("image", "rm", "sky/" + job_id + ":latest", check=False)
+            restore_temp_ownership(options.image, shared)
+
+    print(
+        "PASS: Sky HTTP/UI, API auth, AWS/Docker/Compose tools"
+        + (", ZIP build/deploy and restart recovery (offline)" if options.full else " (UI smoke only)")
+        + "; temporary resources cleaned"
+    )
 
 
 if __name__ == "__main__":
