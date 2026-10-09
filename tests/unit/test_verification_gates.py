@@ -30,7 +30,13 @@ def test_websocket_unknown_is_carried_to_target_verification():
             "due_gate": "target_verification",
             "status": "pending",
             "verification_refs": [],
-        }
+        },
+        {
+            "check_id": "CV-03",
+            "due_gate": "report",
+            "status": "unverified",
+            "verification_refs": [],
+        },
     ]
     assert target_verification_obligations(gate, None)[0]["status"] == "pending"
     assert target_verification_obligations(gate, {"status": "passed"})[0]["status"] == "pending"
@@ -38,6 +44,7 @@ def test_websocket_unknown_is_carried_to_target_verification():
     projected = target_verification_obligations(gate, observed)
     assert projected[0]["status"] == "verified"
     assert projected[0]["verification_refs"] == ["websocket_verification"]
+    assert projected[1]["status"] == "unverified"
     assert gate["required_obligations"][0]["status"] == "pending"
     observed["status"] = "failed"
     assert target_verification_obligations(gate, observed)[0]["status"] == "failed"
@@ -67,6 +74,10 @@ def test_failed_or_empty_static_checks_cannot_approve_execution():
     for checks in ([], [{"id": "CV-03", "status": "fail"}]):
         with pytest.raises(ValueError, match="valid consistency checks"):
             static_consistency_gate(compilation, decision, checks)
+    with pytest.raises(ValueError, match="unique"):
+        static_consistency_gate(
+            compilation, decision, [{"id": "CV-03", "status": "unknown"}, {"id": "CV-03", "status": "pass"}]
+        )
 
 
 def test_unknown_port_check_requires_target_http_evidence():

@@ -157,6 +157,9 @@ class DeploymentGroupTests(unittest.TestCase):
             'checked_at': '2026-10-09T00:00:00Z'}
         verified = deployment_certificate(job)['verification_gates']
         self.assertEqual(verified['required_obligations'][0]['status'], 'verified')
+        self.assertEqual(verified['required_obligations'][1]['status'], 'unverified')
+        self.assertEqual(verified['target_verification_status'], 'unverified')
+        self.assertIn('CV-03', deployment_certificate(job)['unverified'])
         self.assertEqual(job['static_consistency_gate']['required_obligations'][0]['status'], 'pending')
         job['static_consistency_gate']['compilation_id'] = 'comp-other'
         self.assertEqual(deployment_certificate(job)['verification_gates']['status'], 'incomplete')

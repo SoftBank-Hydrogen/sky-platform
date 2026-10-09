@@ -32,6 +32,9 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
             and "session_affinity_behavior" in (deployment_ir.get("unknowns") or ())
             and not any(item.get("id") == "CV-08" and item.get("status") == "unknown" for item in checks)):
         raise ValueError("Static gate requires CV-08 WebSocket state uncertainty")
+    check_ids = [item["id"] for item in checks]
+    if any(not identifier for identifier in check_ids) or len(set(check_ids)) != len(check_ids):
+        raise ValueError("Static gate requires unique consistency check IDs")
     pending = decision.get("pending_verification_rule_ids")
     if not isinstance(pending, (list, tuple)) or any(rule not in _TARGET_RULES for rule in pending):
         raise ValueError("Static gate has an unresolved rule without a verification route")
@@ -47,6 +50,11 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
         # task replacement or scale-out. Keep this visible until such a probe exists.
         obligations.append({"check_id": "CV-08", "due_gate": "target_verification",
                             "status": "pending", "verification_refs": []})
+    routed = {item["check_id"] for item in obligations}
+    for identifier in sorted(item["id"] for item in checks if item["status"] == "unknown"):
+        if identifier not in routed:
+            obligations.append({"check_id": identifier, "due_gate": "report",
+                                "status": "unverified", "verification_refs": []})
     return {
         "schema_version": 1,
         "compilation_id": compilation["compilation_id"],

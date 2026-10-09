@@ -149,6 +149,7 @@ def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
             'required_obligations': obligations,
             'target_verification_status': ('failed' if any(item['status'] == 'failed' for item in obligations)
                                            else 'pending' if any(item['status'] == 'pending' for item in obligations)
+                                           else 'unverified' if any(item['status'] == 'unverified' for item in obligations)
                                            else 'evidence_recorded' if obligations else 'not_required')}
 
 
@@ -257,6 +258,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         if 'source_evidence_ids' in check:
             check['source_evidence_ids'] = [identifier for identifier in check['source_evidence_ids']
                                             if identifier in valid_evidence_ids]
+    gate_snapshot = _gate_snapshot(job, infrastructure, completed)
+    unresolved_checks = [item['check_id'] for item in gate_snapshot['required_obligations']
+                         if item['status'] in {'pending', 'unverified'}]
     return {
         'schema_version': 1,
         'kind': 'sky-record-snapshot',
@@ -279,9 +283,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                      'promoted_from_job_id': promotion.get('source_job_id') if promoted else None,
                      'registry_manifest_digest': registry_digest},
         'decision_trace': decision_trace,
-        'verification_gates': _gate_snapshot(job, infrastructure, completed),
+        'verification_gates': gate_snapshot,
         'verification': checks,
-        'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],
+        'unverified': [item['name'] for item in checks if item['status'] == 'unverified'] + unresolved_checks,
         'rollback': {'previous_job_id': job.get('replaces_job_id'),
                      'state': job.get('release_rollback_state'), 'rehearsed': False},
         'cost': {'estimated_total': None, 'actual_total': None,
