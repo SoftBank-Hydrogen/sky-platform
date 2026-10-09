@@ -1,13 +1,17 @@
 """Database execution must match the compiled target's actual resource choice."""
 
 import copy
+import hashlib
+import sqlite3
 
 import pytest
 
 from adapters.aws.postgres import PostgresRequest
+from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.consistency import (
     check_database_consistency,
     check_port_consistency,
+    check_source_change_scope,
     check_target_resource_consistency,
     health_result_matches_plan,
 )
@@ -190,3 +194,54 @@ def test_aws_database_and_migration_resources_have_separate_adapter_capabilities
     plan = {"target": target, "resources": resources, "compatibility": {"access_mode": "public"}}
     compilation = {"target_plan": {"target": target, "resources": list(resources), "access_mode": "public"}}
     assert check_target_resource_consistency(compilation, plan, target)["status"] == "pass"
+
+
+def test_applied_source_changes_must_follow_agent_file_scope(tmp_path):
+    (tmp_path / "server.js").write_text("before")
+    record = {"changes": [{"path": "server.js", "before_sha256": "a", "after_sha256": "b"}]}
+    assert check_source_change_scope(record, tmp_path)["status"] == "pass"
+    for name in (
+        ".env",
+        "package-lock.json",
+        "node_modules/backdoor.js",
+        "migrations/extra.sql",
+        "Dockerfile",
+    ):
+        record["changes"][0]["path"] = name
+        with pytest.raises(ValueError, match="CV-02"):
+            check_source_change_scope(record, tmp_path)
+    record["changes"][0].update(path="server.js", after_sha256=None)
+    with pytest.raises(ValueError, match="CV-02"):
+        check_source_change_scope(record, tmp_path)
+
+
+def test_sqlite_conversion_requires_matching_approved_snapshot_and_generated_sql(tmp_path):
+    database = tmp_path / "data" / "scores.db"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE scores (id INTEGER PRIMARY KEY, value TEXT)")
+        connection.execute("INSERT INTO scores VALUES (1, 'hello')")
+    snapshot = compile_sqlite_snapshot(database)
+    approval = {
+        "path": "data/scores.db",
+        "source_sha256": snapshot.source_sha256,
+        "row_counts": snapshot.row_counts,
+        "schema": snapshot.schema,
+    }
+    record = {
+        "changes": [
+            {"path": "data/scores.db", "before_sha256": snapshot.source_sha256, "after_sha256": None},
+            {
+                "path": "migrations/0000_sky_sqlite_import.sql",
+                "before_sha256": None,
+                "after_sha256": hashlib.sha256(snapshot.sql.encode()).hexdigest(),
+            },
+        ]
+    }
+    assert check_source_change_scope(record, tmp_path, approval)["status"] == "pass"
+    record["changes"][1]["after_sha256"] = hashlib.sha256(b"different SQL").hexdigest()
+    with pytest.raises(ValueError, match="CV-02.*SQLite conversion"):
+        check_source_change_scope(record, tmp_path, approval)
+    record["changes"].pop()
+    with pytest.raises(ValueError, match="CV-02.*incomplete"):
+        check_source_change_scope(record, tmp_path, approval)

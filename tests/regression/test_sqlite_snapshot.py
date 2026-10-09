@@ -9,7 +9,10 @@ from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.aws.postgres import PostgresRequest
 from adapters.local.docker import LocalDockerAdapter
 from application.agent import DeploymentTools
+from application.consistency import check_source_change_scope
+from application.deployment_core import make_plan, source_digest
 from application.infrastructure import inspect_infrastructure, preflight_sqlite_conversion, validate_infrastructure
+from application.source_transform import source_transform_record
 
 
 class SqliteSnapshotTests(unittest.TestCase):
@@ -119,6 +122,14 @@ class SqliteSnapshotTests(unittest.TestCase):
             (tools.work / 'requirements.txt').write_text('flask\npsycopg\n')
             validate_infrastructure(inspect_infrastructure(tools.work), 'aws-ecs-express', postgres=True)
             self.assertTrue(tools.prepare_sqlite_migration()['prepared'])
+            compilation = {
+                'compilation_id': 'comp-example', 'decision_revision': 1,
+                'source_revision': source_digest(source),
+                'target_plan': {'id': 'target-example', 'target': 'aws-ecs-express'},
+            }
+            plan = make_plan(tools.work, 'server.py', None, target='aws-ecs-express')
+            record = source_transform_record(compilation, source, tools.work, plan)
+            self.assertEqual(check_source_change_scope(record, source, conversion)['status'], 'pass')
 
 
 if __name__ == '__main__':

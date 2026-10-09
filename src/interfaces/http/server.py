@@ -34,7 +34,8 @@ from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
 from application.consistency import (
-    check_database_consistency, check_port_consistency, check_target_resource_consistency, require_health_result)
+    check_database_consistency, check_port_consistency, check_source_change_scope,
+    check_target_resource_consistency, require_health_result)
 from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
@@ -297,6 +298,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                         job['compilation'], project, work, plan)
                 checks = [
                     check_database_consistency(job['infrastructure_plan'], inspect_infrastructure(work)),
+                    check_source_change_scope(job['source_transform'], project),
                     check_port_consistency(plan),
                     check_target_resource_consistency(job['compilation'], job['infrastructure_plan'], job['target']),
                 ]

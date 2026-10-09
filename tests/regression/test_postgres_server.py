@@ -608,6 +608,7 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['attempts'], 1)
         self.assertEqual(job['consistency_checks'], [
             {'id': 'CV-03', 'status': 'pass', 'source': 'final_working_copy'},
+            {'id': 'CV-02', 'status': 'pass', 'source': 'applied_source_transform'},
             {'id': 'CV-06', 'status': 'unknown', 'source': 'executable_dockerfile'},
             {'id': 'CV-09', 'status': 'pass', 'source': 'compiled_target_plan'}])
         self.assertEqual(job['changes'][0]['path'], 'app.py')

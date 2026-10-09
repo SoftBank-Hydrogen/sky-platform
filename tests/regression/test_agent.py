@@ -109,6 +109,26 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.tools.attempts, 1)
         cleanup.assert_called_once_with(attempt_id)
 
+    def test_compiled_deployment_rejects_unapproved_working_copy_file_before_adapter(self):
+        revision = source_digest(self.original)
+        self.tools.compilation = {
+            'compilation_id': 'comp-example', 'decision_revision': 1,
+            'source_revision': revision,
+            'target_plan': {'id': 'target-example', 'target': 'local-docker'},
+        }
+        self.tools.architecture_decision = {'decision_id': 'decision-example'}
+        self.tools.infrastructure_plan = {'compatibility': {}}
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        (self.tools.work / '.env').write_text('EXAMPLE=not-a-secret\n')
+        self.tools.configure_deployment('start', None, 3000, '/', [])
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'CV-02'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_patch_requires_read_and_exact_match(self):
         with self.assertRaisesRegex(ValueError, 'Read'):
             self.tools.apply_project_patch('server.js', 'http', 'https')

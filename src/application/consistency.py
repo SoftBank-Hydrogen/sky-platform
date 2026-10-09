@@ -3,16 +3,74 @@
 from __future__ import annotations
 
 import re
+import hashlib
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from adapters.aws.postgres import PostgresRequest
-from application.deployment_core import DeploymentPlan
+from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
+from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE_SUFFIXES
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import InfrastructureProfile
 
 
 class HealthResultMismatch(ValueError):
     retryable = False
+
+
+def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None) -> dict:
+    """Check verified source changes against edit scope and the reviewed SQLite exception."""
+    changes = record.get("changes") if isinstance(record, dict) else None
+    if not isinstance(changes, list):
+        raise ValueError("CV-02: Applied source change record is missing")
+    migration_path = "migrations/0000_sky_sqlite_import.sql"
+    allowed_conversion = {}
+    if sqlite_conversion is not None:
+        path = sqlite_conversion.get("path") if isinstance(sqlite_conversion, dict) else None
+        if not isinstance(path, str) or not path or path == migration_path:
+            raise ValueError("CV-02: SQLite conversion path is invalid")
+        source = PurePosixPath(path)
+        if source.is_absolute() or ".." in source.parts or source.as_posix() != path:
+            raise ValueError("CV-02: SQLite conversion path is invalid")
+        try:
+            snapshot = compile_sqlite_snapshot(original.joinpath(*source.parts))
+        except ValueError:
+            raise ValueError("CV-02: Approved SQLite snapshot is no longer valid") from None
+        if (snapshot.source_sha256 != sqlite_conversion.get("source_sha256")
+                or snapshot.row_counts != sqlite_conversion.get("row_counts")
+                or snapshot.schema != sqlite_conversion.get("schema")):
+            raise ValueError("CV-02: SQLite conversion approval differs from the uploaded source")
+        allowed_conversion = {
+            path: (snapshot.source_sha256, None),
+            migration_path: (None, hashlib.sha256(snapshot.sql.encode()).hexdigest()),
+        }
+
+    observed = set()
+    for item in changes:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError("CV-02: Applied source change is invalid")
+        name = item["path"]
+        path = PurePosixPath(name)
+        if (not name or path.is_absolute() or ".." in path.parts or "\\" in name
+                or path.as_posix() != name or name in observed
+                or any(part.startswith(".") or part in {"node_modules", "dist", "build", "vendor"}
+                       for part in path.parts)):
+            raise ValueError(f"CV-02: Source change path is outside the allowlist: {name}")
+        observed.add(name)
+        hashes = (item.get("before_sha256"), item.get("after_sha256"))
+        if name in allowed_conversion:
+            if hashes != allowed_conversion[name]:
+                raise ValueError(f"CV-02: Approved SQLite conversion changed unexpectedly: {name}")
+            continue
+        if (hashes[1] is None or name in {"package-lock.json", "Gemfile.lock", "poetry.lock",
+                                         "go.sum", "Cargo.lock"}
+                or (name == "Dockerfile" and not (original / name).is_file())
+                or (name != "Dockerfile" and path.suffix not in SOURCE_SUFFIXES
+                    and path.name not in SOURCE_FILENAMES)):
+            raise ValueError(f"CV-02: Source change is outside the allowlist: {name}")
+    if set(allowed_conversion) - observed:
+        raise ValueError("CV-02: Approved SQLite conversion is incomplete")
+    return {"id": "CV-02", "status": "pass", "source": "applied_source_transform"}
 
 
 def health_result_matches_plan(plan: dict, result: dict) -> bool:
