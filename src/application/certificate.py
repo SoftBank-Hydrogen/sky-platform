@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
+from application.deployment_core import DeploymentPlan
+from application.source_transform import executable_plan_digest, resolved_target_plan
 from engine.architecture_decision import verify_architecture_decision
 from engine.compilation import verify_compilation
 from engine.deployment_policy import policy_from_record
@@ -153,6 +155,46 @@ def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
                                            else 'evidence_recorded' if obligations else 'not_required')}
 
 
+def _evidence_chain(job: dict, decision_trace: dict, gate: dict, http_verified: bool) -> dict:
+    """Link persisted source, decision, transform, and target evidence without a fresh probe."""
+    compilation = job.get('compilation')
+    transform = job.get('source_transform')
+    plan_record = job.get('plan')
+    target_plan = compilation.get('target_plan') if isinstance(compilation, dict) else None
+    linked = False
+    if isinstance(target_plan, dict) and isinstance(transform, dict) and isinstance(plan_record, dict):
+        try:
+            plan = DeploymentPlan(**plan_record)
+            linked = bool(
+                decision_trace['status'] == 'recorded'
+                and gate['status'] == 'recorded'
+                and http_verified
+                and transform.get('schema_version') == 2
+                and compilation.get('source_revision') == _digest(job.get('source_digest'))
+                and compilation.get('architecture_decision_id') == decision_trace['decision_id']
+                and transform.get('compilation_id') == compilation.get('compilation_id')
+                and transform.get('decision_revision') == compilation.get('decision_revision')
+                and transform.get('source_revision') == compilation.get('source_revision')
+                and transform.get('target_plan_id') == target_plan.get('id')
+                and transform.get('transformed_source_revision') == plan.source_digest
+                and transform.get('executable_plan_digest') == executable_plan_digest(plan)
+                and transform.get('resolved_target') == resolved_target_plan(target_plan, plan)
+                and plan.target == job.get('target') == target_plan.get('target')
+            )
+        except (TypeError, ValueError, KeyError, AttributeError):
+            pass
+    return {
+        'status': 'linked' if linked else 'incomplete',
+        'source_revision': _digest(job.get('source_digest')),
+        'decision_id': decision_trace.get('decision_id'),
+        'compilation_id': compilation.get('compilation_id') if isinstance(compilation, dict) else None,
+        'target_plan_id': target_plan.get('id') if isinstance(target_plan, dict) else None,
+        'transformed_source_revision': (_digest(transform.get('transformed_source_revision'))
+                                        if isinstance(transform, dict) else None),
+        'verification_ref': 'deployment_http' if linked else None,
+    }
+
+
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
@@ -164,6 +206,13 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     image_digest = result.get('image_digest') if isinstance(result.get('image_digest'), str) else None
     registry_digest = image_digest if image_digest and re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest) else None
     completed = job.get('status') == 'succeeded' and bool(result.get('url'))
+    # Legacy jobs may lack a saved executable endpoint. Modern compilations must
+    # agree with the actual adapter health result before the report claims HTTP.
+    endpoint_recorded = all(key in plan for key in ('target', 'port', 'health_path'))
+    legacy_http = not endpoint_recorded and not isinstance(job.get('compilation'), dict)
+    matched_http = (endpoint_recorded and plan.get('target') == job.get('target')
+                    and health_result_matches_plan(plan, result))
+    http_verified = bool(completed and (legacy_http or matched_http))
     rehearsal_passed = bool(completed and rehearsal.get('status') == 'passed'
                             and isinstance(rehearsal.get('image_id'), str)
                             and re.fullmatch(r'sha256:[a-f0-9]{64}', rehearsal['image_id']))
@@ -185,9 +234,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     history = health_history or []
     latest_health = history[-1] if history else None
     checks = [
-        {'name': 'deployment_http', 'status': 'passed' if completed else 'unverified',
+        {'name': 'deployment_http', 'status': 'passed' if http_verified else 'unverified',
          'detail': ('배포 작업이 실제 HTTP 응답을 확인한 뒤 완료로 기록했습니다. 현재 가용성은 별도 검사입니다.'
-                    if completed else '완료된 배포의 HTTP 확인 기록이 없습니다.')},
+                    if http_verified else '실행 계획과 일치하는 배포 HTTP 확인 기록이 없습니다.')},
         {'name': 'local_rehearsal', 'status': 'passed' if rehearsal_passed else 'unverified',
          'detail': ('클라우드 업로드 전에 같은 태그의 이미지를 로컬에서 실행해 HTTP 200을 확인했습니다.'
                     if rehearsal_passed else '같은 산출물의 로컬 리허설 결과가 기록되지 않았습니다.')},
@@ -259,6 +308,7 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
             check['source_evidence_ids'] = [identifier for identifier in check['source_evidence_ids']
                                             if identifier in valid_evidence_ids]
     gate_snapshot = _gate_snapshot(job, infrastructure, completed)
+    evidence_chain = _evidence_chain(job, decision_trace, gate_snapshot, http_verified)
     unresolved_checks = [item['check_id'] for item in gate_snapshot['required_obligations']
                          if item['status'] in {'pending', 'unverified'}]
     return {
@@ -284,6 +334,7 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                      'registry_manifest_digest': registry_digest},
         'decision_trace': decision_trace,
         'verification_gates': gate_snapshot,
+        'evidence_chain': evidence_chain,
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'] + unresolved_checks,
         'rollback': {'previous_job_id': job.get('replaces_job_id'),

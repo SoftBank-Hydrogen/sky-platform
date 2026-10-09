@@ -139,6 +139,7 @@ def main() -> None:
             websocket = app.check_and_record_websocket(job_id)
             report = deployment_certificate(app.jobs[job_id])
             assert websocket['status'] == 'passed', websocket
+            assert report['evidence_chain']['status'] == 'linked', report['evidence_chain']
             checks = {item['name']: item['status'] for item in report['verification']}
             assert checks['local_sqlite_mount'] == 'passed', checks
             assert checks['websocket_round_trip'] == 'passed', checks

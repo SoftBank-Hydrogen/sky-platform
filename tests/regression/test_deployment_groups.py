@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,7 @@ from adapters.aws.ecs import AwsSettings
 from application.analysis import AISettings
 from application.certificate import deployment_certificate
 from application.deployment_core import analyze
+from application.source_transform import source_transform_record
 from application.verification_gates import static_consistency_gate
 from interfaces.http.server import App, handler_for
 
@@ -192,6 +194,45 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(job['static_consistency_gate']['required_obligations'][0]['status'], 'pending')
         job['status'] = 'failed'
         self.assertEqual(obligation()['status'], 'pending')
+
+    def test_certificate_links_only_matching_compiled_deployment_evidence(self):
+        group = self.create()
+        job = self.app.jobs[group['targets'][0]['job_id']]
+        project = Path(job['project'])
+        plan = analyze(project)
+        job['plan'] = asdict(plan)
+        job['source_transform'] = source_transform_record(
+            job['compilation'], project, project, plan)
+        checks = [{'id': 'CV-06', 'status': 'unknown', 'source': 'executable_dockerfile'}]
+        job['consistency_checks'] = checks
+        job['static_consistency_gate'] = static_consistency_gate(
+            job['compilation'], job['architecture_decision'], checks)
+        job['status'] = 'succeeded'
+        job['result'] = {'url': 'http://127.0.0.1:12345',
+                         'health_url': 'http://127.0.0.1:12345' + plan.health_path}
+
+        certificate = deployment_certificate(job)
+        self.assertEqual(certificate['evidence_chain']['status'], 'linked')
+        self.assertEqual(certificate['evidence_chain']['verification_ref'], 'deployment_http')
+        self.assertEqual(certificate['verification_gates']['required_obligations'][0]['status'], 'verified')
+        self.app.save(job['id'])
+        restored = App(self.app.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.app.aws_settings, monitor_interval=0)
+        self.assertEqual(deployment_certificate(restored.jobs[job['id']])['evidence_chain']['status'],
+                         'linked')
+
+        job['result']['health_url'] += '/wrong'
+        certificate = deployment_certificate(job)
+        self.assertEqual(certificate['evidence_chain']['status'], 'incomplete')
+        self.assertEqual(next(item for item in certificate['verification']
+                              if item['name'] == 'deployment_http')['status'], 'unverified')
+        job['result']['health_url'] = 'http://127.0.0.1:12345' + plan.health_path
+
+        job['source_transform']['transformed_source_revision'] = '0' * 64
+        self.assertEqual(deployment_certificate(job)['evidence_chain']['status'], 'incomplete')
+        job['source_transform']['transformed_source_revision'] = plan.source_digest
+        job['static_consistency_gate']['compilation_id'] = 'comp-other'
+        self.assertEqual(deployment_certificate(job)['evidence_chain']['status'], 'incomplete')
 
     def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
         group = self.create()
