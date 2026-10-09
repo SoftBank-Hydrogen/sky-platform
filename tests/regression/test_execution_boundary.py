@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
 from adapters.local.compose import LocalComposeAdapter
 from adapters.local.docker import LocalDockerAdapter
 from application.deployment_core import make_plan
@@ -78,6 +79,53 @@ class ExecutionBoundaryTests(unittest.TestCase):
                 with self.subTest(change=change), patch.object(adapter, "deploy", return_value={**result, **change}):
                     with self.assertRaisesRegex(ValueError, "소유권 또는 루프백"):
                         execute(request, ExecutionState(adapter))
+
+    def test_aws_declares_only_implemented_scope_and_passes_database_inputs(self):
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings("ap-northeast-2"))
+        capabilities = adapter.execution_capabilities()
+        self.assertEqual(capabilities.target, "aws-ecs-express")
+        self.assertEqual(capabilities.access_modes, frozenset({"public"}))
+        self.assertTrue(capabilities.postgresql_binding)
+        self.assertFalse(capabilities.sqlite_volume)
+        self.assertFalse(capabilities.remote_host)
+        self.assertFalse(capabilities.rollback)
+        database, migrations = object(), object()
+        request = replace(
+            self.request, target="aws-ecs-express",
+            plan=replace(self.request.plan, target="aws-ecs-express"), access_mode="public",
+            postgresql_binding=True, postgres_request=database, migrations=migrations,
+        )
+        result = {"url": "https://example.test", "target": "aws-ecs-express"}
+        with patch.object(adapter, "deploy", return_value=result) as deploy:
+            self.assertEqual(execute(request, ExecutionState(adapter)), result)
+            deploy.assert_called_once_with(
+                request.project, request.plan, request.attempt_id, request.environment,
+                postgres=database, migrations=migrations,
+            )
+        self.assertNotIn("synthetic-private-value", repr(request))
+
+    def test_aws_rejects_inconsistent_requirements_before_adapter_call(self):
+        adapter = AwsExpressAdapter(lambda *_: None, AwsSettings("ap-northeast-2"))
+        request = replace(
+            self.request, target="aws-ecs-express",
+            plan=replace(self.request.plan, target="aws-ecs-express"), access_mode="public",
+        )
+        invalid = (
+            replace(request, access_mode="loopback"),
+            replace(request, sqlite_binding={"volume_name": "sky-data-demo"}),
+            replace(request, remote_host=True),
+            replace(request, postgresql_binding=True),
+            replace(request, postgres_request=object()),
+            replace(request, migrations=object()),
+        )
+        with patch.object(adapter, "deploy") as deploy:
+            for candidate in invalid:
+                with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                    execute(candidate, ExecutionState(adapter))
+            deploy.assert_not_called()
+        with patch.object(adapter, "deploy", return_value={"target": "cloud-run"}):
+            with self.assertRaisesRegex(ValueError, "AWS 배포 결과의 대상"):
+                execute(request, ExecutionState(adapter))
 
     def test_supported_request_calls_compose_and_preserves_private_environment(self):
         captured = []

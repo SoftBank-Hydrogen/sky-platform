@@ -22,8 +22,10 @@ from pathlib import Path
 from assets import ASSET_ROOT
 from application.analysis import redact
 from application.deployment_core import source_digest, validate_environment
+from application.execution import ExecutionCapabilities
 from adapters.build.image import ImageBuilder, RDS_CA_CONTAINER_PATH
 from adapters.local.rehearsal import inspect_image_id, rehearse_image
+from engine.compatibility import TARGET_CAPABILITIES
 
 
 class AwsConfigurationError(RuntimeError):
@@ -132,6 +134,15 @@ class AwsSettings:
 
 
 class AwsExpressAdapter:
+    @staticmethod
+    def execution_capabilities() -> ExecutionCapabilities:
+        declared = TARGET_CAPABILITIES['aws-ecs-express']
+        return ExecutionCapabilities(
+            target='aws-ecs-express',
+            access_modes=frozenset(declared['access_modes']),
+            postgresql_binding=declared['postgresql_binding'],
+        )
+
     def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None,
                  rehearsal=False, promoted_image=None):
         if rehearsal and promoted_image is not None:

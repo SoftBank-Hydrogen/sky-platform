@@ -438,9 +438,13 @@ class DeploymentTools:
                     environment=self.environment, sqlite_binding=self.local_sqlite_binding,
                     postgresql_binding=self.postgres_request is not None,
                 ), ExecutionState(adapter))
-            elif self.postgres_request is not None:
-                self.result = adapter.deploy(context, self.plan, attempt_id, self.environment,
-                                             postgres=self.postgres_request, migrations=migrations)
+            elif self.target == "aws-ecs-express":
+                self.result = execute(ExecutionRequest(
+                    target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
+                    environment=self.environment, access_mode="public",
+                    postgresql_binding=self.postgres_request is not None,
+                    postgres_request=self.postgres_request, migrations=migrations,
+                ), ExecutionState(adapter))
             else:
                 self.result = adapter.deploy(context, self.plan, attempt_id, self.environment)
             return {"verified": True, **self.result}
