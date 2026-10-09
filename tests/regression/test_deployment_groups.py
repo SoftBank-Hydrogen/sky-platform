@@ -164,6 +164,7 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(self.app.jobs[aws_id]['attempts'], 1)
         self.assertEqual(self.app.jobs[aws_id]['source_transform']['compilation_id'],
                          self.app.jobs[aws_id]['compilation']['compilation_id'])
+        self.assertEqual(self.app.jobs[aws_id]['consistency_checks'][0]['status'], 'unknown')
         self.assertEqual(self.app.deployment_group(group['id'])['status'], 'succeeded')
 
     def test_required_env_pauses_aws_then_resumes_same_image_after_restart(self):

@@ -604,6 +604,8 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(job['status'], 'succeeded', job['events'][-1])
         self.assertEqual(job['steps'], 4)
         self.assertEqual(job['attempts'], 1)
+        self.assertEqual(job['consistency_checks'], [
+            {'id': 'CV-03', 'status': 'pass', 'source': 'final_working_copy'}])
         self.assertEqual(job['changes'][0]['path'], 'app.py')
         self.assertEqual((Path(job['project']) / 'app.py').read_text(), original)
         self.assertEqual(len(calls), 1)

@@ -20,6 +20,7 @@ from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
+from application.consistency import check_database_consistency
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
@@ -431,7 +432,8 @@ class DeploymentTools:
                 self.local_sqlite_binding["application_id"], self.local_sqlite_binding["mount_path"])
             if checked != self.local_sqlite_binding:
                 raise ValueError("SQLite 소스·볼륨 경로가 승인된 배포 입력과 달라졌습니다.")
-        validate_infrastructure(inspect_infrastructure(self.work), self.target,
+        final_profile = inspect_infrastructure(self.work)
+        validate_infrastructure(final_profile, self.target,
                                 postgres=self.postgres_request is not None,
                                 local_sqlite=self.local_sqlite_binding is not None)
         migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
@@ -440,6 +442,12 @@ class DeploymentTools:
         if self.compilation is not None:
             verify_source_transform(
                 self.source_transform, self.compilation, self.original, self.work, self.plan)
+            database_check = check_database_consistency(
+                self.infrastructure_plan, final_profile,
+                postgres_request=self.postgres_request,
+                sqlite_conversion=self.sqlite_conversion,
+                local_sqlite_binding=self.local_sqlite_binding)
+            self.checkpoint(consistency_checks=[database_check])
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]
