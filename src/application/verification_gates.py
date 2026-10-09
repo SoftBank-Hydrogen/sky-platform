@@ -27,6 +27,11 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
         )
     ):
         raise ValueError("Static gate requires valid consistency checks")
+    deployment_ir = compilation.get("deployment_ir")
+    if (isinstance(deployment_ir, dict)
+            and "session_affinity_behavior" in (deployment_ir.get("unknowns") or ())
+            and not any(item.get("id") == "CV-08" and item.get("status") == "unknown" for item in checks)):
+        raise ValueError("Static gate requires CV-08 WebSocket state uncertainty")
     pending = decision.get("pending_verification_rule_ids")
     if not isinstance(pending, (list, tuple)) or any(rule not in _TARGET_RULES for rule in pending):
         raise ValueError("Static gate has an unresolved rule without a verification route")
@@ -36,6 +41,11 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
     ]
     if any(item["id"] == "CV-06" and item["status"] == "unknown" for item in checks):
         obligations.append({"check_id": "CV-06", "due_gate": "target_verification",
+                            "status": "pending", "verification_refs": []})
+    if any(item["id"] == "CV-08" and item["status"] == "unknown" for item in checks):
+        # A single WebSocket handshake cannot prove session continuity after
+        # task replacement or scale-out. Keep this visible until such a probe exists.
+        obligations.append({"check_id": "CV-08", "due_gate": "target_verification",
                             "status": "pending", "verification_refs": []})
     return {
         "schema_version": 1,

@@ -213,6 +213,26 @@ def check_target_resource_consistency(compilation: dict, infrastructure_plan: di
     return {"id": "CV-09", "status": "pass", "source": "compiled_target_plan"}
 
 
+def check_websocket_state_consistency(compilation: dict) -> dict | None:
+    """Keep process-local WebSocket state unresolved despite a one-replica plan."""
+    deployment_ir = compilation.get("deployment_ir") if isinstance(compilation, dict) else None
+    if not isinstance(deployment_ir, dict):
+        raise ValueError("CV-08: Compiled deployment IR is missing")
+    unknowns = deployment_ir.get("unknowns")
+    if not isinstance(unknowns, (list, tuple)):
+        raise ValueError("CV-08: Compiled state uncertainty is missing")
+    if "session_affinity_behavior" not in unknowns:
+        return None
+    services = deployment_ir.get("services")
+    if (not isinstance(services, list) or len(services) != 1
+            or not isinstance(services[0], dict)
+            or services[0].get("id") != "source-bundle"
+            or type(services[0].get("replicas")) is not int
+            or services[0]["replicas"] != 1):
+        raise ValueError("CV-08: Process-local WebSocket state requires a one-replica plan")
+    return {"id": "CV-08", "status": "unknown", "source": "websocket_state_and_replica_plan"}
+
+
 def check_port_consistency(plan: DeploymentPlan) -> dict:
     """Compare the executable HTTP port with unambiguous final-image declarations.
 

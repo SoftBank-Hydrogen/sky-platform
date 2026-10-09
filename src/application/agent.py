@@ -23,7 +23,7 @@ from application.source_transform import source_transform_record, verify_source_
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
-    check_sqlite_migration_consistency,
+    check_sqlite_migration_consistency, check_websocket_state_consistency,
     check_target_resource_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
                                         reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source)
@@ -468,6 +468,10 @@ class DeploymentTools:
                       check_source_change_scope(self.source_transform, self.original, self.sqlite_conversion),
                       check_port_consistency(self.plan),
                       check_target_resource_consistency(self.compilation, self.infrastructure_plan, self.target)]
+            if self.compilation.get("deployment_ir") is not None:
+                state_check = check_websocket_state_consistency(self.compilation)
+                if state_check is not None:
+                    checks.append(state_check)
             if self.sqlite_conversion is not None:
                 checks.append(check_sqlite_migration_consistency(
                     self.infrastructure_plan, final_profile, self.original, self.sqlite_conversion,

@@ -36,7 +36,7 @@ from application.source_transform import source_transform_record, verify_source_
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
-    check_target_resource_consistency, require_health_result)
+    check_target_resource_consistency, check_websocket_state_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
                                         reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source)
 from application.verification_gates import static_consistency_gate
@@ -305,6 +305,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                     check_port_consistency(plan),
                     check_target_resource_consistency(job['compilation'], job['infrastructure_plan'], job['target']),
                 ]
+                state_check = check_websocket_state_consistency(job['compilation'])
+                if state_check is not None:
+                    checks.append(state_check)
                 gate = static_consistency_gate(job['compilation'], job['architecture_decision'], checks)
                 if job.get('static_consistency_gate') is not None and job['static_consistency_gate'] != gate:
                     raise ValueError('저장된 정적 검증 게이트가 컴파일 결과와 다릅니다.')

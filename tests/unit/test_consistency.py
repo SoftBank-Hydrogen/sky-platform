@@ -13,6 +13,7 @@ from application.consistency import (
     check_port_consistency,
     check_source_change_scope,
     check_target_resource_consistency,
+    check_websocket_state_consistency,
     health_result_matches_plan,
 )
 from application.deployment_core import make_plan
@@ -25,6 +26,29 @@ SQLITE = InfrastructureProfile(
     "sqlite", (), 1, requirements=("database", "sqlite"), database_engines=("sqlite",)
 )
 NO_SIGNAL = InfrastructureProfile("unconfirmed", (), 1)
+
+
+def test_websocket_process_state_requires_conservative_replica_plan():
+    compilation = {
+        "deployment_ir": {
+            "unknowns": ["target_websocket_round_trip", "session_affinity_behavior"],
+            "services": [{"id": "source-bundle", "kind": "container_service", "replicas": 1}],
+        }
+    }
+    assert check_websocket_state_consistency(compilation) == {
+        "id": "CV-08",
+        "status": "unknown",
+        "source": "websocket_state_and_replica_plan",
+    }
+    changed = copy.deepcopy(compilation)
+    changed["deployment_ir"]["services"][0]["replicas"] = 2
+    with pytest.raises(ValueError, match="CV-08"):
+        check_websocket_state_consistency(changed)
+    changed["deployment_ir"]["services"] = [None]
+    with pytest.raises(ValueError, match="CV-08"):
+        check_websocket_state_consistency(changed)
+    changed["deployment_ir"]["unknowns"] = ["statelessness"]
+    assert check_websocket_state_consistency(changed) is None
 
 
 def test_postgres_plan_requires_same_database_resource_and_final_source():
