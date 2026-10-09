@@ -14,9 +14,21 @@ from pathlib import Path
 from adapters.build.image import ImageBuilder
 from adapters.local.rehearsal import inspect_image_id
 from application.deployment_core import DeploymentPlan, source_digest, validate_environment
+from application.execution import ExecutionCapabilities
+from engine.compatibility import TARGET_CAPABILITIES
 
 
 class LocalDockerAdapter:
+    @staticmethod
+    def execution_capabilities() -> ExecutionCapabilities:
+        declared = TARGET_CAPABILITIES["local-docker"]
+        return ExecutionCapabilities(
+            target="local-docker",
+            access_modes=frozenset(declared["access_modes"]),
+            sqlite_volume=True,
+            postgresql_binding=declared["postgresql_binding"],
+        )
+
     def __init__(self, event, *, platform: str | None = None,
                  sqlite_binding: dict | None = None):
         self.event = event

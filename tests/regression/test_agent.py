@@ -248,6 +248,7 @@ class AgentTests(unittest.TestCase):
         class Adapter:
             def __init__(self, event):
                 self.event = event
+            execution_capabilities = staticmethod(LocalDockerAdapter.execution_capabilities)
             def deploy(self, project, plan, attempt_id, environment):
                 attempts.append(plan)
                 if len(attempts) == 1:
@@ -255,7 +256,8 @@ class AgentTests(unittest.TestCase):
                     raise RuntimeError('HTTP connection failed')
                 self.assert_binding = "'0.0.0.0'" in (project / 'server.js').read_text()
                 assert self.assert_binding
-                return {'url': 'http://127.0.0.1:1234'}
+                return {'url': 'http://127.0.0.1:1234', 'container': f'sky-{attempt_id}',
+                        'image': f'sky/{attempt_id}:latest'}
             def command(self, args, timeout):
                 return ''
             def cleanup_failure(self, attempt_id):
@@ -276,6 +278,7 @@ class AgentTests(unittest.TestCase):
             image = 'example.amazonaws.com/sky-managed:aaaaaaaaaaaaaaaa-a1'
             def __init__(self, event):
                 self.event = event
+            execution_capabilities = staticmethod(LocalDockerAdapter.execution_capabilities)
             def deploy(self, *_args):
                 raise RuntimeError('HTTP verification failed')
             def cleanup_failure(self, _attempt_id):

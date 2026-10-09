@@ -10,11 +10,69 @@ from unittest.mock import Mock, patch
 from tests.support.agent_fixture import call
 from application.analysis import AISettings
 from application.deployment_core import source_digest
+from adapters.local.compose import LocalComposeAdapter
 from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
+    def test_compose_environment_pause_survives_restart_and_uses_compose_adapter(self):
+        actions = [
+            ('read_project_files', {'paths': ['package.json', 'server.js']}),
+            ('configure_deployment', {'start_script': 'start', 'build_script': None,
+                                      'port': 8080, 'health_path': '/',
+                                      'required_env': ['APP_SECRET']}),
+            ('deploy_application', {}),
+        ]
+
+        class ScriptedAgent:
+            def __init__(self):
+                self.index = 0
+
+            def next(self, _history):
+                name, arguments = actions[self.index]
+                self.index += 1
+                return call(name, arguments, self.index)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_id = 'e' * 16
+            source = root / job_id / 'source'
+            shutil.copytree('tests/fixtures/apps/hello-node', source)
+            settings = AISettings('fixture-key', 'fixture-model')
+            app = App(root, settings, agent_factory=lambda _: ScriptedAgent(), monitor_interval=0,
+                      github_poll_interval=0)
+            app.jobs[job_id] = {'id': job_id, 'mode': 'agent', 'status': 'running',
+                                'target': 'onprem-compose', 'project': str(source),
+                                'plan': None, 'events': [], 'attempts': 0,
+                                'source_digest': source_digest(source)}
+            app.save(job_id)
+            with patch.object(LocalComposeAdapter, 'deploy') as deploy:
+                app.run_agent(job_id)
+                deploy.assert_not_called()
+            self.assertEqual(app.jobs[job_id]['status'], 'waiting_input')
+            work_digest = app.jobs[job_id]['work_digest']
+            restored = App(root, settings, agent_factory=lambda _: ScriptedAgent(),
+                           monitor_interval=0, github_poll_interval=0)
+            self.assertEqual(restored.jobs[job_id]['status'], 'waiting_input')
+            self.assertEqual(restored.jobs[job_id]['work_digest'], work_digest)
+            supplied = {'APP_SECRET': 'synthetic-compose-secret'}
+            received = []
+            def deployed(_project, _plan, _attempt_id, environment):
+                received.append(dict(environment))
+                return {'url': 'http://127.0.0.1:12345',
+                        'container': f'sky-{_attempt_id}',
+                        'compose_project': f'sky-{_attempt_id}',
+                        'image': f'sky/{_attempt_id}:latest',
+                        'compose_sha256': 'a' * 64}
+            with patch.object(LocalComposeAdapter, 'deploy', side_effect=deployed) as deploy:
+                restored.run_agent(job_id, supplied)
+            self.assertEqual(restored.jobs[job_id]['status'], 'succeeded')
+            self.assertEqual(deploy.call_count, 1)
+            self.assertEqual(received, [{'APP_SECRET': 'synthetic-compose-secret'}])
+            self.assertEqual(supplied, {})
+            self.assertNotIn('synthetic-compose-secret', (root / job_id / 'job.json').read_text())
+
     def test_environment_pause_restart_keeps_repairs_and_hides_secret(self):
         first_actions = [
             ('read_project_files', {'paths': ['package.json', 'server.js']}),
@@ -85,7 +143,8 @@ class AgentResumeTests(unittest.TestCase):
                 seen_environment = []
                 def deployed(_project, _plan, _attempt_id, environment):
                     seen_environment.append(dict(environment))
-                    return {'url': 'http://127.0.0.1:12345'}
+                    return {'url': 'http://127.0.0.1:12345',
+                            'container': f'sky-{_attempt_id}', 'image': f'sky/{_attempt_id}:latest'}
                 deploy.side_effect = deployed
                 restored.run_agent(job_id, supplied)
                 self.assertEqual(supplied, {})
