@@ -1,8 +1,10 @@
 """Real Sky intake/agent/Docker game smoke with deterministic offline agent calls."""
+import argparse
 import io
 import json
 import subprocess
 import tempfile
+import time
 import unittest.mock
 import urllib.request
 import uuid
@@ -32,7 +34,72 @@ class OfflineAgent:
                  'name': name, 'arguments': json.dumps(arguments)}]
 
 
+def check_session_after_restart(url: str, container: str) -> dict:
+    """Observe whether a joined player survives a disposable app restart."""
+    endpoint = url.replace('http://', 'ws://', 1) + '/ws'
+    hold = r"""
+const ws = new WebSocket(process.argv[1]);
+const timer = setTimeout(() => { console.log('TIMEOUT'); process.exit(3); }, 30000);
+ws.addEventListener('open', () => ws.send(JSON.stringify({type:'join'})));
+ws.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.type === 'welcome') console.log('WELCOME ' + JSON.stringify(message));
+});
+ws.addEventListener('close', () => { clearTimeout(timer); console.log('CLOSED'); process.exit(0); });
+ws.addEventListener('error', () => {});
+"""
+    client = subprocess.Popen(
+        ['node', '-e', hold, endpoint], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        welcome_line = client.stdout.readline().strip()
+        if not welcome_line.startswith('WELCOME '):
+            raise AssertionError('Joined player did not receive a welcome message')
+        first = json.loads(welcome_line.removeprefix('WELCOME '))
+        subprocess.run(['docker', 'restart', container], check=True, capture_output=True, timeout=60)
+        remaining, errors = client.communicate(timeout=35)
+        if client.returncode != 0 or 'CLOSED' not in remaining.splitlines():
+            raise AssertionError('Player connection did not close on restart: ' + errors[:200])
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.communicate()
+
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(url + '/health', timeout=2) as response:
+                if response.status == 200:
+                    break
+        except OSError:
+            time.sleep(1)
+    else:
+        raise AssertionError('Game did not recover after restart')
+    rejoin = r"""
+const ws = new WebSocket(process.argv[1]);
+const timer = setTimeout(() => process.exit(3), 10000);
+ws.addEventListener('open', () => ws.send(JSON.stringify({type:'join'})));
+ws.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.type === 'welcome') {
+    clearTimeout(timer); console.log(JSON.stringify(message)); ws.close();
+  }
+});
+ws.addEventListener('error', () => process.exit(4));
+"""
+    result = subprocess.run(
+        ['node', '-e', rejoin, endpoint], check=True, capture_output=True, text=True, timeout=15
+    )
+    second = json.loads(result.stdout.strip())
+    players = second.get('players') or {}
+    if first['id'] == second['id'] or sum(players.values()) != 1:
+        raise AssertionError('Expected a new player identity and an empty room after restart')
+    return {'connection_closed': True, 'player_identity_preserved': False, 'room_reset': True}
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--session-restart', action='store_true')
+    args = parser.parse_args()
     application_id = 'offline-' + uuid.uuid4().hex[:16]
     archive = Path(__file__).resolve().parents[3] / 'demo-game' / 'TUG-Sky-almostfinaltest.zip'
     payload = archive.read_bytes()
@@ -59,6 +126,12 @@ def main() -> None:
                 print('failed_events', [(e.get('stage'), e.get('message', '')[:240])
                                         for e in job.get('events', [])[-8:]])
                 raise AssertionError('Sky job did not succeed')
+            resolved = job['source_transform']['resolved_target']
+            if (job['source_transform'].get('schema_version') != 2
+                    or resolved['target_plan_id'] != job['compilation']['target_plan']['id']
+                    or resolved['container_port'] != 8080
+                    or resolved['health_path'] != '/health'):
+                raise AssertionError('Compiled HTTP endpoint was not resolved into the execution record')
             with urllib.request.urlopen(job['result']['url'] + '/api/scoreboard', timeout=5) as response:
                 scoreboard = json.load(response)
             assert scoreboard['rounds'] == 13, scoreboard
@@ -70,10 +143,15 @@ def main() -> None:
             assert checks['local_sqlite_mount'] == 'passed', checks
             assert checks['websocket_round_trip'] == 'passed', checks
             assert checks['data_persistence_after_restart'] == 'unverified', checks
+            session_restart = (
+                check_session_after_restart(job['result']['url'], job['result']['container'])
+                if args.session_restart else None
+            )
             print(json.dumps({'job_id': job_id, 'status': job['status'], 'url': job['result']['url'],
                               'score_rows': scoreboard['rounds'], 'checks': {key: checks[key] for key in
                                          ('deployment_http', 'websocket_round_trip',
-                                          'local_sqlite_mount', 'data_persistence_after_restart')}},
+                                          'local_sqlite_mount', 'data_persistence_after_restart')},
+                              'session_restart': session_restart},
                               ensure_ascii=False))
         finally:
             job = app.jobs[job_id]
