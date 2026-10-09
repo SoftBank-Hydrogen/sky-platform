@@ -10,5 +10,6 @@ dist/
 .env
 .env.*
 !.env.example
+.sky/
 .DS_Store
 node_modules/

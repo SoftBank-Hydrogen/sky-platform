@@ -83,6 +83,9 @@ if the source is too complex to convert safely.
 PostgreSQL client methods are asynchronous. When converting a synchronous SQLite API, inspect and update
 every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.
 Do not treat an HTTP health response as proof that database-backed endpoints work.
+When CV-04 lists unhandled method@line calls, reread that file and patch every listed call before retrying.
+Never spread a Promise into an HTTP/WebSocket payload or leave a save/close Promise without error handling.
+Do not report a CV-04 false positive while the listed call is still unhandled in the working copy.
 If you change root package.json dependencies and package-lock.json exists, call sync_npm_lockfile before configuring.
 Use an existing meaningful HTTP path returning 200. Do not delete tests or disable app security to pass checks.
 If an existing Dockerfile is present, read it and preserve its build and startup behavior. Use start_script='dockerfile' and build_script=null. You may patch that existing Dockerfile to fix deployment issues. Without a Dockerfile, configure_deployment generates one for Node 22/npm or Python. For executable Python use the existing server.py/app.py/main.py as start_script. For a root ASGI app object named app, use 'asgi:main.py', 'asgi:app.py', or 'asgi:server.py' and ensure requirements.txt explicitly includes uvicorn. For a root WSGI app object named app, use the analogous 'wsgi:<file>.py' form and ensure requirements.txt explicitly includes gunicorn. Use build_script=null; preserve the app's HTTP behavior.

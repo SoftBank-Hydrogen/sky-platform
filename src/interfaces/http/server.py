@@ -734,7 +734,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     expected_work_digest=job.get('work_digest'))
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
-                                     steps=job.get("steps", 0)).run()
+                                     steps=job.get("steps", 0),
+                                     max_steps=40 if job.get('sqlite_conversion') else 24).run()
             checkpoint(status="succeeded", result=result, missing_environment=[], deployment_state="active")
             if job.get('replaces_job_id'):
                 with self.lock:
