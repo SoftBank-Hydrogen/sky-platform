@@ -137,7 +137,18 @@ def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
     if gate != expected:
         return {'status': 'incomplete', 'required_obligations': []}
     observed = job.get('websocket_verification') if completed else None
-    obligations = target_verification_obligations(gate, observed)
+    plan = job.get('plan') if isinstance(job.get('plan'), dict) else {}
+    result = job.get('result') if isinstance(job.get('result'), dict) else {}
+    url = result.get('url')
+    health_path = plan.get('health_path')
+    deployment_http_verified = bool(
+        completed and type(plan.get('port')) is int and 1024 <= plan['port'] <= 65535
+        and isinstance(url, str) and bool(url)
+        and isinstance(health_path, str) and health_path.startswith('/')
+        and result.get('health_url') == url + health_path
+    )
+    obligations = target_verification_obligations(
+        gate, observed, deployment_http_verified=deployment_http_verified)
     return {'status': 'recorded', 'static_consistency': gate,
             'required_obligations': obligations,
             'target_verification_status': ('failed' if any(item['status'] == 'failed' for item in obligations)

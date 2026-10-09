@@ -161,6 +161,29 @@ class DeploymentGroupTests(unittest.TestCase):
         job['static_consistency_gate']['compilation_id'] = 'comp-other'
         self.assertEqual(deployment_certificate(job)['verification_gates']['status'], 'incomplete')
 
+    def test_port_obligation_requires_matching_successful_health_probe_record(self):
+        group = self.create()
+        job = self.app.jobs[group['targets'][0]['job_id']]
+        checks = [{'id': 'CV-06', 'status': 'unknown', 'source': 'executable_dockerfile'}]
+        job['consistency_checks'] = checks
+        job['static_consistency_gate'] = static_consistency_gate(
+            job['compilation'], job['architecture_decision'], checks)
+        job['plan'] = {'port': 3000, 'health_path': '/ready'}
+        def obligation():
+            return deployment_certificate(job)['verification_gates']['required_obligations'][0]
+        self.assertEqual(obligation()['status'], 'pending')
+        job['status'] = 'succeeded'
+        job['result'] = {'url': 'http://127.0.0.1:12345'}
+        self.assertEqual(obligation()['status'], 'pending')
+        job['result']['health_url'] = 'http://127.0.0.1:12345/wrong'
+        self.assertEqual(obligation()['status'], 'pending')
+        job['result']['health_url'] = 'http://127.0.0.1:12345/ready'
+        self.assertEqual(obligation()['status'], 'verified')
+        self.assertEqual(obligation()['verification_refs'], ['deployment_http'])
+        self.assertEqual(job['static_consistency_gate']['required_obligations'][0]['status'], 'pending')
+        job['status'] = 'failed'
+        self.assertEqual(obligation()['status'], 'pending')
+
     def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
         group = self.create()
         local_id, aws_id = [item['job_id'] for item in group['targets']]

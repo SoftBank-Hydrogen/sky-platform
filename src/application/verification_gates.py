@@ -34,6 +34,9 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
         {"check_id": rule, "due_gate": "target_verification", "status": "pending", "verification_refs": []}
         for rule in sorted(set(pending))
     ]
+    if any(item["id"] == "CV-06" and item["status"] == "unknown" for item in checks):
+        obligations.append({"check_id": "CV-06", "due_gate": "target_verification",
+                            "status": "pending", "verification_refs": []})
     return {
         "schema_version": 1,
         "compilation_id": compilation["compilation_id"],
@@ -46,7 +49,9 @@ def static_consistency_gate(compilation: dict, decision: dict, checks: list[dict
     }
 
 
-def target_verification_obligations(gate: dict, websocket: dict | None) -> list[dict]:
+def target_verification_obligations(
+    gate: dict, websocket: dict | None, *, deployment_http_verified: bool = False
+) -> list[dict]:
     """Project later observations without rewriting the original static decision."""
     if not isinstance(gate, dict):
         return []
@@ -55,6 +60,11 @@ def target_verification_obligations(gate: dict, websocket: dict | None) -> list[
         return []
     result = copy.deepcopy(obligations)
     for item in result:
+        if item.get("check_id") == "CV-06":
+            if deployment_http_verified:
+                item["status"] = "verified"
+                item["verification_refs"] = ["deployment_http"]
+            continue
         if item.get("check_id") != "PROTOCOL-WS-01" or not isinstance(websocket, dict):
             continue
         if websocket.get("protocol") != "sky.probe.v1" or not isinstance(websocket.get("checked_at"), str):
