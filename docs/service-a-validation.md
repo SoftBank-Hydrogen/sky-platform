@@ -85,3 +85,23 @@ above does not replace that end-to-end check. The earlier full ZIP result belong
 to the initial baseline; GitHub Actions must still verify the updated workflow.
 Real OpenAI, ECR publication, ECS rollout/rollback and external game access remain
 unverified.
+
+## Review follow-up
+
+Integrated upstream `2b34205`, including deployment policy, versioned evidence
+and architecture-decision changes requested by the review. The service image now
+uses `sky-service` and requires a persistent-state marker before opening HTTP.
+Initialization is a one-off operation for an existing empty mounted directory;
+it cannot overwrite existing state or start the server.
+
+The new persistent-state regression tests passed **18/18** in the Linux test
+container. They cover missing state, restart with preserved records, rejection of
+reinitialization, corrupt/oversized markers, unknown versions, symlinks and FIFOs.
+The smoke additionally tests missing mounts and uninitialized state, explicit
+initialization, rejected repeated initialization and the normal deploy/restart
+flow. Latest complete CI results are linked from the PR description/checks.
+
+The access-boundary section is an infrastructure prerequisite, not proof that AWS
+has been configured: internal HTTPS ALB/private access (or front-end authentication)
+and workload-bridge isolation from the host API and credential endpoints must be
+configured and tested by sky-infra before same-host Local deployment is enabled.
