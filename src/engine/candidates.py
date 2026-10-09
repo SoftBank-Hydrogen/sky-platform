@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from engine.backend_identity import backend_identity
 from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
+from engine.static_site import StaticSiteAssessment
 
 SUPPORTED_TARGETS = ("local-docker", "aws-ecs-express", "cloud-run")
 
@@ -76,6 +78,14 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
         candidates.append(
             {
                 "id": report["target"],
+                "provider": backend_identity(report["target"]).provider,
+                "backend": backend_identity(report["target"]).backend,
+                "sky_adapter_support": "implemented",
+                "selection_mode": backend_identity(report["target"]).selection_mode,
+                "structural_status": (
+                    "incompatible" if violations else "unknown" if report["unknowns"] else "compatible"
+                ),
+                "execution_status": "implemented_unverified",
                 "status": status,
                 "reasons": reasons,
                 "violated_rule_ids": [result["rule_id"] for result in violations],
@@ -97,3 +107,60 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
             }
         )
     return candidates
+
+
+def static_hosting_candidate(
+    assessment: StaticSiteAssessment,
+    *,
+    configured: bool,
+    public_access: bool,
+    configuration_reason: str | None = None,
+) -> dict:
+    """Evaluate static hosting without treating a source tree as a built bundle.
+
+    This backend has an explicit upload workflow. It must not enter the legacy
+    automatic container-target list until static lowering is implemented.
+    """
+    identity = backend_identity("aws-s3-cloudfront")
+    if assessment.status == "server_or_mixed":
+        structural_status, status = "incompatible", "rejected"
+        reasons = [*assessment.reasons]
+        rule_ids = ["STATIC-SERVER-01"]
+    elif assessment.status == "needs_build":
+        structural_status, status = "potentially_compatible", "needs_build"
+        reasons = [*assessment.reasons, "빌드 산출물과 API 의존성을 확인해야 합니다."]
+        rule_ids = ["STATIC-BUILD-01"]
+    elif assessment.status in {"needs_review", "unknown"}:
+        structural_status, status = "unknown", "needs_review"
+        reasons = [*assessment.reasons]
+        rule_ids = ["STATIC-REVIEW-01"]
+    else:
+        structural_status, status = "compatible", "eligible"
+        reasons = [*assessment.reasons]
+        rule_ids = []
+    if not public_access and status == "eligible":
+        status = "rejected"
+        reasons.append("현재 정적 호스팅 경로는 공개 HTTPS만 지원합니다.")
+        rule_ids.append("ACCESS-01")
+    if not configured and status == "eligible":
+        status = "requires_setup"
+        reasons.append(configuration_reason or "AWS 설정이 필요합니다.")
+        rule_ids.append("SETUP_REQUIRED")
+    return {
+        "id": identity.target,
+        "provider": identity.provider,
+        "backend": identity.backend,
+        "sky_adapter_support": identity.sky_adapter_support,
+        "selection_mode": identity.selection_mode,
+        "structural_status": structural_status,
+        "execution_status": "implemented_unverified",
+        "status": status,
+        "reasons": reasons,
+        "violated_rule_ids": rule_ids if status == "rejected" else [],
+        "unknown_rule_ids": rule_ids if status in {"needs_review", "needs_build"} else [],
+        "reason_codes": rule_ids,
+        "evidence_ids": [],
+        "evidence_files": list(assessment.evidence_files),
+        "cost_estimate": None,
+        "selected": False,
+    }

@@ -21,7 +21,7 @@ from engine.application_ir import application_ir
 from engine.architecture_decision import architecture_decision, verify_architecture_decision
 from engine.compilation import compile_decision, verify_compilation
 from engine.capability_registry import target_capability_model
-from engine.candidates import compare_targets
+from engine.candidates import compare_targets, static_hosting_candidate
 from engine.static_site import assess_static_site
 from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
@@ -1912,13 +1912,18 @@ def handler_for(app: App):
                         reports, candidates = compare_targets(
                             profile, availability, public_access=public_flag == 'true',
                             local_sqlite=local_sqlite_binding is not None, include_compose=True)
+                        static_configuration_reason = AwsStaticSiteAdapter.unavailable_reason(app.aws_settings)
+                        candidates.append(static_hosting_candidate(
+                            static_site, configured=static_configuration_reason is None,
+                            public_access=public_flag == 'true',
+                            configuration_reason=static_configuration_reason))
                         policy = deployment_policy('auto', public_flag == 'true')
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile, digest).as_dict(),
                                              'deployment_policy': policy.as_dict(),
                                              'capability_models': {
                                                  target: target_capability_model(target).as_dict()
-                                                 for target in availability
+                                                 for target in (*availability, 'aws-s3-cloudfront', 'aws-ecs-standard')
                                              },
                                              'inspection': {
                                                  'requirements': list(profile.requirements),
@@ -1928,7 +1933,7 @@ def handler_for(app: App):
                                              'static_site': {**static_site.as_dict(),
                                                  'target': 'aws-s3-cloudfront',
                                                  'adapter_status': 'available' if
-                                                 AwsStaticSiteAdapter.unavailable_reason(app.aws_settings) is None
+                                                 static_configuration_reason is None
                                                  else 'unavailable'},
                                              'reports': reports,
                                              'local_sqlite_binding': local_sqlite_binding,

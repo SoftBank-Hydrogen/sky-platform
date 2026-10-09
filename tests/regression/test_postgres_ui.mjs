@@ -97,6 +97,8 @@ test('environment preview shows target differences before deployment', async () 
        candidates: [
         {id: 'local-docker', status: 'eligible', reasons: ['조건부 가능']},
         {id: 'aws-ecs-express', status: 'rejected', reasons: ['공개 범위 미지원']},
+        {id: 'aws-s3-cloudfront', status: 'needs_build', selection_mode: 'explicit_only',
+         reasons: ['빌드 산출물과 API 의존성을 확인해야 합니다.']},
        ], reports: [
         {target: 'local-docker', compatible: true, preview_eligible: true,
          access_mode: 'loopback', problems: [], configuration_reason: null, constraint_results: []},
@@ -113,6 +115,9 @@ test('environment preview shows target differences before deployment', async () 
   assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 배포 시도 가능/);
   assert.match(elements.compatibilityMap.textContent, /탐지한 요구: sqlite · 근거 파일: server.js/);
   assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 제약 위반/);
+  assert.match(elements.compatibilityMap.textContent, /AWS S3 \+ CloudFront · 빌드 결과 확인 필요/);
+  assert.match(elements.compatibilityMap.textContent, /현재 수동 대상 선택만 가능/);
+  assert.doesNotMatch(elements.compatibilityMap.textContent, /현재 배포 미지원/);
   assert.match(elements.compatibilityMap.textContent, /\[ACCESS-01\] 공개 범위 미지원 · 근거: 사용자 선택·설정/);
   assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
 });

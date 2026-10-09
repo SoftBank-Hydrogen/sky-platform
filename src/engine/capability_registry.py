@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from engine.backend_identity import backend_identity
 from engine.compatibility import TARGET_CAPABILITIES
 
 # Keep resource execution support independent of the resources a planner emits.
@@ -86,6 +87,8 @@ class TargetCapabilityModel:
         return {
             "schema_version": self.schema_version,
             "target": self.target,
+            "provider": backend_identity(self.target).provider,
+            "backend": backend_identity(self.target).backend,
             "adapter_contract_version": self.adapter_contract_version,
             "capabilities": [item.as_dict() for item in self.capabilities],
         }
@@ -93,8 +96,35 @@ class TargetCapabilityModel:
 
 def target_capability_model(target: str) -> TargetCapabilityModel:
     """Report implemented paths conservatively; validation refs are added only with scoped proof."""
-    if target not in TARGET_CAPABILITIES:
-        raise ValueError("Unsupported deployment target")
+    backend_identity(target)
+    if target in {"aws-s3-cloudfront", "aws-ecs-standard"}:
+        implemented = target == "aws-s3-cloudfront"
+        static_capabilities = {
+            "static_files": implemented,
+            "access_public": implemented,
+            "container_runtime": False,
+            "access_loopback": False,
+            "access_authenticated": False,
+            "sqlite_volume": False,
+            "durable_file_volume": False,
+            "background_worker": False,
+            "existing_rds_binding": False,
+            "new_rds_provisioning": False,
+            "remote_host": False,
+        }
+        # Standard ECS is a documented architecture option, not a Sky adapter.
+        # No provider feature is asserted until it is scoped and verified.
+        if not implemented:
+            static_capabilities["static_files"] = False
+        return TargetCapabilityModel(
+            1,
+            target,
+            1,
+            tuple(
+                Capability(name, "unknown", "implemented" if enabled else "unimplemented")
+                for name, enabled in static_capabilities.items()
+            ),
+        )
     declared = TARGET_CAPABILITIES[target]
     available = {
         "container_runtime": True,

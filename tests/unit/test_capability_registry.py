@@ -44,3 +44,18 @@ def test_onprem_capabilities_do_not_claim_remote_host():
 def test_unknown_target_is_rejected():
     with pytest.raises(ValueError, match="Unsupported"):
         target_capability_model("imaginary-cloud")
+
+
+def test_aws_backends_do_not_share_adapter_support():
+    express = target_capability_model("aws-ecs-express").as_dict()
+    static = target_capability_model("aws-s3-cloudfront").as_dict()
+    standard = target_capability_model("aws-ecs-standard").as_dict()
+    assert {model["provider"] for model in (express, static, standard)} == {"aws"}
+    assert {model["backend"] for model in (express, static, standard)} == {
+        "ecs_express",
+        "static_hosting",
+        "ecs_standard",
+    }
+    assert by_id("aws-s3-cloudfront")["static_files"].sky_adapter_support == "implemented"
+    assert by_id("aws-s3-cloudfront")["container_runtime"].sky_adapter_support == "unimplemented"
+    assert all(item.display_status == "unsupported_by_sky" for item in by_id("aws-ecs-standard").values())
