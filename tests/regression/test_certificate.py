@@ -32,13 +32,53 @@ class CertificateTests(unittest.TestCase):
         self.assertIsNone(certificate['artifact']['local_image_id'])
         statuses = {item['name']: item['status'] for item in certificate['verification']}
         self.assertEqual(statuses['deployment_http'], 'passed')
-        self.assertEqual(statuses['schema_migration'], 'passed')
+        self.assertEqual(statuses['schema_migration'], 'unverified')
         self.assertEqual(statuses['image_identity'], 'unverified')
         self.assertEqual(statuses['ai_model_execution'], 'unverified')
         self.assertEqual(statuses['cross_environment_data_migration'], 'unverified')
         self.assertEqual(certificate['decision_trace']['status'], 'incomplete')
         self.assertNotIn('synthetic-private-value', str(certificate))
         self.assertNotIn('result', certificate)
+
+    def test_schema_migration_requires_owned_successful_task_and_matching_journal(self):
+        job_id = 'a' * 16
+        attempt = job_id + '-a1'
+        account, region = '123456789012', 'ap-northeast-2'
+        migration = {
+            'task_arn': f'arn:aws:ecs:{region}:{account}:task/default/' + 'b' * 32,
+            'task_definition_arn': f'arn:aws:ecs:{region}:{account}:task-definition/sky-migrate-{attempt}:1',
+            'image': f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed:{attempt}-db',
+            'image_digest': 'sha256:' + 'c' * 64,
+            'bundle_digest': 'd' * 64,
+            'cleanup_complete': True,
+        }
+        job = {'id': job_id, 'status': 'succeeded', 'target': 'aws-ecs-express', 'attempts': 1,
+               'aws': {'region': region, 'expected_account': account},
+               'aws_migration_status': 'succeeded',
+               'aws_migration_bundle_digest': migration['bundle_digest'],
+               'aws_migration_result': dict(migration),
+               'postgres': {'application_id': 'sample-app'},
+               'result': {'url': 'https://example.com', 'region': region, 'account': account,
+                          'migration': dict(migration)}}
+
+        def status():
+            checks = deployment_certificate(job)['verification']
+            return {item['name']: item['status'] for item in checks}
+
+        self.assertEqual(status()['schema_migration'], 'passed')
+        self.assertEqual(status()['cross_environment_data_migration'], 'unverified')
+        job['result']['migration']['bundle_digest'] = 'e' * 64
+        self.assertEqual(status()['schema_migration'], 'unverified')
+        job['result']['migration']['bundle_digest'] = migration['bundle_digest']
+        job['result']['migration']['task_definition_arn'] = (
+            f'arn:aws:ecs:{region}:{account}:task-definition/sky-migrate-other-a1:1')
+        self.assertEqual(status()['schema_migration'], 'unverified')
+        job['result']['migration']['task_definition_arn'] = migration['task_definition_arn']
+        job['aws_migration_status'] = 'running'
+        self.assertEqual(status()['schema_migration'], 'unverified')
+        job['aws_migration_status'] = 'succeeded'
+        job['status'] = 'failed'
+        self.assertEqual(status()['schema_migration'], 'unverified')
 
     def test_failed_job_and_old_health_do_not_become_current_success(self):
         job = {'id': 'a' * 16, 'status': 'failed', 'target': 'local-docker',

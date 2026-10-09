@@ -195,6 +195,47 @@ def _evidence_chain(job: dict, decision_trace: dict, gate: dict, http_verified: 
     }
 
 
+def _schema_migration_task_verified(job: dict, result: dict) -> bool:
+    """Accept only an owned, journaled successful ECS migration task result."""
+    migration = result.get('migration')
+    journal = job.get('aws_migration_result')
+    aws = job.get('aws')
+    if (job.get('target') != 'aws-ecs-express'
+            or job.get('aws_migration_status') != 'succeeded'
+            or not isinstance(migration, dict) or not isinstance(journal, dict)
+            or not isinstance(aws, dict)):
+        return False
+    job_id, attempts = job.get('id'), job.get('attempts')
+    region, account = result.get('region'), result.get('account')
+    if (not isinstance(job_id, str) or not re.fullmatch(r'[a-f0-9]{16}', job_id)
+            or type(attempts) is not int or not 1 <= attempts <= 3
+            or not isinstance(region, str) or not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', region)
+            or not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+            or aws.get('region') != region or aws.get('expected_account') != account):
+        return False
+    attempt = f'{job_id}-a{attempts}'
+    task_prefix = f'arn:aws:ecs:{region}:{account}:task/default/'
+    definition_prefix = f'arn:aws:ecs:{region}:{account}:task-definition/sky-migrate-{attempt}:'
+    task = migration.get('task_arn')
+    definition = migration.get('task_definition_arn')
+    image = migration.get('image')
+    digest = migration.get('image_digest')
+    bundle = migration.get('bundle_digest')
+    expected_image = f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed:{attempt}-db'
+    return bool(
+        isinstance(task, str) and task.startswith(task_prefix)
+        and re.fullmatch(r'[a-f0-9]{32}', task.removeprefix(task_prefix))
+        and isinstance(definition, str) and definition.startswith(definition_prefix)
+        and definition.removeprefix(definition_prefix).isdigit()
+        and image == expected_image
+        and isinstance(digest, str) and re.fullmatch(r'sha256:[a-f0-9]{64}', digest)
+        and isinstance(bundle, str) and re.fullmatch(r'[a-f0-9]{64}', bundle)
+        and job.get('aws_migration_bundle_digest') == bundle
+        and all(journal.get(key) == migration[key] for key in (
+            'task_arn', 'task_definition_arn', 'image', 'image_digest', 'bundle_digest'))
+    )
+
+
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
@@ -263,11 +304,11 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         checks.append({'name': 'latest_health', 'status': 'unverified',
                        'detail': '배포 후 별도 상태 검사 기록이 없습니다.'})
     if infrastructure.get('database') or job.get('postgres'):
-        migration = result.get('migration') if isinstance(result.get('migration'), dict) else None
+        migration_verified = bool(completed and _schema_migration_task_verified(job, result))
         checks.append({'name': 'schema_migration',
-                       'status': 'passed' if completed and migration else 'unverified',
-                       'detail': ('완료된 배포 기록에 SQL 마이그레이션 결과가 있습니다.'
-                                  if completed and migration else '완료된 SQL 마이그레이션 결과가 없습니다.')})
+                       'status': 'passed' if migration_verified else 'unverified',
+                       'detail': ('소유한 ECS 일회성 SQL 태스크의 성공 결과와 작업 기록이 일치합니다. DB 내용을 독립 조회한 증거는 아닙니다.'
+                                  if migration_verified else '소유한 ECS SQL 태스크의 성공 기록을 확인할 수 없습니다.')})
         checks.append({'name': 'cross_environment_data_migration', 'status': 'unverified',
                        'detail': '환경 간 기존 데이터 이전은 SQL 스키마 마이그레이션과 별도로 검증해야 합니다.'})
     local_sqlite = job.get('local_sqlite_binding')
