@@ -62,6 +62,24 @@ test('deployment certificate separates recorded checks from unverified checks', 
   assert.match(element('certificateJson').textContent, /"image_identity"/);
 });
 
+test('manual Local Docker result describes its separate URL and retained release', () => {
+  const start = html.indexOf('function renderInfrastructure(job)');
+  const end = html.indexOf('function canResumeUnstarted(job)', start);
+  assert.ok(start >= 0 && end > start);
+  const fields = {infrastructure: {textContent: ''}, sourceInfo: {textContent: ''}};
+  const context = {el: id => fields[id]};
+  runInNewContext(html.slice(start, end), context);
+  const job = {status: 'succeeded', target: 'local-docker',
+    infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: '사용자 지정',
+      resources: ['Docker image', 'local container'], compatibility: {access_mode: 'loopback'}}};
+  context.renderInfrastructure(job);
+  assert.match(fields.infrastructure.textContent, /별도 URL/);
+  assert.match(fields.infrastructure.textContent, /자동 종료하지 않음/);
+  job.github_source = {repository_url: 'https://github.com/owner/repo', branch: 'main', commit: 'a'.repeat(40)};
+  context.renderInfrastructure(job);
+  assert.doesNotMatch(fields.infrastructure.textContent, /기존 수동 배포/);
+});
+
 test('environment preview shows target differences before deployment', async () => {
   const start = html.indexOf('function selectedUploadBody()');
   const end = html.indexOf("el('deploy').onclick", start);
