@@ -462,6 +462,18 @@ class InfrastructureTests(unittest.TestCase):
             self.assertTrue(any(event['stage'] == 'interrupted' for event in stored['events']))
             self.assertEqual(len(stored['source_digest']), 64)
             restored = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            plan = restored.jobs[payload['id']]['infrastructure_plan']
+            original_target = plan['target']
+            plan['target'] = 'aws-ecs-express'
+            restored.save(payload['id'])
+            mismatched = App(root, AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            with patch('interfaces.http.server.threading.Thread.start') as worker:
+                with self.assertRaisesRegex(ValueError, '안전하게 재개'):
+                    mismatched.resume_unstarted_deployment(payload['id'])
+                worker.assert_not_called()
+            self.assertEqual(mismatched.jobs[payload['id']]['status'], 'interrupted')
+            plan['target'] = original_target
+            restored.save(payload['id'])
             source = Path(stored['project']) / 'server.js'
             original = source.read_text()
             source.write_text('changed after upload')

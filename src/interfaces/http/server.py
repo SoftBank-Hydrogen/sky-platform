@@ -840,6 +840,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                     and job.get('result') is None and not job.get('cancel_requested')
                     and not job.get('persistence_failed') and not job.get('aws_update_submitted')
                     and isinstance(job.get('infrastructure_plan'), dict)
+                    and job['infrastructure_plan'].get('target') == job.get('target')
                     and job['infrastructure_plan'].get('database') is None
                     and job.get('postgres') is None and job.get('postgres_creation_id') is None
                     and job.get('prior_result') is None
