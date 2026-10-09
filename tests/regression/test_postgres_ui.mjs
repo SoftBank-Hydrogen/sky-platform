@@ -251,6 +251,11 @@ test('interrupted local deployment shows cleanup only for recorded attempts', as
     infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: 'test', resources: []},
     source_digest: 'a'.repeat(64)});
   assert.equal(element('resumeUnstarted').hidden, false);
+  context.show({...job, target: 'onprem-compose', attempts: 0, steps: 0, changes: [],
+    infrastructure_plan: {target: 'onprem-compose', planner: 'user', rationale: 'test', resources: []},
+    source_digest: 'a'.repeat(64)});
+  assert.equal(element('resumeUnstarted').hidden, false);
+  assert.match(element('resumeUnstartedInfo').textContent, /선택한 대상/);
   context.show({...job, attempts: 0, steps: 1, changes: [],
     infrastructure_plan: {target: 'local-docker', planner: 'user', rationale: 'test', resources: []},
     source_digest: 'a'.repeat(64)});
