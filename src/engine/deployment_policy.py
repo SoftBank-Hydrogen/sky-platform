@@ -8,6 +8,13 @@ from dataclasses import asdict, dataclass
 from engine.compatibility import TARGET_CAPABILITIES, deployment_access_mode
 
 AUTO_TARGETS = ("local-docker", "cloud-run", "aws-ecs-express")
+EXPLICIT_TARGETS = frozenset(TARGET_CAPABILITIES) | {"aws-s3-cloudfront"}
+
+
+def _access_mode(target: str, public_access: bool) -> str | None:
+    if target == "aws-s3-cloudfront":
+        return "public" if public_access else None
+    return deployment_access_mode(target, public_access)
 
 
 @dataclass(frozen=True)
@@ -32,7 +39,11 @@ class DeploymentPolicy:
             or not self.allowed_targets
             or any(type(target) is not str for target in self.allowed_targets)
             or len(set(self.allowed_targets)) != len(self.allowed_targets)
-            or any(target not in TARGET_CAPABILITIES for target in self.allowed_targets)
+            or any(target not in EXPLICIT_TARGETS for target in self.allowed_targets)
+            or (
+                self.selection_mode == "auto_target"
+                and any(target not in AUTO_TARGETS for target in self.allowed_targets)
+            )
         ):
             raise ValueError("Invalid policy target scope")
         if self.max_monthly_cost_usd is not None and (
@@ -61,7 +72,7 @@ class DeploymentPolicy:
     ) -> None:
         if target not in self.allowed_targets:
             raise ValueError("선택한 배포 대상이 사용자 허용 범위 밖입니다.")
-        expected = deployment_access_mode(target, self.public_access_allowed)
+        expected = _access_mode(target, self.public_access_allowed)
         if expected is None or access_mode != expected:
             raise ValueError("배포 접근 범위가 사용자 선택과 다릅니다.")
         if new_managed_database and not self.new_managed_database_approved:
@@ -84,9 +95,7 @@ def deployment_policy(
         raise ValueError("Public access selection must be a boolean")
     if requested == "auto":
         allowed_targets = tuple(
-            target
-            for target in AUTO_TARGETS
-            if deployment_access_mode(target, public_access_allowed) is not None
+            target for target in AUTO_TARGETS if _access_mode(target, public_access_allowed) is not None
         )
         selection_mode = "auto_target"
     elif isinstance(requested, str):

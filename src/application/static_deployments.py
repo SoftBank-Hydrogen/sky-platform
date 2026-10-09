@@ -9,6 +9,8 @@ from pathlib import Path
 from adapters.aws.ecs import AwsSettings
 from adapters.aws.static_site import AwsStaticSiteAdapter
 from application.analysis import redact
+from application.deployment_core import source_digest
+from application.static_compilation import verify_static_compilation
 
 
 class StaticDeploymentsMixin:
@@ -28,6 +30,9 @@ class StaticDeploymentsMixin:
                 self.save(job_id)
 
         try:
+            if source_digest(Path(snapshot["project"])) != snapshot["source_digest"]:
+                raise ValueError("정적 사이트 소스가 작업 기록과 다릅니다.")
+            verify_static_compilation(snapshot, Path(snapshot["project"]), snapshot["source_digest"])
             self.event(job_id, "provision", "전용 S3·CloudFront 스택을 생성합니다.")
             result = self.static_adapter(snapshot, checkpoint).deploy(
                 Path(snapshot["project"]), snapshot["application_id"], snapshot["attempt_id"]

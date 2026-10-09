@@ -22,6 +22,8 @@ RESOURCE_CAPABILITY_IDS = {
     "new RDS PostgreSQL": "new_rds_provisioning",
     "existing RDS PostgreSQL": "existing_rds_binding",
     "one-off SQL migration task": "sql_migration_task",
+    "private S3 bucket": "private_s3_bucket",
+    "CloudFront distribution": "cloudfront_distribution",
 }
 
 _IMPLEMENTED_RESOURCE_CAPABILITIES = {
@@ -101,6 +103,8 @@ def target_capability_model(target: str) -> TargetCapabilityModel:
         implemented = target == "aws-s3-cloudfront"
         static_capabilities = {
             "static_files": implemented,
+            "private_s3_bucket": implemented,
+            "cloudfront_distribution": implemented,
             "access_public": implemented,
             "container_runtime": False,
             "access_loopback": False,
@@ -114,8 +118,6 @@ def target_capability_model(target: str) -> TargetCapabilityModel:
         }
         # Standard ECS is a documented architecture option, not a Sky adapter.
         # No provider feature is asserted until it is scoped and verified.
-        if not implemented:
-            static_capabilities["static_files"] = False
         return TargetCapabilityModel(
             1,
             target,

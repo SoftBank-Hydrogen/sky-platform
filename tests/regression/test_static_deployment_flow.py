@@ -63,9 +63,41 @@ class StaticDeploymentFlowTests(unittest.TestCase):
         self.assertEqual(job["target"], "aws-s3-cloudfront")
         self.assertEqual(job["mode"], "static_site")
         self.assertIsNone(job["plan"])
+        self.assertEqual(job["architecture_decision"]["selected_candidate"], "aws-s3-cloudfront")
+        self.assertEqual(job["compilation"]["deployment_ir"]["services"],
+                         [{"id": "source-bundle", "kind": "static_site"}])
+        certificate = deployment_certificate(job)
+        self.assertEqual(certificate["decision_trace"]["status"], "recorded")
+        self.assertEqual(certificate["compilation_status"], "recorded")
         restored = App(self.root, AISettings("", ""), aws_settings=self.settings, monitor_interval=0)
         self.assertEqual(restored.jobs[job_id]["status"], "interrupted")
         self.assertEqual(restored.jobs[job_id]["target"], "aws-s3-cloudfront")
+
+    def test_changed_compilation_is_rejected_before_cloud_adapter(self):
+        job_id = self.create_job()
+        self.app.jobs[job_id]["compilation"]["target_plan"]["execution_configuration"][
+            "asset_source"] = "different-source"
+        with patch.object(self.app, "static_adapter") as adapter:
+            self.app.run_static_site(job_id)
+        adapter.assert_not_called()
+        self.assertEqual(self.app.jobs[job_id]["status"], "failed")
+        self.assertEqual(self.app.jobs[job_id]["deployment_state"], "active")
+        certificate = deployment_certificate(self.app.jobs[job_id])
+        self.assertEqual(certificate["compilation_status"], "incomplete")
+
+    def test_historical_static_record_can_still_run(self):
+        job_id = self.create_job()
+        for field in ("application_ir", "deployment_policy", "architecture_decision", "compilation"):
+            self.app.jobs[job_id].pop(field)
+        with patch.object(self.app, "static_adapter") as adapter:
+            adapter.return_value.deploy.return_value = {
+                "url": "https://example.invalid", "source_digest": self.app.jobs[job_id]["source_digest"]
+            }
+            self.app.run_static_site(job_id)
+        adapter.return_value.deploy.assert_called_once()
+        self.assertEqual(self.app.jobs[job_id]["status"], "succeeded")
+        certificate = deployment_certificate(self.app.jobs[job_id])
+        self.assertEqual(certificate["compilation_status"], "unrecorded")
 
     def test_failed_after_stack_creation_remains_recoverable(self):
         job_id = self.create_job()

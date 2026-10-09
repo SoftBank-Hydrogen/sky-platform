@@ -35,6 +35,7 @@ from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
+from application.static_compilation import static_compilation
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_database_consistency, check_port_consistency, check_source_change_scope,
@@ -2026,6 +2027,7 @@ def handler_for(app: App):
                         attempt_id = job_id + "-a1"
                         preflight = AwsStaticSiteAdapter(app.aws_settings).preflight(
                             project, application_id, attempt_id)
+                        static_records = static_compilation(project, preflight["source_digest"])
                         with app.lock:
                             app.ensure_application_available(application_id, "aws-s3-cloudfront")
                             if any(old.get("application_id") == application_id
@@ -2042,12 +2044,7 @@ def handler_for(app: App):
                                 "static_preflight": preflight, "plan": None, "attempts": 1,
                                 "steps": 0, "changes": [], "diff": "", "events": [],
                                 "aws": asdict(app.aws_settings),
-                                "infrastructure_plan": {
-                                    "target": "aws-s3-cloudfront", "planner": "policy",
-                                    "rationale": "서버·데이터 의존성 없는 index.html과 정적 자산만 확인했습니다.",
-                                    "resources": ["private S3 bucket", "CloudFront distribution"],
-                                    "compatibility": {"access_mode": "public"},
-                                },
+                                **static_records,
                             }
                             app.save(job_id)
                         app.clear_upload_marker(directory)

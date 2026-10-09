@@ -9,6 +9,39 @@ from engine.compatibility import TARGET_CAPABILITIES
 def lower_target_configuration(plan: dict, deployment_ir: dict) -> dict:
     """Describe only settings backed by the selected adapter and explicit bindings."""
     target = plan.get("target") if isinstance(plan, dict) else None
+    if target == "aws-s3-cloudfront":
+        compatibility = plan.get("compatibility")
+        resources = plan.get("resources")
+        services = deployment_ir.get("services") if isinstance(deployment_ir, dict) else None
+        requirements = deployment_ir.get("requirements") if isinstance(deployment_ir, dict) else None
+        if (
+            not isinstance(compatibility, dict)
+            or compatibility.get("target") != target
+            or compatibility.get("compatible") is not True
+            or compatibility.get("access_mode") != "public"
+            or resources != ["private S3 bucket", "CloudFront distribution"]
+            or services != [{"id": "source-bundle", "kind": "static_site"}]
+            or not isinstance(requirements, (list, tuple))
+            or len(requirements) != 1
+            or not isinstance(requirements[0], dict)
+            or requirements[0].get("id") != "R-static-assets"
+            or requirements[0].get("kind") != "static-assets"
+            or not isinstance(requirements[0].get("evidence_ids"), (list, tuple))
+            or not requirements[0]["evidence_ids"]
+        ):
+            raise ValueError("CV-09: Static plan cannot lower the selected assets")
+        capabilities = {item.id: item for item in target_capability_model(target).capabilities}
+        for resource in resources:
+            capability = capabilities.get(RESOURCE_CAPABILITY_IDS[resource])
+            if capability is None or capability.sky_adapter_support != "implemented":
+                raise ValueError(f"CV-09: No implemented adapter capability for resource {resource}")
+        return {
+            "service": "source-bundle",
+            "asset_source": "uploaded_source",
+            "index_file": "index.html",
+            "access_mode": "public",
+            "database_mode": "none",
+        }
     if target not in TARGET_CAPABILITIES:
         raise ValueError("CV-09: Unsupported execution target")
     compatibility = plan.get("compatibility")

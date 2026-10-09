@@ -27,17 +27,22 @@ def _compile_decision(
         "decision_revision": revision,
         "source_revision": source_revision,
     }
+    static_site = decision["selected_candidate"] == "aws-s3-cloudfront"
     patch_plan = {
         **common,
         "id": "patch-" + compilation_id[5:],
-        "status": "pending_source_transform",
+        "status": "not_required" if static_site else "pending_source_transform",
         "changes": [],
-        "checks": ["changed_file_allowlist", "no_secrets_written", "executable_build"],
+        "checks": [] if static_site else ["changed_file_allowlist", "no_secrets_written", "executable_build"],
     }
     deployment_ir = {
         **common,
         "id": "depir-" + compilation_id[5:],
-        "services": [{"id": "source-bundle", "kind": "container_service", "replicas": 1}],
+        "services": (
+            [{"id": "source-bundle", "kind": "static_site"}]
+            if static_site
+            else [{"id": "source-bundle", "kind": "container_service", "replicas": 1}]
+        ),
         "requirements": ir.get("requirements", []),
         "topology_status": ir.get("topology_status", "unresolved"),
         "unknowns": ir.get("unknowns", []),

@@ -286,6 +286,20 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
     """Build a safe, explicit evidence snapshot without modifying the job."""
     if job.get('mode') == 'static_site':
         result = job.get('result') if isinstance(job.get('result'), dict) else {}
+        infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}
+        compatibility = (infrastructure.get('compatibility')
+                         if isinstance(infrastructure.get('compatibility'), dict) else {})
+        decision_trace = _decision_trace(job, infrastructure, compatibility)
+        compilation_status = 'unrecorded'
+        if 'compilation' in job:
+            try:
+                verify_compilation(job['compilation'], job['architecture_decision'],
+                                   job['application_ir'], policy_from_record(job['deployment_policy']),
+                                   infrastructure)
+            except (ValueError, TypeError, KeyError):
+                compilation_status = 'incomplete'
+            else:
+                compilation_status = 'recorded' if decision_trace['status'] == 'recorded' else 'incomplete'
         complete = (job.get('status') == 'succeeded'
                     and result.get('stack_id') == job.get('static_stack_id')
                     and result.get('source_digest') == job.get('source_digest')
@@ -310,6 +324,8 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
             'destination': {'url': result.get('url') if complete else None,
                             'stack_id': job.get('static_stack_id')},
             'artifact': {'index_sha256': result.get('source_index_sha256') if complete else None},
+            'decision_trace': decision_trace,
+            'compilation_status': compilation_status,
             'verification': verification,
             'unverified': [item['name'] for item in verification if item['status'] == 'unverified'],
             'cost': {'estimated_total': None, 'actual_total': None},
