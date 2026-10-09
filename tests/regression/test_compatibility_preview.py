@@ -51,6 +51,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(all(item['cost']['estimate'] is None for item in reports.values()))
         self.assertEqual(payload['inspection']['requirements'], [])
         self.assertEqual(payload['inspection']['scanned_files'], 2)
+        self.assertEqual(payload['application_ir']['schema_version'], 2)
+        self.assertEqual(payload['application_ir']['source_revision'], payload['source_digest'])
+        self.assertEqual(payload['application_ir']['unknowns'], ('component_topology', 'statelessness'))
         candidates = {item['id']: item for item in payload['candidates']}
         self.assertEqual(candidates['local-docker']['status'], 'eligible')
         self.assertEqual(candidates['local-docker']['cost_estimate'], None)
@@ -71,6 +74,7 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertIn('package.json', payload['inspection']['evidence_files'])
         ir = payload['application_ir']
         self.assertEqual(ir['topology_status'], 'unresolved')
+        self.assertEqual(ir['source_revision'], payload['source_digest'])
         self.assertEqual(ir['components'][0]['kind'], 'unresolved')
         sqlite_requirement = next(item for item in ir['requirements'] if item['kind'] == 'sqlite')
         evidence_ids = set(sqlite_requirement['evidence_ids'])
@@ -102,11 +106,30 @@ class CompatibilityPreviewTests(unittest.TestCase):
                          {'websocket', 'possible-process-local-state', 'sky-probe-protocol'})
         self.assertTrue(all(item['status'] == 'inferred' for item in hypotheses.values()))
         self.assertTrue(all(item['status'] == 'inferred' for item in ir['evidence']))
+        self.assertIn('session_affinity_behavior', ir['unknowns'])
+        self.assertIn('target_websocket_round_trip', ir['unknowns'])
         self.assertEqual({item['status'] for item in payload['candidates']}, {'needs_review'})
         self.assertTrue(all(not item['preview_eligible'] for item in payload['reports']))
         self.assertTrue(all(any(rule['rule_id'] == 'PROTOCOL-WS-01' and rule['status'] == 'unknown'
                                 for rule in report['constraint_results']) for report in payload['reports']))
         self.assertEqual(self.app.jobs, {})
+
+    def test_ir_is_stable_for_the_same_extracted_source(self):
+        files = {
+            'package.json': '{"scripts":{"start":"node server.js"}}',
+            'server.js': 'require("node:http").createServer((q,r)=>r.end("ok"))',
+        }
+        first_status, first = self.preview(archive(files))
+        second_status, second = self.preview(archive(dict(reversed(list(files.items())))))
+        self.assertEqual((first_status, second_status), (200, 200))
+        self.assertEqual(first['source_digest'], second['source_digest'])
+        self.assertEqual(first['application_ir'], second['application_ir'])
+        self.assertEqual(first['application_ir']['source_revision'], first['source_digest'])
+        files['server.js'] += '\n// changed source revision'
+        changed_status, changed = self.preview(archive(files))
+        self.assertEqual(changed_status, 200)
+        self.assertNotEqual(changed['application_ir']['source_revision'], first['application_ir']['source_revision'])
+        self.assertEqual(changed['application_ir']['source_revision'], changed['source_digest'])
 
     def test_access_rule_uses_user_intent_without_inventing_source_evidence(self):
         status, payload = self.preview(archive({
