@@ -42,6 +42,12 @@ class StaticSiteAssessmentTests(unittest.TestCase):
         self.assertEqual(result.status, "needs_review")
         self.assertIn("app.js", result.evidence_files)
 
+    def test_obvious_credentials_and_source_maps_are_not_published(self):
+        for name in ("credentials.json", "assets/app.js.map"):
+            with self.subTest(name=name):
+                result = self.assess({"index.html": "<h1>Hello</h1>", name: "sensitive"})
+                self.assertEqual(result.status, "needs_review")
+
     def test_frontend_source_requires_verified_build_output(self):
         result = self.assess(
             {

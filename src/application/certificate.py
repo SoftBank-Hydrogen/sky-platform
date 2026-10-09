@@ -284,6 +284,38 @@ def _release_rollback_verified(job: dict, result: dict) -> bool:
 
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
+    if job.get('mode') == 'static_site':
+        result = job.get('result') if isinstance(job.get('result'), dict) else {}
+        complete = (job.get('status') == 'succeeded'
+                    and result.get('stack_id') == job.get('static_stack_id')
+                    and result.get('source_digest') == job.get('source_digest')
+                    and bool(result.get('source_index_sha256')))
+        latest = (health_history or [None])[-1]
+        verification = [
+            {'name': 'deployment_http', 'status': 'passed' if complete else 'unverified',
+             'detail': '공개 CloudFront index.html의 SHA-256을 배포 사본과 대조했습니다.' if complete
+             else '공개 응답과 원본 해시를 함께 확인한 완료 기록이 없습니다.'},
+            {'name': 'latest_health', 'status': ('passed' if latest.get('healthy') else 'failed')
+             if latest else 'unverified',
+             'detail': '최근 별도 상태 검사 기록입니다.' if latest else '별도 상태 검사 기록이 없습니다.'},
+        ]
+        return {
+            'schema_version': 1, 'kind': 'sky-record-snapshot',
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'job': {'id': job.get('id'), 'application_id': job.get('application_id'),
+                    'status': job.get('status'), 'target': job.get('target'),
+                    'deployment_state': job.get('deployment_state')},
+            'source': {'uploaded_sha256': job.get('source_digest'), 'changed_paths': [],
+                       'change_count': 0},
+            'destination': {'url': result.get('url') if complete else None,
+                            'stack_id': job.get('static_stack_id')},
+            'artifact': {'index_sha256': result.get('source_index_sha256') if complete else None},
+            'verification': verification,
+            'unverified': [item['name'] for item in verification if item['status'] == 'unverified'],
+            'cost': {'estimated_total': None, 'actual_total': None},
+            'limitations': ['서명되지 않은 작업 기록입니다.',
+                            '당시 HTTP 확인은 현재 가용성이나 JS 기능을 보증하지 않습니다.'],
+        }
     result = job.get('result') if isinstance(job.get('result'), dict) else {}
     plan = job.get('plan') if isinstance(job.get('plan'), dict) else {}
     infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}

@@ -11,6 +11,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -29,6 +30,18 @@ ATTEMPT_ID = re.compile(r"[a-f0-9]{16}-a[1-3]\Z")
 
 
 class AwsStaticSiteAdapter:
+    @staticmethod
+    def unavailable_reason(settings: AwsSettings) -> str | None:
+        try:
+            settings.validate()
+        except AwsConfigurationError as exc:
+            return str(exc)
+        if not settings.expected_account:
+            return "정적 사이트 배포에는 SKY_AWS_ACCOUNT_ID가 필요합니다."
+        if not shutil.which("aws"):
+            return "AWS CLI 설치와 로그인이 필요합니다."
+        return None
+
     def __init__(self, settings: AwsSettings, *, command=None, sleeper=time.sleep, checkpoint=None):
         settings.validate()
         if not settings.expected_account:
@@ -94,6 +107,9 @@ class AwsStaticSiteAdapter:
         if source_digest(project) != plan["source_digest"]:
             raise ValueError("정적 사이트 소스가 사전 검사 이후 변경됐습니다.")
         stack_name = plan["stack_name"]
+        # A timed-out create request may still succeed. Persist the deterministic
+        # lookup key before sending it so restart never blindly creates a second stack.
+        self.checkpoint(static_stack_name=stack_name)
         created = self.command(
             [
                 "cloudformation",
@@ -202,6 +218,26 @@ class AwsStaticSiteAdapter:
             self.sleep(5)
         raise AwsConfigurationError("CloudFront 공개 URL에서 원본 index.html 응답을 검증하지 못했습니다.")
 
+    def reconcile(self, application_id: str, attempt_id: str) -> dict:
+        """Read an uncertain create request by its deterministic stack name."""
+        stack_name = self._names(application_id, attempt_id)
+        self._identity()
+        described = self.command(["cloudformation", "describe-stacks", "--stack-name", stack_name])
+        stacks = described.get("Stacks")
+        if not isinstance(stacks, list) or len(stacks) != 1:
+            raise AwsConfigurationError("정적 사이트 스택 상태를 하나로 확인하지 못했습니다.")
+        stack = stacks[0]
+        stack_id = stack.get("StackId")
+        prefix = (f"arn:aws:cloudformation:{self.settings.region}:"
+                  f"{self.settings.expected_account}:stack/{stack_name}/")
+        tags = {item.get("Key"): item.get("Value") for item in stack.get("Tags", [])}
+        if (not isinstance(stack_id, str) or not stack_id.startswith(prefix)
+                or tags.get("sky-managed") != "true"
+                or tags.get("sky-app") != application_id
+                or tags.get("sky-attempt") != attempt_id):
+            raise AwsConfigurationError("재확인한 스택의 소유권이 작업과 다릅니다.")
+        return {"stack_id": stack_id, "stack_status": stack.get("StackStatus")}
+
     def retire(self, application_id: str, attempt_id: str, stack_id: str) -> dict:
         """Delete only a fully identified Sky stack and its private objects."""
         stack_name = self._names(application_id, attempt_id)
@@ -220,13 +256,18 @@ class AwsStaticSiteAdapter:
         tags = {item.get("Key"): item.get("Value") for item in stack.get("Tags", [])}
         if (
             stack.get("StackId") != stack_id
-            or stack.get("StackStatus") != "CREATE_COMPLETE"
+            or stack.get("StackStatus") not in {"CREATE_COMPLETE", "ROLLBACK_COMPLETE"}
             or tags.get("sky-managed") != "true"
             or tags.get("sky-app") != application_id
             or tags.get("sky-attempt") != attempt_id
         ):
             raise AwsConfigurationError("정리할 정적 사이트 스택의 소유권·상태가 예상과 다릅니다.")
         outputs = {item.get("OutputKey"): item.get("OutputValue") for item in stack.get("Outputs", [])}
+        if stack.get("StackStatus") == "ROLLBACK_COMPLETE":
+            self.command(["cloudformation", "delete-stack", "--stack-name", stack_id])
+            self.command(["cloudformation", "wait", "stack-delete-complete", "--stack-name", stack_id], timeout=1800)
+            return {"application_id": application_id, "attempt_id": attempt_id,
+                    "stack_id": stack_id, "status": "deleted", "objects_deleted": 0}
         bucket = outputs.get("BucketName")
         if bucket != f"sky-static-{self.settings.expected_account}-{self.settings.region}-{attempt_id}":
             raise AwsConfigurationError("정리할 S3 버킷 이름이 소유 스택과 다릅니다.")
@@ -260,3 +301,39 @@ class AwsStaticSiteAdapter:
             "status": "deleted",
             "objects_deleted": len(objects),
         }
+
+    def check(self, application_id: str, attempt_id: str, result: dict) -> bool:
+        """Compare current stack ownership and the public index with this release."""
+        stack_name = self._names(application_id, attempt_id)
+        stack_id = result.get("stack_id")
+        prefix = (
+            f"arn:aws:cloudformation:{self.settings.region}:"
+            f"{self.settings.expected_account}:stack/{stack_name}/"
+        )
+        expected = result.get("source_index_sha256")
+        if (not isinstance(stack_id, str) or not stack_id.startswith(prefix)
+                or not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)):
+            raise AwsConfigurationError("정적 릴리스 소유 정보 또는 원본 해시가 올바르지 않습니다.")
+        self._identity()
+        described = self.command(["cloudformation", "describe-stacks", "--stack-name", stack_id])
+        stacks = described.get("Stacks")
+        if not isinstance(stacks, list) or len(stacks) != 1:
+            return False
+        stack = stacks[0]
+        tags = {item.get("Key"): item.get("Value") for item in stack.get("Tags", [])}
+        outputs = {item.get("OutputKey"): item.get("OutputValue") for item in stack.get("Outputs", [])}
+        domain = outputs.get("DomainName")
+        if (stack.get("StackId") != stack_id or stack.get("StackStatus") != "CREATE_COMPLETE"
+                or tags.get("sky-managed") != "true" or tags.get("sky-app") != application_id
+                or tags.get("sky-attempt") != attempt_id
+                or not isinstance(domain, str)
+                or not re.fullmatch(r"[a-z0-9-]+\.cloudfront\.net", domain)
+                or result.get("url") != f"https://{domain}"):
+            return False
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            request = urllib.request.Request(result["url"] + "/", headers={"Accept-Encoding": "identity"})
+            with opener.open(request, timeout=10) as response:
+                return response.status == 200 and hashlib.sha256(response.read(1024 * 1024 + 1)).hexdigest() == expected
+        except (OSError, urllib.error.URLError):
+            return False

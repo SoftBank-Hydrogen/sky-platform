@@ -109,8 +109,12 @@ class StateRecoveryMixin:
                     raise ValueError("Invalid project path")
                 if job.get("plan") is not None:
                     DeploymentPlan(**job["plan"])
-                elif job.get("mode") != "agent":
+                elif job.get("mode") not in {"agent", "static_site"}:
                     raise ValueError("Missing deployment plan")
+                if job.get("mode") == "static_site" and (
+                        job.get("target") != "aws-s3-cloudfront"
+                        or job.get("attempt_id") != job_id + "-a1"):
+                    raise ValueError("Invalid static deployment identity")
                 postgres_request_from_job(job)
                 if job.get('postgres_creation_id') is not None and (
                         not isinstance(job['postgres_creation_id'], str)
@@ -154,7 +158,9 @@ class StateRecoveryMixin:
                         "stage": job['status'], "message": (
                             "서버 재시작 후 배포 시도 전 취소 요청을 확인했습니다."
                             if job['status'] == 'cancelled' else
-                            "서버 재시작으로 완료 여부를 확인하지 못했습니다. 컨테이너 상태를 확인하세요. 자동 재배포는 하지 않습니다.")})
+                            "서버 재시작으로 완료 여부를 확인하지 못했습니다. 대상 리소스를 확인하세요. 자동 재배포는 하지 않습니다.")})
+                    if job.get("mode") == "static_site" and job.get("static_stack_name"):
+                        job["deployment_state"] = "needs_attention"
                     job.pop('cancel_requested', None)
                     self.save(job_id)
                 if job['status'] == 'provisioning':

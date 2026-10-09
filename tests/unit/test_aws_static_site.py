@@ -67,6 +67,33 @@ class StaticSiteAdapterTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+    def test_reconcile_rejects_foreign_tags(self):
+        def command(args, timeout=300):
+            if args[:2] == ["sts", "get-caller-identity"]:
+                return {"Account": ACCOUNT}
+            if args[:2] == ["cloudformation", "describe-stacks"]:
+                return {
+                    "Stacks": [
+                        {
+                            "StackId": f"arn:aws:cloudformation:ap-northeast-2:{ACCOUNT}:stack/sky-static-{ATTEMPT}/x",
+                            "StackStatus": "CREATE_COMPLETE",
+                            "Tags": [
+                                {"Key": "sky-managed", "Value": "true"},
+                                {"Key": "sky-app", "Value": "another-site"},
+                                {"Key": "sky-attempt", "Value": ATTEMPT},
+                            ],
+                        }
+                    ]
+                }
+            raise AssertionError(args)
+
+        adapter = AwsStaticSiteAdapter(
+            AwsSettings("ap-northeast-2", expected_account=ACCOUNT, account_pin_required=True),
+            command=command,
+        )
+        with self.assertRaisesRegex(AwsConfigurationError, "소유권"):
+            adapter.reconcile("hello-site", ATTEMPT)
+
     def test_owned_stack_upload_requires_exact_public_index(self):
         stack = f"arn:aws:cloudformation:ap-northeast-2:123456789012:stack/sky-static-{ATTEMPT}/generated"
         bucket = f"sky-static-{ACCOUNT}-ap-northeast-2-{ATTEMPT}"
@@ -136,7 +163,13 @@ class StaticSiteAdapterTests(unittest.TestCase):
         self.assertEqual(result["stack_id"], stack)
         self.assertEqual(opener.request.full_url, "https://d123.cloudfront.net/")
         self.assertEqual([args[:2] for args in calls].count(["s3api", "put-object"]), 1)
-        self.assertEqual(checkpoints, [{"static_stack_id": stack}])
+        self.assertEqual(
+            checkpoints,
+            [
+                {"static_stack_name": f"sky-static-{ATTEMPT}"},
+                {"static_stack_id": stack},
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
+from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.aws.network import ServiceNetworkRequest, discover_default_network
 from application.certificate import deployment_certificate
 from application.diagnosis import deployment_diagnosis
@@ -45,6 +46,7 @@ from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
 from application.health import check_deployment
 from application.monitoring import MonitoringMixin
+from application.static_deployments import StaticDeploymentsMixin
 from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       deployment_access_mode, explicit_infrastructure_plan,
                                       infrastructure_compatibility,
@@ -72,7 +74,7 @@ def dockerfile_diff(source: Path, plan: dict) -> str:
                                         tofile="Dockerfile"))
 
 
-class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin):
+class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDeploymentsMixin):
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
@@ -1478,7 +1480,10 @@ def handler_for(app: App):
                                  "reason": app.cloud_settings.unavailable_reason()},
                                 {"id": "aws-ecs-express", "name": "AWS ECS Express Mode",
                                  "available": app.aws_settings.unavailable_reason() is None,
-                                 "reason": app.aws_settings.unavailable_reason()}],
+                                 "reason": app.aws_settings.unavailable_reason()},
+                                {"id": "aws-s3-cloudfront", "name": "AWS S3 + CloudFront (정적 사이트)",
+                                 "available": AwsStaticSiteAdapter.unavailable_reason(app.aws_settings) is None,
+                                 "reason": AwsStaticSiteAdapter.unavailable_reason(app.aws_settings)}],
                     "recovery_warnings": app.recovery_warnings})
                 return
             if self.path == "/api/jobs":
@@ -1822,7 +1827,10 @@ def handler_for(app: App):
                     job_id = self.path.split('/')[3]
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('AWS 상태 재확인 요청에는 본문을 넣을 수 없습니다.')
-                    self.json_response(200, app.reconcile_aws_update(job_id))
+                    with app.lock:
+                        static_site = app.jobs.get(job_id, {}).get('mode') == 'static_site'
+                    self.json_response(200, app.reconcile_static_site(job_id) if static_site
+                                       else app.reconcile_aws_update(job_id))
                     return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/retire", self.path):
                     job_id = self.path.split('/')[3]
@@ -1836,11 +1844,16 @@ def handler_for(app: App):
                                         and not job.get('result')
                                         and type(job.get('attempts')) is int
                                         and 1 <= job['attempts'] <= 3)
+                        orphan_static = (job and job.get('mode') == 'static_site'
+                                         and job.get('status') in {'failed', 'interrupted'}
+                                         and job.get('static_stack_id'))
                         successful = (job and job.get('status') == 'succeeded'
-                                      and job.get('target') in {'aws-ecs-express', 'local-docker', 'onprem-compose', 'cloud-run'}
+                                      and job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront', 'local-docker', 'onprem-compose', 'cloud-run'}
                                       and job.get('result'))
-                        if (not (orphan_local or successful)
-                                or job.get('deployment_state', 'active') not in {'active', 'delete_failed'}
+                        if (not (orphan_local or orphan_static or successful)
+                                or job.get('deployment_state', 'active') not in (
+                                    {'active', 'delete_failed', 'needs_attention'}
+                                    if job.get('target') == 'aws-s3-cloudfront' else {'active', 'delete_failed'})
                                 or job.get('release_rollback_state') in {'running', 'needs_attention'}
                                 or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')
                                        and other.get('target') == 'aws-ecs-express'
@@ -1859,7 +1872,8 @@ def handler_for(app: App):
                         job['deployment_state'] = 'deleting'
                         job.pop('retire_error', None)
                         app.save(job_id)
-                    threading.Thread(target=app.retire_aws if target == 'aws-ecs-express' else
+                    threading.Thread(target=app.retire_static_site if target == 'aws-s3-cloudfront' else
+                                     app.retire_aws if target == 'aws-ecs-express' else
                                      app.retire_cloud if target == 'cloud-run' else
                                      app.retire_compose if target == 'onprem-compose' else app.retire_local,
                                      args=(job_id,), daemon=True).start()
@@ -1913,7 +1927,9 @@ def handler_for(app: App):
                                              },
                                              'static_site': {**static_site.as_dict(),
                                                  'target': 'aws-s3-cloudfront',
-                                                 'adapter_status': 'not_implemented'},
+                                                 'adapter_status': 'available' if
+                                                 AwsStaticSiteAdapter.unavailable_reason(app.aws_settings) is None
+                                                 else 'unavailable'},
                                              'reports': reports,
                                              'local_sqlite_binding': local_sqlite_binding,
                                              'candidates': candidates})
@@ -1970,6 +1986,74 @@ def handler_for(app: App):
                         raise ValueError('대기 중인 대상이 있는 중단된 배포 묶음만 계속할 수 있습니다.')
                     app.start_group_worker(group_id)
                     self.json_response(202, app.deployment_group(group_id))
+                    return
+                if self.path == "/api/static-deployments":
+                    if self.headers.get("X-Public-Access") != "true":
+                        raise ValueError("CloudFront 정적 사이트는 공개 HTTPS 배포 동의가 필요합니다.")
+                    reason = AwsStaticSiteAdapter.unavailable_reason(app.aws_settings)
+                    if reason:
+                        raise ValueError(reason)
+                    application_id = self.headers.get("X-Application-Id", "")
+                    if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
+                        raise ValueError("앱 ID는 소문자로 시작하는 3~31자의 소문자·숫자·하이픈이어야 합니다.")
+                    size = int(self.headers.get("Content-Length", "0"))
+                    content_type = self.headers.get("Content-Type", "")
+                    folder_upload = content_type.lower().startswith("multipart/form-data;")
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError("업로드 크기는 20 MiB 이하여야 합니다.")
+                    job_id = uuid.uuid4().hex[:16]
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    try:
+                        (directory / ".uncommitted-upload").touch(mode=0o600)
+                        archive = directory / "source.zip"
+                        upload = self.rfile.read(size)
+                        if len(upload) != size:
+                            raise ValueError("업로드가 완료되지 않았습니다.")
+                        if folder_upload:
+                            folder_upload_to_zip(upload, content_type, archive)
+                        else:
+                            archive.write_bytes(upload)
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        attempt_id = job_id + "-a1"
+                        preflight = AwsStaticSiteAdapter(app.aws_settings).preflight(
+                            project, application_id, attempt_id)
+                        with app.lock:
+                            app.ensure_application_available(application_id, "aws-s3-cloudfront")
+                            if any(old.get("application_id") == application_id
+                                   and old.get("target") == "aws-s3-cloudfront"
+                                   and old.get("deployment_state", "active") != "deleted"
+                                   for old in app.jobs.values()):
+                                raise ValueError("기존 정적 사이트 릴리스를 종료한 뒤 새 배포를 시작하세요.")
+                            app.jobs[job_id] = {
+                                "id": job_id, "mode": "static_site", "target": "aws-s3-cloudfront",
+                                "application_id": application_id, "attempt_id": attempt_id,
+                                "status": "running", "deployment_state": "active", "public": True,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "project": str(project), "source_digest": preflight["source_digest"],
+                                "static_preflight": preflight, "plan": None, "attempts": 1,
+                                "steps": 0, "changes": [], "diff": "", "events": [],
+                                "aws": asdict(app.aws_settings),
+                                "infrastructure_plan": {
+                                    "target": "aws-s3-cloudfront", "planner": "policy",
+                                    "rationale": "서버·데이터 의존성 없는 index.html과 정적 자산만 확인했습니다.",
+                                    "resources": ["private S3 bucket", "CloudFront distribution"],
+                                    "compatibility": {"access_mode": "public"},
+                                },
+                            }
+                            app.save(job_id)
+                        app.clear_upload_marker(directory)
+                    except Exception:
+                        if not (directory / "job.json").is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            shutil.rmtree(directory, ignore_errors=True)
+                        raise
+                    started = app.start_job_worker(job_id, app.run_static_site)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 if self.path == "/api/deployments":
                     if not app.ai_settings.available:

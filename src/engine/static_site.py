@@ -62,10 +62,10 @@ STATIC_ASSET_SUFFIXES = {
     ".ttf",
     ".wasm",
     ".txt",
-    ".map",
     ".webmanifest",
     ".avif",
 }
+SENSITIVE_PUBLIC_NAMES = {"credentials.json", "secrets.json", "service-account.json", "private-key.json"}
 SAME_ORIGIN_API = re.compile(
     r"(?:fetch\s*\(|(?:new\s+)?WebSocket\s*\()\s*"
     r"[\x27\x22`]\s*(?:/api(?:/|\?|[\x27\x22`])|/ws(?:/|\?|[\x27\x22`]))",
@@ -156,6 +156,7 @@ def assess_static_site(project: Path, profile: InfrastructureProfile) -> StaticS
     for path in project.rglob("*"):
         if path.is_file() and (
             path.suffix.lower() not in STATIC_ASSET_SUFFIXES
+            or path.name.lower() in SENSITIVE_PUBLIC_NAMES
             or any(part.startswith(".") for part in path.relative_to(project).parts)
         ):
             evidence.add(path.relative_to(project).as_posix())

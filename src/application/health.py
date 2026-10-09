@@ -10,6 +10,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
+from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 
 
@@ -99,6 +100,10 @@ def check_deployment(job: dict) -> dict:
                 if not token:
                     raise RuntimeError('No identity token available')
             healthy = probe(url + health_path, token)
+        elif target == 'aws-s3-cloudfront':
+            settings = AwsSettings(**job['aws'])
+            healthy = AwsStaticSiteAdapter(settings).check(
+                job['application_id'], job['attempt_id'], result)
         elif target == 'aws-ecs-express':
             service = result.get('service', '')
             owner_attempt = result.get('owner_attempt') or service.removeprefix('sky-')
