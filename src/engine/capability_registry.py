@@ -1,0 +1,93 @@
+"""Versioned target capabilities, separate from provider claims and live verification."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+from engine.compatibility import TARGET_CAPABILITIES
+
+
+@dataclass(frozen=True)
+class Capability:
+    id: str
+    provider_support: str
+    sky_adapter_support: str
+    verification_status: str = "unverified"
+    verification_refs: tuple[str, ...] = ()
+    configurations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.provider_support not in {"supported", "unsupported", "unknown"}:
+            raise ValueError("Invalid provider capability status")
+        if self.sky_adapter_support not in {"implemented", "unimplemented", "unknown"}:
+            raise ValueError("Invalid Sky adapter capability status")
+        if self.verification_status not in {"verified", "failed", "unverified"}:
+            raise ValueError("Invalid capability verification status")
+        if self.verification_status == "verified" and not self.verification_refs:
+            raise ValueError("Verified capability requires a verification reference")
+        if self.verification_status == "verified" and self.sky_adapter_support != "implemented":
+            raise ValueError("Unimplemented capability cannot be verified")
+
+    @property
+    def display_status(self) -> str:
+        if self.sky_adapter_support == "unimplemented":
+            return "unsupported_by_sky"
+        if self.sky_adapter_support == "unknown":
+            return "unknown"
+        if self.verification_status == "failed":
+            return "failed"
+        if self.verification_status == "verified":
+            return "supported"
+        return "implemented_unverified"
+
+    def as_dict(self) -> dict:
+        return {**asdict(self), "display_status": self.display_status}
+
+
+@dataclass(frozen=True)
+class TargetCapabilityModel:
+    schema_version: int
+    target: str
+    adapter_contract_version: int
+    capabilities: tuple[Capability, ...]
+
+    def as_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "target": self.target,
+            "adapter_contract_version": self.adapter_contract_version,
+            "capabilities": [item.as_dict() for item in self.capabilities],
+        }
+
+
+def target_capability_model(target: str) -> TargetCapabilityModel:
+    """Report implemented paths conservatively; validation refs are added only with scoped proof."""
+    if target not in TARGET_CAPABILITIES:
+        raise ValueError("Unsupported deployment target")
+    declared = TARGET_CAPABILITIES[target]
+    available = {
+        "container_runtime": True,
+        "access_loopback": "loopback" in declared["access_modes"],
+        "access_authenticated": "authenticated" in declared["access_modes"],
+        "access_public": "public" in declared["access_modes"],
+        "sqlite_volume": declared["sqlite_volume"],
+        "durable_file_volume": declared["durable_files"],
+        "background_worker": declared["background_worker"],
+        "existing_rds_binding": declared["existing_rds_binding"],
+        "new_rds_provisioning": declared["new_rds_provisioning"],
+        "remote_host": declared["remote_host"],
+    }
+    configurations = {
+        "existing_rds_binding": ("existing_rds",),
+        "new_rds_provisioning": ("create_rds",),
+    }
+    capabilities = tuple(
+        Capability(
+            id=name,
+            provider_support="unknown",
+            sky_adapter_support="implemented" if enabled else "unimplemented",
+            configurations=configurations.get(name, ()),
+        )
+        for name, enabled in available.items()
+    )
+    return TargetCapabilityModel(1, target, 1, capabilities)

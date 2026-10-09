@@ -25,7 +25,8 @@ class LocalDockerAdapter:
         return ExecutionCapabilities(
             target="local-docker",
             access_modes=frozenset(declared["access_modes"]),
-            sqlite_volume=True,
+            sqlite_volume=declared["sqlite_volume"],
+            remote_host=declared["remote_host"],
             postgresql_binding=declared["postgresql_binding"],
         )
 

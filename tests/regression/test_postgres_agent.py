@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 from application.agent import AgentError, DeploymentAgent, DeploymentTools
+from adapters.aws.ecs import AwsExpressAdapter
 from adapters.aws.postgres import PostgresRequest
 from tests.live.smoke_aws_postgres_api import PostgresFixture, archive
 
@@ -33,6 +34,7 @@ class PostgresAgentTests(unittest.TestCase):
                                   ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
         calls = []
         class Adapter:
+            execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
             def deploy(self, project, plan, attempt_id, environment, postgres=None, migrations=None):
                 calls.append((project, plan, attempt_id, environment, postgres, migrations))
                 return {'url': 'https://example.test', 'target': 'aws-ecs-express'}
@@ -59,9 +61,10 @@ class PostgresAgentTests(unittest.TestCase):
                                   ('subnet-11111111', 'subnet-22222222'), 'sg-33333333')
         calls = []
         class Adapter:
+            execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
             def deploy(self, project, plan, attempt_id, environment, postgres=None, migrations=None):
                 calls.append((plan.required_env, environment, postgres, attempt_id, migrations))
-                return {'url': 'https://example.test'}
+                return {'url': 'https://example.test', 'target': 'aws-ecs-express'}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = root / 'source'

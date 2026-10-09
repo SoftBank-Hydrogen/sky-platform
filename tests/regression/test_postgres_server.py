@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 from tests.support.openai_wire_fixture import ResponsesWireFixture
 from application.agent import OpenAIDeployAgent
 from application.analysis import AISettings
-from adapters.aws.ecs import AwsSettings
+from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
 from adapters.aws.postgres import PostgresRequest
 from interfaces.http.server import App, handler_for, postgres_request_from_job
 from tests.live.smoke_aws_postgres_api import archive as probe_archive
@@ -521,6 +521,7 @@ class PostgresServerTests(unittest.TestCase):
         self.app.agent_factory = OpenAIDeployAgent
         calls = []
         class Adapter:
+            execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
             def __init__(self, event, settings, existing=None, checkpoint=None):
                 pass
             def deploy(self, project, plan, attempt_id, environment,
@@ -579,6 +580,7 @@ class PostgresServerTests(unittest.TestCase):
         self.app.agent_factory = OpenAIDeployAgent
         calls = []
         class Adapter:
+            execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
             def __init__(self, event, settings, existing=None, checkpoint=None):
                 pass
             def deploy(self, project, plan, attempt_id, environment,

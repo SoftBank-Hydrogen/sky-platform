@@ -26,8 +26,9 @@ class LocalComposeAdapter(LocalDockerAdapter):
         return ExecutionCapabilities(
             target="onprem-compose",
             access_modes=frozenset(declared["access_modes"]),
-            sqlite_volume=True,
+            sqlite_volume=declared["sqlite_volume"],
             postgresql_binding=declared["postgresql_binding"],
+            remote_host=declared["remote_host"],
         )
 
     @staticmethod

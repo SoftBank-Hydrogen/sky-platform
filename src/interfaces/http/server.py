@@ -18,6 +18,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from engine.application_ir import application_ir
+from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
@@ -392,7 +393,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                        'status': 'planned', 'created_at': datetime.now(timezone.utc).isoformat(),
                        'plan': None, 'diff': '', 'changes': [], 'steps': 0, 'attempts': 0,
                        'project': str(copied_source), 'infrastructure_profile': profile.as_dict(),
-                       'application_ir': application_ir(profile).as_dict(),
+                       'application_ir': application_ir(profile, digest).as_dict(),
                        'events': [], 'source_digest': digest,
                        'group_id': group_id, 'group_order': order}
                 if target == 'cloud-run':
@@ -1902,7 +1903,11 @@ def handler_for(app: App):
                             profile, availability, public_access=public_flag == 'true',
                             local_sqlite=local_sqlite_binding is not None, include_compose=True)
                     self.json_response(200, {'source_digest': digest,
-                                             'application_ir': application_ir(profile).as_dict(),
+                                             'application_ir': application_ir(profile, digest).as_dict(),
+                                             'capability_models': {
+                                                 target: target_capability_model(target).as_dict()
+                                                 for target in availability
+                                             },
                                              'inspection': {
                                                  'requirements': list(profile.requirements),
                                                  'evidence_files': list(profile.evidence),
@@ -2167,6 +2172,7 @@ def handler_for(app: App):
                                         raise ValueError('기존 PostgreSQL 서비스 업데이트에는 동일한 DB 연결 요청이 필요합니다.')
                                     if postgres_request is not None and latest['result'].get('database') != database:
                                         raise ValueError('기존 AWS 서비스의 PostgreSQL 연결 기록이 현재 DB와 다릅니다.')
+                            digest = source_digest(project)
                             app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
@@ -2175,13 +2181,13 @@ def handler_for(app: App):
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                 "plan": None, "diff": "", "changes": [], "steps": 0, "attempts": 0,
                                 "project": str(project), "infrastructure_profile": infrastructure_profile.as_dict(),
-                                "application_ir": application_ir(infrastructure_profile).as_dict(),
+                                "application_ir": application_ir(infrastructure_profile, digest).as_dict(),
                                 "events": []}
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion
                             if local_sqlite_binding is not None:
                                 app.jobs[job_id]['local_sqlite_binding'] = local_sqlite_binding
-                            app.jobs[job_id]['source_digest'] = source_digest(project)
+                            app.jobs[job_id]['source_digest'] = digest
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
                             elif target == "aws-ecs-express":

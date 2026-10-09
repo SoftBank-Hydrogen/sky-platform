@@ -33,6 +33,8 @@ class ExecutionRequest:
     sqlite_binding: dict | None = None
     postgresql_binding: bool = False
     remote_host: bool = False
+    postgres_request: object | None = field(default=None, repr=False)
+    migrations: object | None = field(default=None, repr=False)
 
 
 class ExecutionAdapter(Protocol):
@@ -61,7 +63,19 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
         raise ValueError("선택한 배포 대상은 PostgreSQL 연결을 지원하지 않습니다.")
     if request.remote_host and not capabilities.remote_host:
         raise ValueError("선택한 배포 대상은 원격 호스트를 지원하지 않습니다.")
-    result = state.adapter.deploy(request.project, request.plan, request.attempt_id, request.environment)
+    if request.postgresql_binding != (request.postgres_request is not None):
+        raise ValueError("PostgreSQL 연결 요구와 실행 입력이 일치하지 않습니다.")
+    if request.migrations is not None and request.postgres_request is None:
+        raise ValueError("SQL 마이그레이션에는 PostgreSQL 연결 요청이 필요합니다.")
+    if request.target == "aws-ecs-express":
+        result = state.adapter.deploy(
+            request.project, request.plan, request.attempt_id, request.environment,
+            postgres=request.postgres_request, migrations=request.migrations,
+        )
+        if not isinstance(result, dict) or result.get("target") != request.target:
+            raise ValueError("AWS 배포 결과의 대상이 요청과 다릅니다.")
+    else:
+        result = state.adapter.deploy(request.project, request.plan, request.attempt_id, request.environment)
     if request.target in {"local-docker", "onprem-compose"}:
         expected = f"sky-{request.attempt_id}"
         url = result.get("url") if isinstance(result, dict) else None

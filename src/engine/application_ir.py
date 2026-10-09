@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 from engine.compatibility import InfrastructureProfile, evidence_id
@@ -12,7 +13,7 @@ class SourceEvidence:
     id: str
     path: str
     signal: str
-    origin: str = "deterministic-source-inspection"
+    origin: str = "source_static"
     status: str = "confirmed"
 
 
@@ -40,7 +41,8 @@ class Hypothesis:
 
 @dataclass(frozen=True)
 class ApplicationIR:
-    version: int
+    schema_version: int
+    source_revision: str
     components: tuple[Component, ...]
     requirements: tuple[Requirement, ...]
     evidence: tuple[SourceEvidence, ...]
@@ -48,13 +50,16 @@ class ApplicationIR:
     declared_image_platform: str | None
     topology_status: str = "unresolved"
     hypotheses: tuple[Hypothesis, ...] = ()
+    unknowns: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-def application_ir(profile: InfrastructureProfile) -> ApplicationIR:
+def application_ir(profile: InfrastructureProfile, source_revision: str) -> ApplicationIR:
     """Preserve observed file→requirement edges without inventing app components."""
+    if not re.fullmatch(r"[a-f0-9]{64}", source_revision):
+        raise ValueError("Application IR source revision must be a SHA-256 digest")
     evidence = []
     requirements = []
     by_requirement = dict(profile.requirement_evidence)
@@ -76,12 +81,22 @@ def application_ir(profile: InfrastructureProfile) -> ApplicationIR:
             for identifier, path in zip(ids, paths, strict=True)
         )
         hypotheses.append(Hypothesis("H-" + name, name, ids))
+    signal_names = {name for name, _paths in profile.source_signals}
+    unknowns = {"component_topology", "statelessness"}
+    if "websocket" in signal_names:
+        unknowns.add("target_websocket_round_trip")
+    if "possible-process-local-state" in signal_names:
+        unknowns.add("session_affinity_behavior")
+    if "unknown" in profile.database_engines:
+        unknowns.add("database_engine")
     return ApplicationIR(
-        version=1,
+        schema_version=2,
+        source_revision=source_revision,
         components=(Component("source-bundle", "unresolved", tuple(item.id for item in requirements)),),
         requirements=tuple(requirements),
         evidence=tuple(evidence),
         database_engines=profile.database_engines,
         declared_image_platform=profile.final_image_platform,
         hypotheses=tuple(hypotheses),
+        unknowns=tuple(sorted(unknowns)),
     )
