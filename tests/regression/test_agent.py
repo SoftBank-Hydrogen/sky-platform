@@ -80,16 +80,21 @@ class AgentTests(unittest.TestCase):
 
     def test_compiled_deployment_rejects_missing_http_probe_result(self):
         revision = source_digest(self.original)
+        resources = ['Docker image', 'local container']
         self.tools.compilation = {
             'compilation_id': 'comp-example', 'architecture_decision_id': 'decision-example',
             'decision_revision': 1, 'source_revision': revision,
-            'target_plan': {'id': 'target-example', 'target': 'local-docker'},
+            'target_plan': {'id': 'target-example', 'target': 'local-docker',
+                            'resources': resources, 'access_mode': 'loopback'},
         }
         self.tools.architecture_decision = {
             'decision_id': 'decision-example', 'decision_revision': 1,
             'source_revision': revision, 'pending_verification_rule_ids': [],
         }
-        self.tools.infrastructure_plan = {'compatibility': {}}
+        self.tools.infrastructure_plan = {
+            'target': 'local-docker', 'resources': resources,
+            'compatibility': {'access_mode': 'loopback'},
+        }
         self.tools.read_project_files(['package.json'])
         self.tools.apply_project_patch('package.json', '"scripts": {}',
                                        '"scripts": {"start": "node server.js"}')

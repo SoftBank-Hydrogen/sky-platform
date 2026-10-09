@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from adapters.aws.postgres import PostgresRequest
 from application.deployment_core import DeploymentPlan
+from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import InfrastructureProfile
 
 
@@ -42,6 +43,42 @@ def health_result_matches_plan(plan: dict, result: dict) -> bool:
 def require_health_result(plan: dict, result: dict) -> None:
     if not health_result_matches_plan(plan, result):
         raise HealthResultMismatch("CV-06: Adapter HTTP verification does not match the executable health endpoint")
+
+
+def check_target_resource_consistency(compilation: dict, infrastructure_plan: dict, target: str) -> dict:
+    """Reject compiled resources without an implemented adapter path."""
+    target_plan = compilation.get("target_plan") if isinstance(compilation, dict) else None
+    resources = target_plan.get("resources") if isinstance(target_plan, dict) else None
+    if (
+        not isinstance(infrastructure_plan, dict)
+        or not isinstance(resources, list)
+        or not resources
+        or target_plan.get("target") != target
+        or infrastructure_plan.get("target") != target
+        or not isinstance(infrastructure_plan.get("compatibility"), dict)
+        or resources != infrastructure_plan.get("resources")
+        or not all(isinstance(item, str) for item in resources)
+        or len(set(resources)) != len(resources)
+    ):
+        raise ValueError("CV-09: Target resources disagree with the compiled execution target")
+    try:
+        capabilities = {item.id: item for item in target_capability_model(target).capabilities}
+    except ValueError:
+        raise ValueError("CV-09: Unsupported execution target") from None
+    for resource in resources:
+        capability_id = RESOURCE_CAPABILITY_IDS.get(resource)
+        capability = capabilities.get(capability_id)
+        if capability is None or capability.sky_adapter_support != "implemented":
+            raise ValueError(f"CV-09: No implemented adapter capability for resource {resource}")
+    access_mode = target_plan.get("access_mode")
+    access_capability = capabilities.get(f"access_{access_mode}")
+    if (
+        access_mode != infrastructure_plan.get("compatibility", {}).get("access_mode")
+        or access_capability is None
+        or access_capability.sky_adapter_support != "implemented"
+    ):
+        raise ValueError("CV-09: Target access mode is not implemented by the adapter")
+    return {"id": "CV-09", "status": "pass", "source": "compiled_target_plan"}
 
 
 def check_port_consistency(plan: DeploymentPlan) -> dict:

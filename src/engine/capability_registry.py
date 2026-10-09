@@ -6,6 +6,37 @@ from dataclasses import asdict, dataclass
 
 from engine.compatibility import TARGET_CAPABILITIES
 
+# Keep resource execution support independent of the resources a planner emits.
+RESOURCE_CAPABILITY_IDS = {
+    "Docker image": "docker_image",
+    "local container": "local_container",
+    "same-host Compose service": "compose_service",
+    "optional SQLite volume": "sqlite_volume",
+    "Artifact Registry repository": "artifact_registry_repository",
+    "runtime service account": "runtime_service_account",
+    "Cloud Run service": "cloud_run_service",
+    "CloudFormation base stack": "cloudformation_base_stack",
+    "ECR repository": "ecr_repository",
+    "ECS Express service": "ecs_express_service",
+    "new RDS PostgreSQL": "new_rds_provisioning",
+    "existing RDS PostgreSQL": "existing_rds_binding",
+    "one-off SQL migration task": "sql_migration_task",
+}
+
+_IMPLEMENTED_RESOURCE_CAPABILITIES = {
+    "local-docker": {"docker_image", "local_container"},
+    "onprem-compose": {"docker_image", "compose_service", "sqlite_volume"},
+    "cloud-run": {"artifact_registry_repository", "runtime_service_account", "cloud_run_service"},
+    "aws-ecs-express": {
+        "cloudformation_base_stack",
+        "ecr_repository",
+        "ecs_express_service",
+        "new_rds_provisioning",
+        "existing_rds_binding",
+        "sql_migration_task",
+    },
+}
+
 
 @dataclass(frozen=True)
 class Capability:
@@ -77,6 +108,13 @@ def target_capability_model(target: str) -> TargetCapabilityModel:
         "new_rds_provisioning": declared["new_rds_provisioning"],
         "remote_host": declared["remote_host"],
     }
+    available.update(
+        {
+            capability: capability in _IMPLEMENTED_RESOURCE_CAPABILITIES[target]
+            for capability in RESOURCE_CAPABILITY_IDS.values()
+            if capability not in available
+        }
+    )
     configurations = {
         "existing_rds_binding": ("existing_rds",),
         "new_rds_provisioning": ("create_rds",),

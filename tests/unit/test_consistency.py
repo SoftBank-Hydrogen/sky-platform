@@ -8,10 +8,11 @@ from adapters.aws.postgres import PostgresRequest
 from application.consistency import (
     check_database_consistency,
     check_port_consistency,
+    check_target_resource_consistency,
     health_result_matches_plan,
 )
 from application.deployment_core import make_plan
-from engine.compatibility import InfrastructureProfile
+from engine.compatibility import TARGET_RESOURCES, InfrastructureProfile
 
 POSTGRES = InfrastructureProfile(
     "database", (), 1, requirements=("database",), database_engines=("postgresql",)
@@ -124,3 +125,68 @@ def test_http_result_must_reference_the_planned_health_endpoint():
         {**result, "url": "file://example.test", "health_url": "file://example.test/ready"},
     ):
         assert not health_result_matches_plan(plan, changed)
+
+
+@pytest.mark.parametrize(
+    "target,access_mode",
+    [
+        ("local-docker", "loopback"),
+        ("onprem-compose", "loopback"),
+        ("cloud-run", "public"),
+        ("aws-ecs-express", "public"),
+    ],
+)
+def test_compiled_resources_require_implemented_target_capabilities(target, access_mode):
+    plan = {
+        "target": target,
+        "resources": TARGET_RESOURCES[target],
+        "compatibility": {"access_mode": access_mode},
+    }
+    compilation = {
+        "target_plan": {"target": target, "resources": list(plan["resources"]), "access_mode": access_mode}
+    }
+    assert check_target_resource_consistency(compilation, plan, target) == {
+        "id": "CV-09",
+        "status": "pass",
+        "source": "compiled_target_plan",
+    }
+    unknown = copy.deepcopy(plan)
+    unknown["resources"].append("unimplemented queue")
+    compilation["target_plan"]["resources"] = list(unknown["resources"])
+    with pytest.raises(ValueError, match="CV-09.*unimplemented queue"):
+        check_target_resource_consistency(compilation, unknown, target)
+    if target != "aws-ecs-express":
+        extra = copy.deepcopy(plan)
+        extra["resources"].append("new RDS PostgreSQL")
+        compilation["target_plan"]["resources"] = list(extra["resources"])
+        with pytest.raises(ValueError, match="CV-09.*new RDS PostgreSQL"):
+            check_target_resource_consistency(compilation, extra, target)
+
+
+def test_target_resource_check_rejects_mixed_plan_and_unsupported_access():
+    target = "aws-ecs-express"
+    plan = {
+        "target": target,
+        "resources": list(TARGET_RESOURCES[target]),
+        "compatibility": {"access_mode": "public"},
+    }
+    compilation = {
+        "target_plan": {"target": target, "resources": list(plan["resources"]), "access_mode": "public"}
+    }
+    compilation["target_plan"]["resources"].append("new RDS PostgreSQL")
+    with pytest.raises(ValueError, match="CV-09.*disagree"):
+        check_target_resource_consistency(compilation, plan, target)
+    compilation["target_plan"]["resources"] = list(plan["resources"])
+    compilation["target_plan"]["access_mode"] = "loopback"
+    plan["compatibility"]["access_mode"] = "loopback"
+    with pytest.raises(ValueError, match="CV-09.*access mode"):
+        check_target_resource_consistency(compilation, plan, target)
+
+
+@pytest.mark.parametrize("database_resource", ["new RDS PostgreSQL", "existing RDS PostgreSQL"])
+def test_aws_database_and_migration_resources_have_separate_adapter_capabilities(database_resource):
+    target = "aws-ecs-express"
+    resources = [*TARGET_RESOURCES[target], database_resource, "one-off SQL migration task"]
+    plan = {"target": target, "resources": resources, "compatibility": {"access_mode": "public"}}
+    compilation = {"target_plan": {"target": target, "resources": list(resources), "access_mode": "public"}}
+    assert check_target_resource_consistency(compilation, plan, target)["status"] == "pass"

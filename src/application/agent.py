@@ -20,7 +20,8 @@ from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
-from application.consistency import check_database_consistency, check_port_consistency, require_health_result
+from application.consistency import (
+    check_database_consistency, check_port_consistency, check_target_resource_consistency, require_health_result)
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
@@ -452,7 +453,8 @@ class DeploymentTools:
                 local_sqlite_binding=self.local_sqlite_binding)
             if self.architecture_decision is None:
                 raise ValueError('Compiled deployment requires an architecture decision')
-            checks = [database_check, check_port_consistency(self.plan)]
+            checks = [database_check, check_port_consistency(self.plan),
+                      check_target_resource_consistency(self.compilation, self.infrastructure_plan, self.target)]
             gate = static_consistency_gate(
                 self.compilation, self.architecture_decision, checks)
             self.checkpoint(consistency_checks=checks, static_consistency_gate=gate)
