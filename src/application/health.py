@@ -40,7 +40,7 @@ def check_deployment(job: dict) -> dict:
     if job.get('deployment_state') == 'superseded':
         return {'healthy': False, 'checked_at': checked_at, 'reason': 'A newer release uses this service'}
     try:
-        if target == 'local-docker':
+        if target in {'local-docker', 'onprem-compose'}:
             name = result.get('container', '')
             # Legacy deployments use the job ID; agent deployments use a bounded attempt ID.
             if name not in {f'sky-{job_id}', *(f'sky-{job_id}-a{i}' for i in range(1, 4))}:
@@ -53,6 +53,10 @@ def check_deployment(job: dict) -> dict:
                     or containers[0].get('Config', {}).get('Labels', {}).get('app') != 'sky'
                     or containers[0].get('Config', {}).get('Image') != result.get('image')):
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'Container identity or state changed'}
+            if target == 'onprem-compose' and (
+                    result.get('compose_project') != name
+                    or containers[0].get('Config', {}).get('Labels', {}).get('com.docker.compose.project') != name):
+                return {'healthy': False, 'checked_at': checked_at, 'reason': 'Compose project identity changed'}
             sqlite_binding = job.get('local_sqlite_binding')
             if isinstance(sqlite_binding, dict):
                 mounts = containers[0].get('Mounts') or []

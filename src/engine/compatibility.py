@@ -115,12 +115,20 @@ WEBSOCKET_SOURCE = re.compile(r"\b(?:WebSocketServer|new\s+WebSocket\s*\(|\.on\s
 PROCESS_LOCAL_MAP = re.compile(r"\b(?:const|let|var)\s+\w+\s*=\s*new\s+(?:Map|Set)\s*\(")
 TARGET_RESOURCES = {
     "local-docker": ["Docker image", "local container"],
+    "onprem-compose": ["Docker image", "same-host Compose service", "optional SQLite volume"],
     "cloud-run": ["Artifact Registry repository", "runtime service account", "Cloud Run service"],
     "aws-ecs-express": ["CloudFormation base stack", "ECR repository", "ECS Express service"],
 }
 # These describe the currently implemented adapters, not everything the providers offer.
 TARGET_CAPABILITIES = {
     "local-docker": {
+        "postgresql_binding": False,
+        "durable_files": False,
+        "background_worker": False,
+        "image_platform": None,
+        "access_modes": ["loopback"],
+    },
+    "onprem-compose": {
         "postgresql_binding": False,
         "durable_files": False,
         "background_worker": False,
@@ -226,7 +234,7 @@ def infrastructure_compatibility(
             "DATA-SQLITE-01",
             "sqlite",
             None
-            if local_sqlite and target == "local-docker"
+            if local_sqlite and target in {"local-docker", "onprem-compose"}
             else "SQLite 데이터베이스에 영속 저장소·마이그레이션이 필요합니다",
         )
     if ("database" in profile.requirements or profile.storage == "database") and not (
@@ -301,7 +309,7 @@ def infrastructure_compatibility(
         "declared_image_platform": profile.final_image_platform,
         "access_mode": access_mode,
         "postgres_binding": postgres,
-        "local_sqlite_binding": local_sqlite and target == "local-docker",
+        "local_sqlite_binding": local_sqlite and target in {"local-docker", "onprem-compose"},
         "adapter_capabilities": capabilities.copy(),
         "compatible": not problems,
         "problems": problems,

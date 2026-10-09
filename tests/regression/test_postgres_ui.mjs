@@ -33,8 +33,10 @@ test('Local SQLite header needs an explicit compatible single upload', () => {
   const context = {el: id => elements[id], githubMode: false, Error};
   runInNewContext(html.slice(start, end), context);
   assert.equal(context.localSqliteUploadHeaders()['X-Local-Sqlite-Mount'], '/app/data');
+  elements.target.value = 'onprem-compose';
+  assert.equal(context.localSqliteUploadHeaders()['X-Local-Sqlite-Mount'], '/app/data');
   elements.multiMode.checked = true;
-  assert.throws(() => context.localSqliteUploadHeaders(), /단일 Local Docker/);
+  assert.throws(() => context.localSqliteUploadHeaders(), /단일 로컬 배포/);
 });
 
 test('deployment certificate separates recorded checks from unverified checks', async () => {

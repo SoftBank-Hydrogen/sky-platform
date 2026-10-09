@@ -48,6 +48,9 @@ class LocalSqliteTests(unittest.TestCase):
             self.assertEqual(binding["volume_name"], "sky-data-demo-app")
             self.assertEqual(binding["source_path"], "data/scores.db")
             validate_infrastructure(profile, "local-docker", local_sqlite=True)
+            with self.assertRaises(ValueError):
+                validate_infrastructure(profile, "onprem-compose")
+            validate_infrastructure(profile, "onprem-compose", local_sqlite=True)
             report = infrastructure_compatibility(profile, "local-docker", local_sqlite=True)
             self.assertTrue(report["compatible"])
             with self.assertRaises(ValueError):
@@ -131,6 +134,7 @@ class LocalSqliteTests(unittest.TestCase):
             self.assertEqual(response["local_sqlite_binding"]["mount_path"], "/app/data")
             reports = {item["target"]: item for item in response["reports"]}
             self.assertTrue(reports["local-docker"]["compatible"])
+            self.assertTrue(reports["onprem-compose"]["compatible"])
             self.assertFalse(reports["cloud-run"]["compatible"])
             self.assertFalse(reports["aws-ecs-express"]["compatible"])
 

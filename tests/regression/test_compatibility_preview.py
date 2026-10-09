@@ -43,9 +43,10 @@ class CompatibilityPreviewTests(unittest.TestCase):
         }))
         self.assertEqual(status, 200)
         reports = {item['target']: item for item in payload['reports']}
-        self.assertEqual(set(reports), {'local-docker', 'aws-ecs-express', 'cloud-run'})
+        self.assertEqual(set(reports), {'local-docker', 'onprem-compose', 'aws-ecs-express', 'cloud-run'})
         self.assertTrue(all(item['compatible'] for item in reports.values()))
         self.assertEqual(reports['local-docker']['access_mode'], 'loopback')
+        self.assertEqual(reports['onprem-compose']['access_mode'], 'loopback')
         self.assertEqual(reports['aws-ecs-express']['access_mode'], 'public')
         self.assertTrue(all(item['cost']['estimate'] is None for item in reports.values()))
         self.assertEqual(payload['inspection']['requirements'], [])

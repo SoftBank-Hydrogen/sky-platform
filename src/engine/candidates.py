@@ -13,15 +13,17 @@ def compare_targets(
     *,
     public_access: bool,
     local_sqlite: bool = False,
+    include_compose: bool = False,
 ) -> tuple[list[dict], list[dict]]:
-    """Evaluate the same target variants for preview and automatic deployment."""
+    """Evaluate target variants; Compose is explicit-only until auto selection is verified."""
     reports = []
-    for target in SUPPORTED_TARGETS:
+    targets = (*SUPPORTED_TARGETS, "onprem-compose") if include_compose else SUPPORTED_TARGETS
+    for target in targets:
         report = infrastructure_compatibility(
             profile,
             target,
             public_access=public_access,
-            local_sqlite=local_sqlite and target == "local-docker",
+            local_sqlite=local_sqlite and target in {"local-docker", "onprem-compose"},
         )
         reason = availability[target]
         reports.append(

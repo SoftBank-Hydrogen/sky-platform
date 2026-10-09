@@ -197,7 +197,7 @@ class DeploymentTools:
         self.emit, self.checkpoint = event, checkpoint
         self.cancel_check = cancel_check or (lambda: False)
         self.attempts, self.adapter_factory = attempts, adapter_factory
-        if target not in {"local-docker", "cloud-run", "aws-ecs-express"}:
+        if target not in {"local-docker", "onprem-compose", "cloud-run", "aws-ecs-express"}:
             raise ValueError("Unsupported deployment target")
         self.target = target
         if postgres_request is not None:

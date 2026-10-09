@@ -29,6 +29,7 @@ from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from adapters.local.docker import LocalDockerAdapter
+from adapters.local.compose import LocalComposeAdapter
 from application.health import check_deployment
 from application.websocket_probe import WebSocketProbeError, probe_sky_game
 from application.infrastructure import (OpenAIInfrastructurePlanner,
@@ -629,6 +630,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             if target == 'local-docker' and job.get('local_sqlite_binding'):
                 adapter_factory = lambda event: LocalDockerAdapter(
                     event, sqlite_binding=job['local_sqlite_binding'])
+            if target == 'onprem-compose':
+                adapter_factory = lambda event: LocalComposeAdapter(
+                    event, self.root / job_id, sqlite_binding=job.get('local_sqlite_binding'))
             if target == "cloud-run":
                 settings = CloudRunSettings(**job["cloud"])
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
@@ -830,7 +834,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
         """Explicitly restart a job that never reached an AI step or deployment attempt."""
         def eligible(job):
             return (job and job.get('mode') == 'agent' and job.get('status') == 'interrupted'
-                    and job.get('target') in {'local-docker', 'cloud-run', 'aws-ecs-express'}
+                    and job.get('target') in {'local-docker', 'onprem-compose', 'cloud-run', 'aws-ecs-express'}
                     and job.get('attempts') == 0 and job.get('steps') == 0
                     and job.get('changes') == [] and job.get('plan') is None
                     and job.get('result') is None and not job.get('cancel_requested')
@@ -947,6 +951,33 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 self.jobs[job_id].pop('retire_error', None)
                 self.save(job_id)
             self.event(job_id, 'retired', '로컬 Docker 컨테이너와 이미지 태그의 삭제를 확인했습니다.')
+
+    def retire_compose(self, job_id):
+        try:
+            with self.lock:
+                job = json.loads(json.dumps(self.jobs[job_id]))
+            adapter = LocalComposeAdapter(
+                lambda stage, message: self.event(job_id, stage, message), self.root / job_id)
+            if job['status'] == 'succeeded' and job.get('result'):
+                adapter.retire(job['result'], job_id)
+            elif job.get('status') in {'failed', 'interrupted'} and not job.get('result'):
+                for number in range(1, job['attempts'] + 1):
+                    adapter.retire_orphan(f'{job_id}-a{number}')
+            else:
+                raise ValueError('정리할 Compose 배포가 아닙니다.')
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'delete_failed'
+                self.jobs[job_id]['retire_error'] = str(exc)[:300]
+                self.save(job_id)
+            self.event(job_id, 'retire_failed', str(exc)[:300])
+        else:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'deleted'
+                self.jobs[job_id]['retired_at'] = datetime.now(timezone.utc).isoformat()
+                self.jobs[job_id].pop('retire_error', None)
+                self.save(job_id)
+            self.event(job_id, 'retired', 'Compose 서비스와 이미지 태그의 삭제를 확인했습니다.')
 
     def retire_cloud(self, job_id):
         try:
@@ -1438,6 +1469,9 @@ def handler_for(app: App):
                     "github_poll_interval": app.github_poll_interval,
                     "targets": [{"id": "auto", "name": "AI 자동 선택", "available": app.ai_settings.available},
                                 {"id": "local-docker", "name": "Local Docker", "available": True},
+                                {"id": "onprem-compose", "name": "On-prem Compose (same PC)",
+                                 "available": LocalComposeAdapter.unavailable_reason() is None,
+                                 "reason": LocalComposeAdapter.unavailable_reason()},
                                 {"id": "cloud-run", "name": "Google Cloud Run",
                                  "available": app.cloud_settings.unavailable_reason() is None,
                                  "reason": app.cloud_settings.unavailable_reason()},
@@ -1796,13 +1830,13 @@ def handler_for(app: App):
                     with app.lock:
                         job = app.jobs.get(job_id)
                         orphan_local = (job and job.get('mode') == 'agent'
-                                        and job.get('target') == 'local-docker'
+                                        and job.get('target') in {'local-docker', 'onprem-compose'}
                                         and job.get('status') in {'failed', 'interrupted'}
                                         and not job.get('result')
                                         and type(job.get('attempts')) is int
                                         and 1 <= job['attempts'] <= 3)
                         successful = (job and job.get('status') == 'succeeded'
-                                      and job.get('target') in {'aws-ecs-express', 'local-docker', 'cloud-run'}
+                                      and job.get('target') in {'aws-ecs-express', 'local-docker', 'onprem-compose', 'cloud-run'}
                                       and job.get('result'))
                         if (not (orphan_local or successful)
                                 or job.get('deployment_state', 'active') not in {'active', 'delete_failed'}
@@ -1825,7 +1859,8 @@ def handler_for(app: App):
                         job.pop('retire_error', None)
                         app.save(job_id)
                     threading.Thread(target=app.retire_aws if target == 'aws-ecs-express' else
-                                     app.retire_cloud if target == 'cloud-run' else app.retire_local,
+                                     app.retire_cloud if target == 'cloud-run' else
+                                     app.retire_compose if target == 'onprem-compose' else app.retire_local,
                                      args=(job_id,), daemon=True).start()
                     self.json_response(202, {'id': job_id, 'deployment_state': 'deleting'})
                     return
@@ -1855,11 +1890,12 @@ def handler_for(app: App):
                                 local_sqlite_mount)
                         digest = source_digest(project)
                         availability = {'local-docker': None,
+                                        'onprem-compose': LocalComposeAdapter.unavailable_reason(),
                                         'aws-ecs-express': app.aws_settings.unavailable_reason(),
                                         'cloud-run': app.cloud_settings.unavailable_reason()}
                         reports, candidates = compare_targets(
                             profile, availability, public_access=public_flag == 'true',
-                            local_sqlite=local_sqlite_binding is not None)
+                            local_sqlite=local_sqlite_binding is not None, include_compose=True)
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile).as_dict(),
                                              'inspection': {
@@ -1929,7 +1965,7 @@ def handler_for(app: App):
                         self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY를 설정하세요."})
                         return
                     requested_target = self.headers.get("X-Deploy-Target", "local-docker")
-                    if requested_target not in {"auto", "local-docker", "cloud-run", "aws-ecs-express"}:
+                    if requested_target not in {"auto", "local-docker", "onprem-compose", "cloud-run", "aws-ecs-express"}:
                         raise ValueError("Unsupported deployment target")
                     target = requested_target
                     public_flag = self.headers.get("X-Public-Access", "false")
@@ -1937,6 +1973,8 @@ def handler_for(app: App):
                         raise ValueError("Invalid public access selection")
                     if target == "cloud-run" and app.cloud_settings.unavailable_reason():
                         raise ValueError(app.cloud_settings.unavailable_reason())
+                    if target == 'onprem-compose' and LocalComposeAdapter.unavailable_reason():
+                        raise ValueError(LocalComposeAdapter.unavailable_reason())
                     if target == "aws-ecs-express":
                         if app.aws_settings.unavailable_reason():
                             raise ValueError(app.aws_settings.unavailable_reason())
@@ -1959,8 +1997,8 @@ def handler_for(app: App):
                         raise ValueError('SQLite 변환 선택 값이 올바르지 않습니다.')
                     local_sqlite_mount = self.headers.get('X-Local-Sqlite-Mount')
                     if local_sqlite_mount is not None:
-                        if target not in {'auto', 'local-docker'} or sqlite_flag == 'true' or postgres_flag == 'true':
-                            raise ValueError('Local SQLite 볼륨은 Local Docker 단일 배포에서만 사용합니다.')
+                        if target not in {'auto', 'local-docker', 'onprem-compose'} or sqlite_flag == 'true' or postgres_flag == 'true':
+                            raise ValueError('Local SQLite 볼륨은 단일 로컬 배포에서만 사용합니다.')
                         if len(local_sqlite_mount) > 200 or not local_sqlite_mount.startswith('/'):
                             raise ValueError('Local SQLite 볼륨 경로는 컨테이너 내부의 절대 경로여야 합니다.')
                     create_plan_id = self.headers.get('X-Postgres-Create-Plan')
@@ -2084,7 +2122,7 @@ def handler_for(app: App):
                             if local_sqlite_binding is not None:
                                 infrastructure_plan['planner'] = 'user-confirmed-storage'
                                 infrastructure_plan['rationale'] = (
-                                    '사용자가 Local Docker와 SQLite DB 디렉터리의 영속 볼륨 경로를 확인했습니다. '
+                                    '사용자가 로컬 대상과 SQLite DB 디렉터리의 영속 볼륨 경로를 확인했습니다. '
                                     '볼륨은 앱 종료 후에도 보존합니다.')
                                 infrastructure_plan['sqlite_volume'] = local_sqlite_binding
                         infrastructure_plan['compatibility'] = infrastructure_compatibility(
@@ -2100,7 +2138,7 @@ def handler_for(app: App):
                             app.ensure_application_available(application_id, target)
                             if local_sqlite_binding is not None and any(
                                 old.get('application_id') == application_id
-                                and old.get('target') == 'local-docker'
+                                and old.get('target') in {'local-docker', 'onprem-compose'}
                                 and old.get('status') == 'succeeded'
                                 and old.get('deployment_state', 'active') == 'active'
                                 for old in app.jobs.values()
