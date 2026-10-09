@@ -1,8 +1,8 @@
 # A phase: ECS on one x86_64 EC2 host, using that host's Docker daemon.
-FROM docker:29-cli@sha256:1a4c7cb63513f349bdad01fcc6e0f3f2f67d37b9da86f14dc0d4a0942eecda00 AS docker-cli
+FROM public.ecr.aws/docker/library/docker:29-cli@sha256:1a4c7cb63513f349bdad01fcc6e0f3f2f67d37b9da86f14dc0d4a0942eecda00 AS docker-cli
 FROM public.ecr.aws/aws-cli/aws-cli:latest@sha256:3dacc5db57c923c4223e949795f538ecf1f2212b2b7d5a028b47b97f91564c0d AS aws-cli
 
-FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS runtime
+FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS runtime
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 AWS_PAGER=""
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git dnsutils \
