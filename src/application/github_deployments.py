@@ -31,6 +31,7 @@ from application.infrastructure import (
 )
 from engine.application_ir import application_ir
 from engine.architecture_decision import architecture_decision
+from engine.compilation import compile_decision
 from engine.deployment_policy import deployment_policy
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
@@ -229,6 +230,8 @@ class GitHubDeploymentsMixin:
             }
             job["architecture_decision"] = architecture_decision(
                 job["application_ir"], policy, plan).as_dict()
+            job["compilation"] = compile_decision(
+                job["architecture_decision"], job["application_ir"], policy, plan)
             if target == "cloud-run":
                 job["cloud"] = asdict(self.cloud_settings)
             elif target == "aws-ecs-express":

@@ -19,6 +19,7 @@ from pathlib import Path
 from assets import ASSET_ROOT
 from engine.application_ir import application_ir
 from engine.architecture_decision import architecture_decision, verify_architecture_decision
+from engine.compilation import compile_decision, verify_compilation
 from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets
 from engine.deployment_policy import deployment_policy, policy_from_record
@@ -246,6 +247,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 if 'architecture_decision' in job:
                     verify_architecture_decision(job['architecture_decision'], job.get('application_ir'),
                                                  policy, job.get('infrastructure_plan'))
+                if 'compilation' in job:
+                    verify_compilation(job['compilation'], job['architecture_decision'],
+                                       job.get('application_ir'), policy, job.get('infrastructure_plan'))
             if (not isinstance(local, dict) or job.get('target') != 'aws-ecs-express'
                     or job.get('status') != 'running' or job.get('attempts') != 0
                     or not job.get('group_id') or local.get('group_id') != job['group_id']
@@ -412,6 +416,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                        'group_id': group_id, 'group_order': order}
                 job['architecture_decision'] = architecture_decision(
                     job['application_ir'], policy, plan).as_dict()
+                job['compilation'] = compile_decision(
+                    job['architecture_decision'], job['application_ir'], policy, plan)
                 if target == 'cloud-run':
                     job['cloud'] = asdict(self.cloud_settings)
                 elif target == 'aws-ecs-express':
@@ -647,6 +653,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 if 'architecture_decision' in job:
                     verify_architecture_decision(job['architecture_decision'], job.get('application_ir'),
                                                  policy, job.get('infrastructure_plan'))
+                if 'compilation' in job:
+                    verify_compilation(job['compilation'], job['architecture_decision'],
+                                       job.get('application_ir'), policy, job.get('infrastructure_plan'))
             adapter_factory = LocalDockerAdapter
             if target == 'local-docker' and job.get('group_id'):
                 with self.lock:
@@ -2224,6 +2233,9 @@ def handler_for(app: App):
                                 "events": []}
                             app.jobs[job_id]['architecture_decision'] = architecture_decision(
                                 app.jobs[job_id]['application_ir'], policy, infrastructure_plan).as_dict()
+                            app.jobs[job_id]['compilation'] = compile_decision(
+                                app.jobs[job_id]['architecture_decision'],
+                                app.jobs[job_id]['application_ir'], policy, infrastructure_plan)
                             if sqlite_conversion is not None:
                                 app.jobs[job_id]['sqlite_conversion'] = sqlite_conversion
                             if local_sqlite_binding is not None:

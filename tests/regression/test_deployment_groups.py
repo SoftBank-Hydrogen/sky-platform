@@ -59,6 +59,14 @@ class DeploymentGroupTests(unittest.TestCase):
                          self.app.jobs[first['job_id']]['source_digest'])
         self.assertEqual(self.app.jobs[second['job_id']]['architecture_decision']['selected_candidate'],
                          'aws-ecs-express')
+        for item in (first, second):
+            job = self.app.jobs[item['job_id']]
+            compilation = job['compilation']
+            self.assertEqual(compilation['architecture_decision_id'],
+                             job['architecture_decision']['decision_id'])
+            self.assertEqual(compilation['target_plan']['target'], job['target'])
+            self.assertEqual(compilation['source_patch_plan']['compilation_id'],
+                             compilation['deployment_ir']['compilation_id'])
         trace = deployment_certificate(self.app.jobs[first['job_id']])['decision_trace']
         self.assertEqual(trace['status'], 'recorded')
         self.assertEqual(trace['decision_id'],
@@ -112,6 +120,21 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(restored.jobs[job_id]['status'], 'failed')
         self.assertEqual(restored.jobs[job_id]['attempts'], 0)
         self.assertIn('Stored architecture decision', restored.jobs[job_id]['events'][-1]['message'])
+
+    def test_mixed_compilation_is_blocked_before_agent_runs(self):
+        group = self.create()
+        job_id = group['targets'][0]['job_id']
+        self.app.jobs[job_id]['compilation']['target_plan']['compilation_id'] = 'comp-other'
+        self.app.save(job_id)
+        restored = App(self.app.root, AISettings('fixture-key', 'fixture-model'),
+                       aws_settings=self.app.aws_settings, monitor_interval=0)
+        with patch('interfaces.http.server.DeploymentAgent.run') as run, \
+                patch.object(restored, 'start_group_worker'):
+            restored.run_agent(job_id)
+        run.assert_not_called()
+        self.assertEqual(restored.jobs[job_id]['status'], 'failed')
+        self.assertEqual(restored.jobs[job_id]['attempts'], 0)
+        self.assertIn('Stored compilation', restored.jobs[job_id]['events'][-1]['message'])
 
     def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
         group = self.create()
