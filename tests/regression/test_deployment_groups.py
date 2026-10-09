@@ -162,6 +162,8 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(deploy.call_args.args[1].target, 'aws-ecs-express')
         self.assertEqual(self.app.jobs[aws_id]['status'], 'succeeded')
         self.assertEqual(self.app.jobs[aws_id]['attempts'], 1)
+        self.assertEqual(self.app.jobs[aws_id]['source_transform']['compilation_id'],
+                         self.app.jobs[aws_id]['compilation']['compilation_id'])
         self.assertEqual(self.app.deployment_group(group['id'])['status'], 'succeeded')
 
     def test_required_env_pauses_aws_then_resumes_same_image_after_restart(self):
@@ -187,6 +189,8 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(waiting['missing_environment'], ['APP_SECRET'])
         self.assertEqual(waiting['attempts'], 0)
         self.assertEqual(waiting['promotion_source_job_id'], local_id)
+        self.assertEqual(waiting['source_transform']['target_plan_id'],
+                         waiting['compilation']['target_plan']['id'])
         self.assertEqual(self.app.deployment_group(group['id'])['status'], 'waiting_input')
         secret = 'synthetic-private-value'
         self.assertNotIn(secret, (self.app.root / aws_id / 'job.json').read_text())

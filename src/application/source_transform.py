@@ -1,0 +1,63 @@
+"""Record the source actually handed to an adapter after agent edits."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+
+from application.deployment_core import DeploymentPlan, source_digest
+
+
+def _files(root: Path) -> dict[str, str]:
+    result = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Source transformation cannot contain symbolic links")
+        if path.is_file():
+            with path.open("rb") as source:
+                result[path.relative_to(root).as_posix()] = hashlib.file_digest(source, "sha256").hexdigest()
+    return result
+
+
+def source_transform_record(compilation: dict, original: Path, work: Path, plan: DeploymentPlan) -> dict:
+    """Bind applied file changes and the executable plan to the compiled target."""
+    source_revision = compilation["source_revision"]
+    if source_digest(original) != source_revision:
+        raise ValueError("Compiled source revision no longer matches the uploaded source")
+    work_revision = source_digest(work)
+    if work_revision != plan.source_digest:
+        raise ValueError("Executable plan does not match the transformed source")
+    if plan.target != compilation["target_plan"]["target"]:
+        raise ValueError("Executable plan target differs from compiled target")
+    if plan.dockerfile_source == "generated" and (
+        f"EXPOSE {plan.port}\n" not in plan.dockerfile
+        or not re.search(rf"^ENV\s+[^\n]*\bPORT={plan.port}(?:\s|$)", plan.dockerfile, re.MULTILINE)
+    ):
+        raise ValueError("Generated image port differs from executable plan")
+    before = _files(original)
+    after = _files(work)
+    changes = [
+        {"path": path, "before_sha256": before.get(path), "after_sha256": after.get(path)}
+        for path in sorted(before.keys() | after.keys())
+        if before.get(path) != after.get(path)
+    ]
+    plan_digest = hashlib.sha256(json.dumps(plan.__dict__, sort_keys=True).encode()).hexdigest()
+    return {
+        "compilation_id": compilation["compilation_id"],
+        "decision_revision": compilation["decision_revision"],
+        "source_revision": source_revision,
+        "transformed_source_revision": work_revision,
+        "target_plan_id": compilation["target_plan"]["id"],
+        "executable_plan_digest": plan_digest,
+        "changes": changes,
+    }
+
+
+def verify_source_transform(
+    record: dict, compilation: dict, original: Path, work: Path, plan: DeploymentPlan
+) -> None:
+    expected = source_transform_record(compilation, original, work, plan)
+    if not isinstance(record, dict) or record != expected:
+        raise ValueError("Stored source transformation does not match the executable plan")

@@ -32,6 +32,7 @@ from application.diagnosis import deployment_diagnosis
 from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
+from application.source_transform import source_transform_record, verify_source_transform
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
 from application.health import check_deployment
@@ -284,6 +285,13 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
             plan = DeploymentPlan(**{**local_plan, 'target': 'aws-ecs-express'})
             if job.get('plan') is not None and job['plan'] != asdict(plan):
                 raise ValueError('입력 대기 이후 AWS 배포 계획이 변경됐습니다.')
+            if 'compilation' in job:
+                if job.get('source_transform') is not None:
+                    verify_source_transform(job['source_transform'], job['compilation'],
+                                            project, work, plan)
+                else:
+                    job['source_transform'] = source_transform_record(
+                        job['compilation'], project, work, plan)
             promotion = {'source_job_id': local_job_id, 'attempt_id': local_attempt,
                          'image': result['image'], 'image_id': result['image_id'],
                          'platform': result['platform']}
@@ -688,6 +696,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     local_sqlite_binding=job.get('local_sqlite_binding'),
                                     deployment_policy=policy,
                                     new_managed_database=job.get('postgres_creation_id') is not None,
+                                    compilation=job.get('compilation'),
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))

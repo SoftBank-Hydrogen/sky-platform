@@ -19,6 +19,7 @@ from application.analysis import AISettings, redact
 from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_plan, source_digest, validate_environment
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
+from application.source_transform import source_transform_record, verify_source_transform
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
@@ -195,6 +196,7 @@ class DeploymentTools:
                  local_sqlite_binding: dict | None = None,
                  deployment_policy: DeploymentPolicy | None = None,
                  new_managed_database: bool = False,
+                 compilation: dict | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -216,6 +218,8 @@ class DeploymentTools:
         self.infrastructure_plan = infrastructure_plan
         self.deployment_policy = deployment_policy
         self.new_managed_database = new_managed_database
+        self.compilation = compilation
+        self.source_transform = None
         self.plan = None
         self.result = None
         self.logs = []
@@ -265,9 +269,10 @@ class DeploymentTools:
             migration_dir.rmdir()
             raise
         self.plan = None
+        self.source_transform = None
         self.event('editing', 'SQLite 스냅샷을 PostgreSQL 마이그레이션으로 변환했습니다.')
         self.checkpoint(change={'path': conversion['path'], 'diff': 'SQLite 데이터 파일 → PostgreSQL 마이그레이션'},
-                        plan=None)
+                        plan=None, source_transform=None)
         return {'prepared': True, 'row_counts': snapshot.row_counts,
                 'source_sha256': snapshot.source_sha256,
                 'next': '앱의 SQLite 코드와 의존성을 PostgreSQL로 바꾸고 다시 설정하세요.'}
@@ -363,10 +368,11 @@ class DeploymentTools:
                 os.unlink(temporary)
         self.read_versions.pop(path, None)
         self.plan = None
+        self.source_transform = None
         diff = self.clean(''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                                     fromfile=path, tofile=path)))
         self.event("editing", f"작업용 소스 수정: {path}")
-        self.checkpoint(change={"path": path, "diff": diff}, plan=None)
+        self.checkpoint(change={"path": path, "diff": diff}, plan=None, source_transform=None)
         return {"changed": path, "patch_sha256": hashlib.sha256(new_text.encode()).hexdigest(),
                 "next": "Reconfigure before deploying"}
 
@@ -380,7 +386,10 @@ class DeploymentTools:
                               target=self.target,
                               required_env=sorted(set(required_env)), analyzer="agent",
                               rationale="AI 배포 에이전트가 실행할 설정을 준비했습니다.")
-        self.checkpoint(plan=asdict(self.plan))
+        if self.compilation is not None:
+            self.source_transform = source_transform_record(
+                self.compilation, self.original, self.work, self.plan)
+        self.checkpoint(plan=asdict(self.plan), source_transform=self.source_transform)
         self.event("preparing", "Dockerfile과 컨테이너 실행 설정 준비 완료")
         return {"ready": True, "dockerfile": self.plan.dockerfile,
                 "missing_environment": [name for name in required_env if name not in
@@ -428,6 +437,9 @@ class DeploymentTools:
         migrations = collect_sql_migrations(self.work) if self.postgres_request is not None else None
         if source_digest(self.work) != self.plan.source_digest:
             raise ValueError('작업용 소스가 배포 설정 이후 변경됐습니다. 파일을 다시 읽고 배포를 설정하세요.')
+        if self.compilation is not None:
+            verify_source_transform(
+                self.source_transform, self.compilation, self.original, self.work, self.plan)
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]

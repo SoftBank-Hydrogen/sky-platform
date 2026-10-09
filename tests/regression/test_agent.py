@@ -12,6 +12,7 @@ from unittest.mock import patch
 from tests.support.agent_fixture import RepairFixture, call
 from application.agent import AgentError, DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent, MAX_AGENT_REQUEST_BYTES, COMPACT_AGENT_REQUEST_BYTES
 from application.analysis import AISettings
+from application.deployment_core import source_digest
 from adapters.local.docker import LocalDockerAdapter
 from interfaces.http.server import App
 
@@ -54,6 +55,25 @@ class AgentTests(unittest.TestCase):
         (self.tools.work / 'server.js').write_text('changed after configuration')
         with patch.object(LocalDockerAdapter, 'deploy') as deploy:
             with self.assertRaisesRegex(ValueError, '배포 설정 이후 변경'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
+    def test_compiled_source_transform_is_checked_before_adapter(self):
+        self.tools.compilation = {
+            'compilation_id': 'comp-example', 'decision_revision': 1,
+            'source_revision': source_digest(self.original),
+            'target_plan': {'id': 'target-example', 'target': 'local-docker'},
+        }
+        self.tools.read_project_files(['package.json'])
+        self.tools.apply_project_patch('package.json', '"scripts": {}',
+                                       '"scripts": {"start": "node server.js"}')
+        self.tools.configure_deployment('start', None, 4321, '/', [])
+        self.assertEqual(self.tools.source_transform['changes'][0]['path'], 'package.json')
+        self.assertEqual(self.updates[-1]['source_transform'], self.tools.source_transform)
+        self.tools.source_transform['compilation_id'] = 'comp-other'
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'Stored source transformation'):
                 self.tools.deploy_application()
         self.assertEqual(self.tools.attempts, 0)
         deploy.assert_not_called()
