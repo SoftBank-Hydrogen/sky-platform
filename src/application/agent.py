@@ -20,7 +20,7 @@ from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, make_
 from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
-from application.consistency import check_database_consistency
+from application.consistency import check_database_consistency, check_port_consistency
 from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
@@ -452,9 +452,10 @@ class DeploymentTools:
                 local_sqlite_binding=self.local_sqlite_binding)
             if self.architecture_decision is None:
                 raise ValueError('Compiled deployment requires an architecture decision')
+            checks = [database_check, check_port_consistency(self.plan)]
             gate = static_consistency_gate(
-                self.compilation, self.architecture_decision, [database_check])
-            self.checkpoint(consistency_checks=[database_check], static_consistency_gate=gate)
+                self.compilation, self.architecture_decision, checks)
+            self.checkpoint(consistency_checks=checks, static_consistency_gate=gate)
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]

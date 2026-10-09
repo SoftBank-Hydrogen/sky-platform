@@ -224,6 +224,24 @@ class AgentTests(unittest.TestCase):
         self.assertIn('bookworm-slim', custom.plan.dockerfile)
         self.assertIn('node:22-alpine', original_file.read_text())
 
+    def test_compiled_dockerfile_port_conflict_stops_before_adapter(self):
+        dockerfile = 'FROM node:22-alpine\nEXPOSE 3000\nCMD ["node", "server.js"]\n'
+        (self.original / 'Dockerfile').write_text(dockerfile)
+        (self.tools.work / 'Dockerfile').write_text(dockerfile)
+        self.tools.compilation = {
+            'compilation_id': 'comp-example', 'decision_revision': 1,
+            'source_revision': source_digest(self.original),
+            'target_plan': {'id': 'target-example', 'target': 'local-docker'},
+        }
+        self.tools.infrastructure_plan = {'compatibility': {}}
+        self.tools.architecture_decision = {'decision_id': 'decision-example'}
+        self.tools.configure_deployment('dockerfile', None, 8080, '/', [])
+        with patch.object(LocalDockerAdapter, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'CV-06'):
+                self.tools.deploy_application()
+        self.assertEqual(self.tools.attempts, 0)
+        deploy.assert_not_called()
+
     def test_python_dockerfile_project_can_be_repaired(self):
         original = self.root / 'python-original'
         original.mkdir()

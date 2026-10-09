@@ -2,8 +2,56 @@
 
 from __future__ import annotations
 
+import re
+
 from adapters.aws.postgres import PostgresRequest
+from application.deployment_core import DeploymentPlan
 from engine.compatibility import InfrastructureProfile
+
+
+def check_port_consistency(plan: DeploymentPlan) -> dict:
+    """Compare the executable HTTP port with unambiguous final-image declarations.
+
+    EXPOSE is metadata, not proof that the process listens on this port. The
+    target's HTTP probe remains responsible for checking the running service.
+    """
+    result = {"id": "CV-06", "status": "unknown", "source": "executable_dockerfile"}
+    if plan.dockerfile_source == "generated":
+        # The generated image declares the planned port, but the application
+        # may still bind another port or the loopback interface.
+        return result
+    if plan.dockerfile_source != "existing":
+        return result
+
+    # Only the final stage describes the deployed image. Avoid interpreting
+    # variables, line continuations, or Dockerfile extensions as fixed ports.
+    final_stage = None
+    for line in plan.dockerfile.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        instruction = re.match(r"([A-Za-z]+)\s+(.+)", stripped)
+        if instruction is None:
+            continue
+        command, arguments = instruction.groups()
+        if command.upper() == "FROM":
+            final_stage = []
+        elif command.upper() == "EXPOSE" and final_stage is not None:
+            final_stage.append(arguments)
+    if not final_stage or any("\\" in item for item in final_stage):
+        return result
+
+    ports = set()
+    for item in final_stage:
+        for token in item.split():
+            declaration = re.fullmatch(r"(\d{1,5})(?:/(tcp|udp))?", token, re.IGNORECASE)
+            if declaration is None:
+                return result
+            if declaration.group(2) is None or declaration.group(2).lower() == "tcp":
+                ports.add(int(declaration.group(1)))
+    if plan.port not in ports:
+        raise ValueError(f"CV-06: Final Dockerfile EXPOSE disagrees with HTTP port {plan.port}")
+    return result
 
 
 def check_database_consistency(

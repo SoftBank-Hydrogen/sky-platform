@@ -5,7 +5,8 @@ import copy
 import pytest
 
 from adapters.aws.postgres import PostgresRequest
-from application.consistency import check_database_consistency
+from application.consistency import check_database_consistency, check_port_consistency
+from application.deployment_core import make_plan
 from engine.compatibility import InfrastructureProfile
 
 POSTGRES = InfrastructureProfile(
@@ -82,3 +83,28 @@ def test_no_database_signal_remains_unknown():
         "status": "unknown",
         "source": "final_working_copy",
     }
+
+
+def test_final_dockerfile_stage_must_not_conflict_with_selected_http_port(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM node:22 AS builder\nEXPOSE 3000\nFROM node:22\nEXPOSE 8080/tcp\n"
+    )
+    assert check_port_consistency(make_plan(tmp_path, "dockerfile", None, 8080)) == {
+        "id": "CV-06",
+        "status": "unknown",
+        "source": "executable_dockerfile",
+    }
+    with pytest.raises(ValueError, match="CV-06.*8081"):
+        check_port_consistency(make_plan(tmp_path, "dockerfile", None, 8081))
+
+
+@pytest.mark.parametrize("expose", ["", "EXPOSE $PORT\n", "EXPOSE 8080-8082\n", "EXPOSE 8080 \\\n 8081\n"])
+def test_unresolved_dockerfile_port_is_left_for_http_verification(tmp_path, expose):
+    (tmp_path / "Dockerfile").write_text("FROM node:22\n" + expose)
+    assert check_port_consistency(make_plan(tmp_path, "dockerfile", None, 8080))["status"] == "unknown"
+
+
+def test_udp_only_declaration_conflicts_with_http_port(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM node:22\nEXPOSE 8080/udp\n")
+    with pytest.raises(ValueError, match="CV-06"):
+        check_port_consistency(make_plan(tmp_path, "dockerfile", None, 8080))
