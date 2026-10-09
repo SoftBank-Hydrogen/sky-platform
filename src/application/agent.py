@@ -21,6 +21,7 @@ from application.execution import ExecutionRequest, ExecutionState, execute
 from engine.deployment_policy import DeploymentPolicy
 from application.source_transform import source_transform_record, verify_source_transform
 from application.consistency import check_database_consistency
+from application.verification_gates import static_consistency_gate
 from application.infrastructure import inspect_infrastructure, validate_infrastructure
 from application.local_sqlite import preflight_local_sqlite
 from adapters.database.migrations import collect_sql_migrations
@@ -198,6 +199,7 @@ class DeploymentTools:
                  deployment_policy: DeploymentPolicy | None = None,
                  new_managed_database: bool = False,
                  compilation: dict | None = None,
+                 architecture_decision: dict | None = None,
                  cancel_check=None, require_existing_work=False, expected_work_digest=None):
         self.original, self.work, self.job_id = original, work, job_id
         self.environment = validate_environment(environment, [])
@@ -220,6 +222,7 @@ class DeploymentTools:
         self.deployment_policy = deployment_policy
         self.new_managed_database = new_managed_database
         self.compilation = compilation
+        self.architecture_decision = architecture_decision
         self.source_transform = None
         self.plan = None
         self.result = None
@@ -447,7 +450,11 @@ class DeploymentTools:
                 postgres_request=self.postgres_request,
                 sqlite_conversion=self.sqlite_conversion,
                 local_sqlite_binding=self.local_sqlite_binding)
-            self.checkpoint(consistency_checks=[database_check])
+            if self.architecture_decision is None:
+                raise ValueError('Compiled deployment requires an architecture decision')
+            gate = static_consistency_gate(
+                self.compilation, self.architecture_decision, [database_check])
+            self.checkpoint(consistency_checks=[database_check], static_consistency_gate=gate)
         missing = [name for name in self.plan.required_env if name not in
                    (MANAGED_POSTGRES_ENV if self.postgres_request else ())
                    and not self.environment.get(name)]

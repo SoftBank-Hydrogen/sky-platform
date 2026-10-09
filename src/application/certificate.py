@@ -9,7 +9,9 @@ import re
 from datetime import datetime, timezone
 
 from engine.architecture_decision import verify_architecture_decision
+from engine.compilation import verify_compilation
 from engine.deployment_policy import policy_from_record
+from application.verification_gates import static_consistency_gate, target_verification_obligations
 
 
 _SHA256 = re.compile(r'[a-f0-9]{64}')
@@ -116,6 +118,31 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
         'selection_basis': infrastructure.get('planner'),
         'note': '업로드한 소스와 작업 시점의 판단 기록입니다. 실행 중 상태의 독립적인 증명이 아닙니다.',
     }
+
+
+def _gate_snapshot(job: dict, infrastructure: dict, completed: bool) -> dict:
+    """Show only a gate record that still matches its stored decision and compilation."""
+    gate = job.get('static_consistency_gate')
+    if gate is None:
+        return {'status': 'unrecorded', 'required_obligations': []}
+    try:
+        decision = job['architecture_decision']
+        compilation = job['compilation']
+        checks = job['consistency_checks']
+        policy = policy_from_record(job['deployment_policy'])
+        verify_compilation(compilation, decision, job['application_ir'], policy, infrastructure)
+        expected = static_consistency_gate(compilation, decision, checks)
+    except (ValueError, TypeError, KeyError):
+        return {'status': 'incomplete', 'required_obligations': []}
+    if gate != expected:
+        return {'status': 'incomplete', 'required_obligations': []}
+    observed = job.get('websocket_verification') if completed else None
+    obligations = target_verification_obligations(gate, observed)
+    return {'status': 'recorded', 'static_consistency': gate,
+            'required_obligations': obligations,
+            'target_verification_status': ('failed' if any(item['status'] == 'failed' for item in obligations)
+                                           else 'pending' if any(item['status'] == 'pending' for item in obligations)
+                                           else 'evidence_recorded' if obligations else 'not_required')}
 
 
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
@@ -245,6 +272,7 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                      'promoted_from_job_id': promotion.get('source_job_id') if promoted else None,
                      'registry_manifest_digest': registry_digest},
         'decision_trace': decision_trace,
+        'verification_gates': _gate_snapshot(job, infrastructure, completed),
         'verification': checks,
         'unverified': [item['name'] for item in checks if item['status'] == 'unverified'],
         'rollback': {'previous_job_id': job.get('replaces_job_id'),

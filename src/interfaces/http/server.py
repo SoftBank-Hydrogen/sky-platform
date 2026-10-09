@@ -34,6 +34,7 @@ from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
 from application.consistency import check_database_consistency
+from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
 from application.health import check_deployment
@@ -293,8 +294,13 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                 else:
                     job['source_transform'] = source_transform_record(
                         job['compilation'], project, work, plan)
-                job['consistency_checks'] = [check_database_consistency(
+                checks = [check_database_consistency(
                     job['infrastructure_plan'], inspect_infrastructure(work))]
+                gate = static_consistency_gate(job['compilation'], job['architecture_decision'], checks)
+                if job.get('static_consistency_gate') is not None and job['static_consistency_gate'] != gate:
+                    raise ValueError('저장된 정적 검증 게이트가 컴파일 결과와 다릅니다.')
+                job['consistency_checks'] = checks
+                job['static_consistency_gate'] = gate
             promotion = {'source_job_id': local_job_id, 'attempt_id': local_attempt,
                          'image': result['image'], 'image_id': result['image_id'],
                          'platform': result['platform']}
@@ -700,6 +706,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin):
                                     deployment_policy=policy,
                                     new_managed_database=job.get('postgres_creation_id') is not None,
                                     compilation=job.get('compilation'),
+                                    architecture_decision=job.get('architecture_decision'),
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))

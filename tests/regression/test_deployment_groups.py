@@ -11,6 +11,7 @@ from adapters.aws.ecs import AwsSettings
 from application.analysis import AISettings
 from application.certificate import deployment_certificate
 from application.deployment_core import analyze
+from application.verification_gates import static_consistency_gate
 from interfaces.http.server import App, handler_for
 
 
@@ -135,6 +136,30 @@ class DeploymentGroupTests(unittest.TestCase):
         self.assertEqual(restored.jobs[job_id]['status'], 'failed')
         self.assertEqual(restored.jobs[job_id]['attempts'], 0)
         self.assertIn('Stored compilation', restored.jobs[job_id]['events'][-1]['message'])
+
+    def test_websocket_verification_obligation_stays_pending_until_probe_record(self):
+        with (self.source / 'server.js').open('a') as source:
+            source.write('\n// WebSocketServer signal for architecture evaluation\n')
+        group = self.create()
+        job = self.app.jobs[group['targets'][0]['job_id']]
+        self.assertIn('PROTOCOL-WS-01', job['architecture_decision']['pending_verification_rule_ids'])
+        checks = [{'id': 'CV-03', 'status': 'unknown', 'source': 'final_working_copy'}]
+        job['consistency_checks'] = checks
+        job['static_consistency_gate'] = static_consistency_gate(
+            job['compilation'], job['architecture_decision'], checks)
+        pending = deployment_certificate(job)['verification_gates']
+        self.assertEqual(pending['status'], 'recorded')
+        self.assertEqual(pending['required_obligations'][0]['status'], 'pending')
+        job['status'] = 'succeeded'
+        job['result'] = {'url': 'http://127.0.0.1:12345'}
+        job['websocket_verification'] = {
+            'status': 'passed', 'protocol': 'sky.probe.v1',
+            'checked_at': '2026-10-09T00:00:00Z'}
+        verified = deployment_certificate(job)['verification_gates']
+        self.assertEqual(verified['required_obligations'][0]['status'], 'verified')
+        self.assertEqual(job['static_consistency_gate']['required_obligations'][0]['status'], 'pending')
+        job['static_consistency_gate']['compilation_id'] = 'comp-other'
+        self.assertEqual(deployment_certificate(job)['verification_gates']['status'], 'incomplete')
 
     def test_successful_local_image_is_promoted_without_a_second_agent_run(self):
         group = self.create()
