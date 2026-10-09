@@ -60,6 +60,15 @@ def restore_temp_ownership(image, shared):
     )
 
 
+def expect_state_rejection(*args):
+    try:
+        docker(*args)
+    except subprocess.CalledProcessError as error:
+        assert error.returncode == 2 and "Sky service state:" in error.stderr, error.stderr
+    else:
+        raise AssertionError("Service started without initialized persistent state")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="sky-platform:smoke")
@@ -135,6 +144,35 @@ def main():
             raise AssertionError("Sky service did not become ready")
 
         try:
+            probe = [
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+            ]
+            expect_state_rejection(*probe, options.image, "--state-dir", "/.sky")
+            state_mount = f"type=bind,source={state},target=/.sky"
+            expect_state_rejection(*probe, "--mount", state_mount, options.image, "--state-dir", "/.sky")
+            assert list(state.iterdir()) == [], "Rejected startup changed the uninitialized state"
+            # Initialization only mounts the fresh state directory; no Docker socket.
+            docker(
+                *probe,
+                "--cap-add",
+                "DAC_OVERRIDE",
+                "--mount",
+                state_mount,
+                options.image,
+                "--initialize-state",
+                "--state-dir",
+                "/.sky",
+            )
+            expect_state_rejection(
+                *probe, "--mount", state_mount, options.image, "--initialize-state", "--state-dir", "/.sky"
+            )
             docker(*args)
             ready()
             assert not request("/api/config")["ai_available"]
@@ -179,7 +217,7 @@ def main():
             restore_temp_ownership(options.image, shared)
 
     print(
-        "PASS: Sky HTTP/UI, API auth, AWS/Docker/Compose tools"
+        "PASS: state volume guard, Sky HTTP/UI, API auth, AWS/Docker/Compose tools"
         + (", ZIP build/deploy and restart recovery (offline)" if options.full else " (UI smoke only)")
         + "; temporary resources cleaned"
     )
