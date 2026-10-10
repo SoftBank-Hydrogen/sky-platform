@@ -1855,8 +1855,8 @@ def handler_for(app: App):
                                     {'active', 'delete_failed', 'needs_attention'}
                                     if job.get('target') == 'aws-s3-cloudfront' else {'active', 'delete_failed'})
                                 or job.get('release_rollback_state') in {'running', 'needs_attention'}
-                                or (job.get('target') == 'aws-ecs-express' and any(other is not job and other.get('application_id') == job.get('application_id')
-                                       and other.get('target') == 'aws-ecs-express'
+                                or (job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront'} and any(other is not job and other.get('application_id') == job.get('application_id')
+                                       and other.get('target') == job.get('target')
                                        and (other.get('status') in {'provisioning', 'running', 'waiting_input'}
                                             or other.get('aws_image_cleanup_state') == 'running')
                                        for other in app.jobs.values()))):

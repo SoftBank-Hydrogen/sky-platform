@@ -2,8 +2,10 @@
 
 import io
 import tempfile
+import threading
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -168,6 +170,44 @@ class StaticDeploymentFlowTests(unittest.TestCase):
             self.assertEqual(status, 202)
             self.app.retire_static_site(job_id)
         self.assertEqual(self.app.jobs[job_id]["deployment_state"], "deleted")
+
+    def test_manual_retirement_waits_for_same_app_static_deployment(self):
+        old_id = self.create_job()
+        old = self.app.jobs[old_id]
+        old.update(status="succeeded", static_stack_id="old-stack", result={"url": "https://old.invalid"})
+        self.app.save(old_id)
+        new_id = "b" * 16
+        self.app.jobs[new_id] = {
+            "id": new_id, "application_id": "hello-site", "target": "aws-s3-cloudfront",
+            "status": "running", "deployment_state": "active",
+        }
+        with patch("interfaces.http.server.threading.Thread.start") as worker:
+            status, response = self.request(f"/api/jobs/{old_id}/retire")
+        self.assertEqual(status, 409)
+        self.assertIn("종료할 수 있는 배포", response["error"])
+        self.assertEqual(old["deployment_state"], "active")
+        worker.assert_not_called()
+
+    def test_simultaneous_static_requests_reserve_only_one_job(self):
+        project = self.root / "site"
+        project.mkdir()
+        (project / "index.html").write_text("<h1>Hello</h1>")
+        barrier = threading.Barrier(2)
+
+        def reserve(job_id):
+            (self.app.root / job_id).mkdir()
+            barrier.wait(timeout=5)
+            try:
+                self.app.create_static_job(job_id, project, "hello-site", requested_target="auto")
+                return "reserved"
+            except ValueError:
+                return "rejected"
+
+        with patch("adapters.aws.static_site.AwsStaticSiteAdapter._identity", return_value=None):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(reserve, ("a" * 16, "b" * 16)))
+        self.assertCountEqual(results, ("reserved", "rejected"))
+        self.assertEqual(sum(job.get("mode") == "static_site" for job in self.app.jobs.values()), 1)
 
     def test_mixed_app_rejected_before_job_or_cloud_creation(self):
         archive = self.archive({"index.html": "Hello", "server.js": "require('http')"})

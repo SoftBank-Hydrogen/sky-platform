@@ -119,6 +119,8 @@ class StaticDeploymentsMixin:
                     or not previous.get("static_stack_id")):
                 return
             previous_id = previous["id"]
+            previous["deployment_state"] = "deleting"
+            self.save(previous_id)
         self.retire_static_site(previous_id)
         with self.lock:
             retired = self.jobs[previous_id].get("deployment_state") == "deleted"

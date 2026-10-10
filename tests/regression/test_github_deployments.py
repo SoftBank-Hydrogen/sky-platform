@@ -82,10 +82,12 @@ class GitHubSourceTests(unittest.TestCase):
                                     "source_index_sha256": "b" * 64}
 
                         def retire(self, *_args):
+                            self_outer.assertEqual(app.jobs[old_id]["deployment_state"], "deleting")
                             return None
 
                     return FakeAdapter()
 
+                self_outer = self
                 with patch.object(app, "static_adapter", side_effect=adapter):
                     app.run_static_site(new_id)
                 self.assertEqual(app.jobs[new_id]["status"], "succeeded")
