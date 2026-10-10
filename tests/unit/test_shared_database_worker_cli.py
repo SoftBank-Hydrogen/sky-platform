@@ -127,3 +127,140 @@ def test_current_membership_is_required_and_ambiguous_grants_fail_closed():
     authenticator.memberships.records[("issuer", "other-subject")] = ("user", "team-a", Role.VIEWER)
     with pytest.raises(PermissionError):
         current_membership(authenticator, "user", "team-a")
+
+
+def api_arguments(path):
+    return [
+        "api",
+        "--shared-database-pool-config",
+        str(path),
+        "--origin",
+        "https://sky.example",
+        "--alb-trusts-file",
+        "trusts.json",
+        "--memberships-file",
+        "members.json",
+    ]
+
+
+def test_shared_intake_config_does_not_construct_state_or_workload_clients(configuration, capsys):
+    path, _ = configuration
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch(
+            "interfaces.shared_database_api.RotatingDatabaseConnection",
+            side_effect=AssertionError("State call"),
+        ),
+        patch(
+            "interfaces.shared_database_worker.AwsSharedDatabaseAllocator",
+            side_effect=AssertionError("Pool call"),
+        ),
+    ):
+        main([*api_arguments(path), "--check-config"])
+    assert "no AWS/DB calls" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("change", ["local", "foreign_account", "state_pool", "origin", "identity"])
+def test_shared_intake_rejects_invalid_scope_before_state_connection(configuration, monkeypatch, change):
+    path, _ = configuration
+    args = api_arguments(path)
+    if change == "local":
+        args.extend(["--auth-mode", "local"])
+    elif change == "foreign_account":
+        monkeypatch.setenv("SKY_AWS_ACCOUNT_ID", "222222222222")
+    elif change == "state_pool":
+        monkeypatch.setenv("SKY_DATABASE_NAME", "sky_pool_team")
+    elif change == "origin":
+        args[args.index("https://sky.example")] = "https://sky.example/path"
+    else:
+        monkeypatch.setenv("SKY_MEMBERSHIPS_JSON", "not-json")
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch(
+            "interfaces.shared_database_api.RotatingDatabaseConnection",
+            side_effect=AssertionError("State call"),
+        ),
+        pytest.raises(SystemExit) as error,
+    ):
+        main([*args, "--check-config"])
+    assert error.value.code == 2
+
+
+def test_shared_intake_composition_uses_state_only_and_never_initializes_schema(configuration):
+    path, _ = configuration
+    server = Mock()
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch("interfaces.shared_database_api.RotatingDatabaseConnection"),
+        patch("interfaces.shared_database_api.PostgresSharedDatabaseReviews.check_ready") as ready,
+        patch(
+            "interfaces.shared_database_api.PostgresSharedDatabaseReviews.initialize_schema",
+            side_effect=AssertionError("Runtime migration"),
+        ),
+        patch("interfaces.shared_database_api.ThreadingHTTPServer", return_value=server) as constructor,
+        patch(
+            "interfaces.shared_database_worker.AwsSharedDatabaseAllocator",
+            side_effect=AssertionError("Pool client"),
+        ),
+    ):
+        main(api_arguments(path))
+    ready.assert_called_once()
+    assert constructor.call_args.args[0] == ("0.0.0.0", 8080)
+    server.serve_forever.assert_called_once()
+    server.server_close.assert_called_once()
+
+
+def test_shared_intake_accepts_ecs_environment_identity_documents(configuration, monkeypatch):
+    from tests.unit.test_b_runtime import _identity_documents
+
+    path, _ = configuration
+    trusts, members = _identity_documents()
+    monkeypatch.setenv("SKY_ALB_TRUSTS_JSON", trusts)
+    monkeypatch.setenv("SKY_MEMBERSHIPS_JSON", members)
+    with (
+        patch(
+            "interfaces.shared_database_worker.AlbRequestAuthenticator.from_files",
+            side_effect=AssertionError("File"),
+        ),
+        patch(
+            "interfaces.shared_database_api.RotatingDatabaseConnection",
+            side_effect=AssertionError("State call"),
+        ),
+    ):
+        main(
+            [
+                "api",
+                "--shared-database-pool-config",
+                str(path),
+                "--origin",
+                "https://sky.example",
+                "--check-config",
+            ]
+        )
+
+
+@pytest.mark.parametrize("args", [["--origin", "https://sky.example"], ["--check-config"]])
+def test_read_only_api_requires_explicit_shared_intake_opt_in(args):
+    with pytest.raises(SystemExit) as error:
+        main(["api", *args])
+    assert error.value.code == 2
+
+
+def test_shared_worker_accepts_same_ecs_identity_documents_as_api(configuration, monkeypatch):
+    from tests.unit.test_b_runtime import _identity_documents
+
+    path, _ = configuration
+    trusts, members = _identity_documents()
+    monkeypatch.setenv("SKY_ALB_TRUSTS_JSON", trusts)
+    monkeypatch.setenv("SKY_MEMBERSHIPS_JSON", members)
+    with (
+        patch(
+            "interfaces.shared_database_worker.AlbRequestAuthenticator.from_files",
+            side_effect=AssertionError("File"),
+        ),
+        patch(
+            "interfaces.shared_database_worker.AwsSharedDatabaseAllocator",
+            side_effect=AssertionError("Pool call"),
+        ),
+    ):
+        main(["worker", "--mode", "shared-database", "--pool-config", str(path), "--check-config"])

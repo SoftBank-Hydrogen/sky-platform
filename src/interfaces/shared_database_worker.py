@@ -68,10 +68,22 @@ def current_membership(authenticator, user_id, organization_id):
     return principals.pop()
 
 
+def load_hosted_identity(args):
+    """Files or ECS-injected documents use the same explicit trust/membership rules."""
+    values = [os.environ.get(name) for name in ("SKY_ALB_TRUSTS_JSON", "SKY_MEMBERSHIPS_JSON")]
+    if any(value is not None for value in values):
+        if None in values or args.alb_trusts_file or args.memberships_file:
+            raise ValueError("Use complete identity files or environment documents, not both")
+        return AlbRequestAuthenticator.from_json(*values)
+    if not args.alb_trusts_file or not args.memberships_file:
+        raise ValueError("Complete hosted identity files required")
+    return AlbRequestAuthenticator.from_files(Path(args.alb_trusts_file), Path(args.memberships_file))
+
+
 def run_shared_database(args, parser):
     try:
-        if not args.pool_config or not args.alb_trusts_file or not args.memberships_file:
-            raise ValueError("Explicit registered pool and current membership files are required")
+        if not args.pool_config:
+            raise ValueError("Explicit registered pool and current membership configuration are required")
         state = PostgresStateSettings.from_environment()
         settings, digest = load_pool_configuration(args.pool_config)
         if (
@@ -80,9 +92,7 @@ def run_shared_database(args, parser):
             or settings.pool.control_database == state.database
         ):
             raise ValueError("Workload and state settings must be separate in the registered account/region")
-        authenticator = AlbRequestAuthenticator.from_files(
-            Path(args.alb_trusts_file), Path(args.memberships_file)
-        )
+        authenticator = load_hosted_identity(args)
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
         if not args.check_config:

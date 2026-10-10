@@ -72,6 +72,9 @@ jobs:
               'application/shared_database.py', 'adapters/database/shared_pool.py',
               'adapters/aws/shared_database.py', 'engine/database_placement.py',
               'application/shared_database_workflow.py', 'interfaces/shared_database_worker.py',
+              'ports/shared_database_reviews.py', 'adapters/state/shared_database_reviews.py',
+              'interfaces/shared_database_api.py', 'interfaces/http/shared_database.py',
+              'interfaces/http/mutation_requests.py', 'assets/static/shared-database.html',
           }
           assert required <= files, sorted(required - files)
           PY

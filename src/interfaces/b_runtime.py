@@ -69,6 +69,11 @@ def main(argv):
     api.add_argument("--auth-mode", choices=("alb", "local"), default="alb")
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
+    api.add_argument("--shared-database-pool-config", help="Opt in to reviewed workload DB allocation intake")
+    api.add_argument("--origin", help="Exact browser origin for shared database review and consent")
+    api.add_argument(
+        "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
+    )
     worker = modes.add_parser(
         "worker", help="Explicit outbox or single shared database allocation", allow_abbrev=False
     )
@@ -87,10 +92,15 @@ def main(argv):
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
     worker.add_argument("--interval", type=int, default=5)
-    modes.add_parser(
+    migrate = modes.add_parser(
         "migrate",
         help="Apply pending PostgreSQL state migrations once and exit; safe to repeat",
         allow_abbrev=False,
+    )
+    migrate.add_argument(
+        "--shared-database-reviews",
+        action="store_true",
+        help="Explicitly migrate the opt-in shared DB review schema too",
     )
     args = parser.parse_args(argv)
     if args.mode == "migrate":
@@ -110,6 +120,14 @@ def main(argv):
             parser.error("Invalid B migration database or workspace configuration")
         try:
             run_migrations(RotatingDatabaseConnection(settings), workspace)
+            if args.shared_database_reviews:
+                from adapters.state.operations import PostgresOperationStore
+                from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
+
+                PostgresSharedDatabaseReviews.initialize_schema(
+                    PostgresOperationStore(RotatingDatabaseConnection(settings), workspace=workspace)
+                )
+                print("shared database review schema: up to date", flush=True)
         except (OSError, ValueError, BotoCoreError, ClientError):
             # Do not log query diagnostics, credentials or DDL.
             parser.exit(
@@ -117,6 +135,13 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if args.shared_database_pool_config:
+            from interfaces.shared_database_api import run_shared_database_api
+
+            run_shared_database_api(args, parser)
+            return
+        if args.origin or args.check_config:
+            parser.error("--origin and --check-config require --shared-database-pool-config")
         from interfaces.http.server import serve
 
         forwarded = [
