@@ -13,6 +13,8 @@ from adapters.aws.postgres import PostgresRequest
 from adapters.database.migrations import MigrationBundle
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE_SUFFIXES
+from application.python_transactions import check_python_connection_transactions
+from application.python_rows import check_python_dict_row_access
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import DATABASE_ENGINE_SOURCE, SQLITE_SOURCE, InfrastructureProfile
 from engine.deployment_policy import DeploymentPolicy
