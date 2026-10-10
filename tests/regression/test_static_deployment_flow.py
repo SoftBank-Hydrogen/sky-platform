@@ -1,11 +1,15 @@
 """Static releases stay distinct from container jobs across restart and cleanup."""
 
 import io
+import json
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -39,6 +43,32 @@ class StaticDeploymentFlowTests(unittest.TestCase):
         handler.json_response = Mock()
         handler.do_POST()
         return handler.json_response.call_args.args
+
+    def http_server(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(self.app))
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def http_post(self, base, path, body=b""):
+        request = urllib.request.Request(
+            base + path, data=body,
+            headers={
+                "X-Sky-Token": self.app.token,
+                "X-Application-Id": "hello-site",
+                "X-Public-Access": "true",
+            },
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=10) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code, json.load(error)
 
     @staticmethod
     def archive(files):
@@ -208,6 +238,59 @@ class StaticDeploymentFlowTests(unittest.TestCase):
                 results = list(pool.map(reserve, ("a" * 16, "b" * 16)))
         self.assertCountEqual(results, ("reserved", "rejected"))
         self.assertEqual(sum(job.get("mode") == "static_site" for job in self.app.jobs.values()), 1)
+
+    def test_simultaneous_http_uploads_reserve_only_one_release(self):
+        base = self.http_server()
+        archive = self.archive({"index.html": "<h1>Hello</h1>"})
+        barrier = threading.Barrier(2)
+
+        def preflight(_adapter, project, _application_id, _attempt_id):
+            barrier.wait(timeout=5)
+            return {"source_digest": source_digest(project)}
+
+        with (
+            patch("interfaces.http.server.AwsStaticSiteAdapter.unavailable_reason", return_value=None),
+            patch("application.static_deployments.AwsStaticSiteAdapter.preflight", preflight),
+            patch.object(self.app, "start_job_worker", return_value=True) as start_worker,
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [pool.submit(self.http_post, base, "/api/static-deployments", archive)
+                       for _ in range(2)]
+            responses = [future.result(timeout=10) for future in futures]
+
+        self.assertCountEqual([status for status, _ in responses], [202, 400])
+        self.assertEqual(sum(job.get("mode") == "static_site" for job in self.app.jobs.values()), 1)
+        start_worker.assert_called_once()
+        self.assertEqual(len(list(self.root.glob("*/job.json"))), 1)
+
+    def test_simultaneous_http_retirement_starts_only_one_worker(self):
+        job_id = self.create_job()
+        old = self.app.jobs[job_id]
+        old.update(status="succeeded", static_stack_id="old-stack",
+                   result={"url": "https://old.invalid"})
+        self.app.save(job_id)
+        base = self.http_server()
+        worker_started = threading.Event()
+        allow_worker_to_finish = threading.Event()
+
+        def retire(_job_id):
+            worker_started.set()
+            allow_worker_to_finish.wait(timeout=10)
+
+        try:
+            with (
+                patch.object(self.app, "retire_static_site", side_effect=retire) as retire_worker,
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                futures = [pool.submit(self.http_post, base, f"/api/jobs/{job_id}/retire")
+                           for _ in range(2)]
+                responses = [future.result(timeout=10) for future in futures]
+                self.assertTrue(worker_started.wait(timeout=5))
+                self.assertCountEqual([status for status, _ in responses], [202, 409])
+                self.assertEqual(old["deployment_state"], "deleting")
+                retire_worker.assert_called_once_with(job_id)
+        finally:
+            allow_worker_to_finish.set()
 
     def test_mixed_app_rejected_before_job_or_cloud_creation(self):
         archive = self.archive({"index.html": "Hello", "server.js": "require('http')"})
