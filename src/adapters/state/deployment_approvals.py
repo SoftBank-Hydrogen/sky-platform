@@ -103,31 +103,37 @@ class PostgresDeploymentApprovals:
         )
         self.operations._document({**command, "approval_id": identity, "approved_plan_json": canonical_plan})
         with self.operations.records._connection() as connection:
-            self.admission._owner(connection, principal, artifact.application_id)
-            row = connection.execute(
-                """INSERT INTO sky_state.deployment_approvals
-                (workspace,id,organization_id,approved_by,application_id,source_ref,plan,plan_digest,
-                 source_digest,account_id,region,expires_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+(%s*interval '1 second'))
-                RETURNING expires_at""",
-                (
-                    self.operations.workspace,
-                    identity,
-                    principal.organization_id,
-                    principal.user_id,
-                    artifact.application_id,
-                    self.operations._json(artifact.record()),
-                    json.dumps(
-                        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-                    ),
-                    digest,
-                    artifact.source_digest,
-                    self.admission.account_id,
-                    self.admission.region,
-                    seconds,
-                ),
-            ).fetchone()
-            return DeploymentApproval(identity, row[0])
+            return self._approve_in_transaction(
+                connection, principal, artifact, plan, digest, identity, canonical_plan, seconds
+            )
+
+    def _approve_in_transaction(
+        self, connection, principal, artifact, plan, digest, identity, canonical_plan, seconds
+    ):
+        """Internal validated composition; caller owns commit and preview linkage."""
+        self.admission._owner(connection, principal, artifact.application_id)
+        row = connection.execute(
+            """INSERT INTO sky_state.deployment_approvals
+            (workspace,id,organization_id,approved_by,application_id,source_ref,plan,plan_digest,
+             source_digest,account_id,region,expires_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+(%s*interval '1 second'))
+            RETURNING expires_at""",
+            (
+                self.operations.workspace,
+                identity,
+                principal.organization_id,
+                principal.user_id,
+                artifact.application_id,
+                self.operations._json(artifact.record()),
+                json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False),
+                digest,
+                artifact.source_digest,
+                self.admission.account_id,
+                self.admission.region,
+                seconds,
+            ),
+        ).fetchone()
+        return DeploymentApproval(identity, row[0])
 
     def _locked(self, connection, principal, approval_id, *, revoking=False):
         approval_id = self.operations._uuid(approval_id)

@@ -1,4 +1,4 @@
-"""Explicit B modes: API, outbox, state migration and one shared DB allocation."""
+"""Explicit B API preparation/shared DB intake, outbox and maintenance."""
 
 import argparse
 import os
@@ -62,15 +62,23 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     modes = parser.add_subparsers(dest="mode", required=True)
     api = modes.add_parser(
-        "api", help="Read-only PostgreSQL API; no deployment admission", allow_abbrev=False
+        "api", help="PostgreSQL API; preparation/admission requires explicit opt-in", allow_abbrev=False
     )
     api.add_argument("--host", default="0.0.0.0")
     api.add_argument("--port", type=int, default=8080)
     api.add_argument("--auth-mode", choices=("alb", "local"), default="alb")
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
-    api.add_argument("--shared-database-pool-config", help="Opt in to reviewed workload DB allocation intake")
-    api.add_argument("--origin", help="Exact browser origin for shared database review and consent")
+    intake = api.add_mutually_exclusive_group()
+    intake.add_argument(
+        "--shared-database-pool-config", help="Opt in to reviewed workload DB allocation intake"
+    )
+    intake.add_argument(
+        "--enable-preparation",
+        action="store_true",
+        help="Opt in to upload/preview/approval admission; no deployment consumer",
+    )
+    api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
     api.add_argument(
         "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
     )
@@ -140,8 +148,36 @@ def main(argv):
 
             run_shared_database_api(args, parser)
             return
+        if args.enable_preparation:
+            if args.check_config:
+                parser.error("--check-config currently requires --shared-database-pool-config")
+            if (
+                args.auth_mode != "alb"
+                or not (
+                    (args.alb_trusts_file and args.memberships_file)
+                    or all(name in os.environ for name in ("SKY_ALB_TRUSTS_JSON", "SKY_MEMBERSHIPS_JSON"))
+                )
+                or not args.origin
+            ):
+                parser.error(
+                    "Preparation requires ALB authentication, trust/membership configuration and --origin"
+                )
+            from botocore.exceptions import BotoCoreError, ClientError
+
+            from interfaces.b_preparation_runtime import run_preparation_api
+
+            try:
+                run_preparation_api(args)
+            except (OSError, ValueError, TypeError, UnicodeError, BotoCoreError, ClientError):
+                parser.exit(
+                    1,
+                    "Preparation API unavailable; check hosted authentication, schemas, S3 and database configuration.\n",
+                )
+            return
         if args.origin or args.check_config:
-            parser.error("--origin and --check-config require --shared-database-pool-config")
+            parser.error(
+                "--origin requires preparation or shared database intake; --check-config requires shared intake"
+            )
         from interfaces.http.server import serve
 
         forwarded = [

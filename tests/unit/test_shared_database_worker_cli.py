@@ -264,3 +264,22 @@ def test_shared_worker_accepts_same_ecs_identity_documents_as_api(configuration,
         ),
     ):
         main(["worker", "--mode", "shared-database", "--pool-config", str(path), "--check-config"])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--enable-preparation", "--shared-database-pool-config", "pool.json"],
+        ["--enable-preparation", "--check-config"],
+    ],
+)
+def test_preparation_and_shared_intake_options_never_silently_override_one_another(options):
+    with (
+        patch("interfaces.shared_database_api.run_shared_database_api") as shared,
+        patch("interfaces.b_preparation_runtime.run_preparation_api") as prepare,
+        pytest.raises(SystemExit) as error,
+    ):
+        main(["api", *options])
+    assert error.value.code == 2
+    shared.assert_not_called()
+    prepare.assert_not_called()
