@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 
 from application.shared_database_workflow import KIND
+from application.database_promotion_workflow import KIND as PROMOTION_KIND
 
 
 class AllocationOwnershipLost(OSError):
@@ -14,16 +15,20 @@ class AllocationOwnershipLost(OSError):
 class AllocationQueueRouter:
     """Route using durable operation kind, never fields supplied in queue payloads."""
 
-    def __init__(self, operations, default_queue, allocation_queue):
+    def __init__(self, operations, default_queue, allocation_queue, *, promotion_queue=None):
         self.operations, self.default_queue, self.allocation_queue = operations, default_queue, allocation_queue
+        self.promotion_queue = promotion_queue
 
     def publish(self, delivery):
         operation = self.operations.get(delivery.operation_id)
         if delivery.workspace != self.operations.workspace or operation.application_id != delivery.application_id:
             raise OSError("Outbox scope does not match durable operation")
-        queue = self.allocation_queue if operation.kind == KIND else self.default_queue
+        if operation.kind == PROMOTION_KIND:
+            queue = self.promotion_queue
+        else:
+            queue = self.allocation_queue if operation.kind == KIND else self.default_queue
         if queue is None:
-            raise OSError("Shared database queue is not configured")
+            raise OSError("Required operation queue is not configured")
         queue.publish(delivery)
 
 

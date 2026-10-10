@@ -28,6 +28,7 @@ KINDS = {
     "image_cleanup",
     "db_create",
     "db_shared_allocate",
+    "db_dedicated_prepare",
     "db_retire",
     "snapshot_create",
     "restore_drill",
@@ -434,6 +435,21 @@ class PostgresOperationStore:
                 (self._json(checkpoint), self.workspace, lease.operation_id),
             )
             self._resume_or_block(connection, self._select(connection, lease.operation_id))
+            return True
+
+    def require_attention(self, lease, checkpoint):
+        checkpoint = self._document(checkpoint)
+        with self.records._connection() as connection:
+            if not self._owned(connection, lease):
+                return False
+            connection.execute(
+                """UPDATE sky_state.operations SET status='needs_attention',external_pending=true,checkpoint=%s,
+                lease_owner=NULL,lease_until=NULL,row_version=row_version+1
+                WHERE workspace=%s AND id=%s""",
+                (self._json(checkpoint), self.workspace, lease.operation_id),
+            )
+            # Retain mutation_scopes plus both external intent and receipt.
+            self._event(connection, lease.operation_id, "needs_attention")
             return True
 
     def recover_expired(self, *, limit=100):

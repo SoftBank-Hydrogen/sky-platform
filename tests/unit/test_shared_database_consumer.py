@@ -143,6 +143,21 @@ def test_missing_allocation_queue_never_sends_allocation_to_builder(consumer):
     default.publish.assert_not_called()
 
 
+def test_promotion_requires_its_own_queue(consumer):
+    _, store, default, _, operation = consumer
+    operation.kind = "db_dedicated_prepare"
+    allocation = Mock()
+    delivery = OutboxDelivery("event", "owner", 1, "op", "attempt", "app", "team")
+    router = AllocationQueueRouter(store, default, allocation)
+    with pytest.raises(OSError):
+        router.publish(delivery)
+    default.publish.assert_not_called()
+    allocation.publish.assert_not_called()
+    promotion = Mock()
+    AllocationQueueRouter(store, default, allocation, promotion_queue=promotion).publish(delivery)
+    promotion.publish.assert_called_once_with(delivery)
+
+
 def test_task_protection_failure_prevents_allocation(consumer):
     service, _store, queue, worker, _operation = consumer
     service.protection = Mock(set=Mock(side_effect=OSError()))
