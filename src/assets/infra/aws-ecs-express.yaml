@@ -1,5 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Shared Sky ECR repository and ECS Express Mode roles
+Parameters:
+  RoleBoundaryArn:
+    Type: String
+    Default: ''
+    Description: Optional Sky-managed permissions boundary for application roles
+Conditions:
+  HasRoleBoundary: !Not [!Equals [!Ref RoleBoundaryArn, '']]
 Resources:
   Repository:
     Type: AWS::ECR::Repository
@@ -13,6 +20,7 @@ Resources:
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !If [HasRoleBoundary, !Ref RoleBoundaryArn, !Ref 'AWS::NoValue']
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -28,6 +36,7 @@ Resources:
   InfrastructureRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !If [HasRoleBoundary, !Ref RoleBoundaryArn, !Ref 'AWS::NoValue']
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:

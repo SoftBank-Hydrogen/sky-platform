@@ -14,6 +14,7 @@ from adapters.aws.ecs import (AwsConfigurationError, AwsExpressAdapter, AwsSetti
                            service_group_ingress_is_restricted)
 from adapters.aws.pricing import estimate_postgres_base_capacity
 from adapters.aws.network import AwsServiceNetworkProvisioner, ServiceNetworkRequest
+from adapters.aws.role_boundary import managed_role_boundary
 
 
 TEMPLATE = ASSET_ROOT / 'infra' / 'aws-postgres.json'
@@ -289,13 +290,14 @@ class AwsPostgresProvisioner:
 
     def create(self, expected_plan: dict | None = None) -> dict:
         """Create one new stack only; never update or auto-delete a database."""
+        req = self.request
+        boundary = managed_role_boundary(req.account)
         plan = self.preflight()
         if expected_plan is not None and plan != expected_plan:
             raise AwsConfigurationError('RDS 생성 계획이 변경됐습니다. 가격과 네트워크를 다시 확인하세요.')
         self.adapter.event('cost', 'RDS 기본 용량의 730시간 기준 공개 가격: '
                            + plan['pricing']['baseline_730h_usd']
                            + ' USD. 백업 초과·전송·비밀·로그·ECS·세금은 제외합니다.')
-        req = self.request
         template = TEMPLATE.read_text(encoding='utf-8')
         payload = {'StackName': req.stack_name, 'TemplateBody': template,
                    'EnableTerminationProtection': True,
@@ -307,7 +309,8 @@ class AwsPostgresProvisioner:
                         'ParameterValue': plan['database_availability_zone']},
                        {'ParameterKey': 'VpcId', 'ParameterValue': req.vpc_id},
                        {'ParameterKey': 'SubnetIds', 'ParameterValue': ','.join(req.subnet_ids)},
-                       {'ParameterKey': 'ServiceSecurityGroupId', 'ParameterValue': req.service_security_group}],
+                       {'ParameterKey': 'ServiceSecurityGroupId', 'ParameterValue': req.service_security_group},
+                       {'ParameterKey': 'RoleBoundaryArn', 'ParameterValue': boundary}],
                    'Tags': [{'Key': 'sky-managed', 'Value': 'true'},
                             {'Key': 'sky-app', 'Value': req.application_id}]}
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='sky-rds-',
@@ -351,11 +354,13 @@ class AwsPostgresProvisioner:
         trust_statements = trust.get('Statement', [])
         if isinstance(trust_statements, dict):
             trust_statements = [trust_statements]
+        boundary = managed_role_boundary(req.account)
         expected_trust = {'Effect': 'Allow', 'Principal': {'Service': 'ecs-tasks.amazonaws.com'},
                           'Action': 'sts:AssumeRole'}
         if (role.get('Arn') != role_arn or role.get('RoleName') != role_name
                 or tags.get('sky-managed') != 'true'
                 or tags.get('sky-app') != req.application_id
+                or (boundary and role.get('PermissionsBoundary', {}).get('PermissionsBoundaryArn') != boundary)
                 or trust_statements != [expected_trust]):
             raise AwsConfigurationError('PostgreSQL ECS 실행 역할의 소유권 또는 신뢰 정책이 예상과 다릅니다.')
         managed = json.loads(self.adapter.aws(['iam', 'list-attached-role-policies', '--role-name', role_name],

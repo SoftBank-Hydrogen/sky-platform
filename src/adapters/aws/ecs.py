@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assets import ASSET_ROOT
+from adapters.aws.role_boundary import managed_role_boundary
 from application.analysis import redact
 from application.client_urls import check_browser_client_urls
 from application.deployment_core import source_digest, validate_environment
@@ -220,10 +221,15 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('AWS 계정 ID를 확인하지 못했습니다.')
         if self.settings.expected_account and account != self.settings.expected_account:
             raise AwsConfigurationError('현재 AWS 계정이 SKY_AWS_ACCOUNT_ID와 다릅니다. 리소스를 생성하지 않았습니다.')
+        boundary = managed_role_boundary(account)
         template = ASSET_ROOT / 'infra' / 'aws-ecs-express.yaml'
         self.event('infrastructure', 'CloudFormation으로 ECR 저장소와 ECS Express 역할 준비')
-        self.aws(['cloudformation', 'deploy', '--template-file', str(template), '--stack-name', self.settings.stack_name,
-                  '--capabilities', 'CAPABILITY_IAM', '--tags', 'sky-managed=true'], timeout=900)
+        command = ['cloudformation', 'deploy', '--template-file', str(template),
+                   '--stack-name', self.settings.stack_name, '--capabilities', 'CAPABILITY_IAM',
+                   '--tags', 'sky-managed=true']
+        if boundary:
+            command.extend(['--parameter-overrides', f'RoleBoundaryArn={boundary}'])
+        self.aws(command, timeout=900)
         described = json.loads(self.aws(['cloudformation', 'describe-stacks', '--stack-name', self.settings.stack_name], private=True))
         stacks = described.get('Stacks', [])
         if len(stacks) != 1 or stacks[0].get('StackStatus') not in {'CREATE_COMPLETE', 'UPDATE_COMPLETE'}:
