@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import Mock
 
+from interfaces.http.auth import LocalTokenAuthenticator
 from interfaces.http.server import handler_for
 
 
@@ -18,7 +19,7 @@ class ServiceHealthTests(unittest.TestCase):
         app.summaries.assert_not_called()
 
     def test_jobs_still_require_token(self):
-        app = Mock(token="private-session-token")
+        app = Mock(token="private-session-token", authenticator=LocalTokenAuthenticator("private-session-token"))
         handler = handler_for(app).__new__(handler_for(app))
         handler.path = "/api/jobs"
         handler.headers = {}
