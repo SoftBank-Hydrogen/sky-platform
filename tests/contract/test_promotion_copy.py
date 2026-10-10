@@ -156,3 +156,13 @@ def test_copy_budget_applies_across_tables(databases):
         PostgresPromotionCopy(source, target, max_rows=2).copy(plan, guard=lambda: None)
     with target() as db:
         assert db.execute("SELECT to_regclass('extra'),to_regclass('scores')").fetchone() == (None, None)
+
+
+def test_deferred_primary_key_is_not_silently_changed(databases):
+    (source, target), plan = databases
+    with source() as db:
+        db.execute('CREATE TABLE scores(id integer PRIMARY KEY DEFERRABLE INITIALLY DEFERRED)')
+    with pytest.raises(ValueError, match='constraint'):
+        PostgresPromotionCopy(source, target).copy(plan, guard=lambda: None)
+    with target() as db:
+        assert db.execute("SELECT to_regclass('scores')").fetchone() == (None,)

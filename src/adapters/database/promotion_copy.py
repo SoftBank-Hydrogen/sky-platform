@@ -63,11 +63,11 @@ def _inventory(connection):
         ):
             raise ValueError("Unsupported column type, precision, collation or default")
         constraints = connection.execute(
-            """SELECT contype,conkey FROM pg_constraint
+            """SELECT contype,conkey,condeferrable,condeferred FROM pg_constraint
             WHERE conrelid=%s::regclass""",
             (sql.Identifier("public", name).as_string(connection),),
         ).fetchall()
-        if any(kind != "p" for kind, _ in constraints):
+        if any(kind != "p" or deferred or deferrable for kind, _, deferrable, deferred in constraints):
             raise ValueError("Unsupported table constraint")
         indexes = connection.execute(
             """SELECT indisprimary FROM pg_index
@@ -83,7 +83,7 @@ def _inventory(connection):
         ).fetchone()[0]
         if dropped:
             raise ValueError("Unsupported dropped column layout")
-        primary = [columns[i - 1][0] for kind, keys in constraints for i in keys]
+        primary = [columns[i - 1][0] for kind, keys, *_ in constraints for i in keys]
         tables.append(
             (name, [(name, _TYPES[oid], required) for name, oid, _, required, *_ in columns], primary)
         )
