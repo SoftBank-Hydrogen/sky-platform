@@ -159,7 +159,7 @@ class EnvironmentHistoryTests(unittest.TestCase):
         app.save(self.job_id)
         stored = (self.root / self.job_id / 'job.json').read_text()
         app.jobs[self.job_id].update(status='succeeded', result={'url': 'http://127.0.0.1:12345'})
-        with patch('interfaces.http.server.os.replace', side_effect=OSError('disk failure')):
+        with patch('adapters.state.records.os.replace', side_effect=OSError('disk failure')):
             with self.assertRaisesRegex(RuntimeError, '저장에 실패'):
                 app.save(self.job_id)
         self.assertEqual((self.root / self.job_id / 'job.json').read_text(), stored)

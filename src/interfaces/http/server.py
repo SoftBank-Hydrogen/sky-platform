@@ -64,6 +64,8 @@ from application.postgres_operations import PostgresOperations
 from application.postgres_retirement_operations import PostgresRetirementOperations
 from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
+from adapters.state.records import DirectoryDeploymentRecordStore
+from ports.state import DeploymentRecordStore
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
 
 
@@ -79,10 +81,11 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
-                 github_poll_interval: int = 60):
+                 github_poll_interval: int = 60, *, record_store: DeploymentRecordStore | None = None):
         self.root = root.resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
+        self.record_store = record_store if record_store is not None else DirectoryDeploymentRecordStore(self.root)
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.jobs = {}
