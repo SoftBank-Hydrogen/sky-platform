@@ -34,6 +34,7 @@ _IMMUTABLE = frozenset(
         "source_ref",
         "project",
         "operation_id",
+        "approval_id",
         "group_id",
         "group_order",
         "job_record_version",

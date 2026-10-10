@@ -89,6 +89,17 @@ class PostgresDeploymentAdmission:
     def admit(
         self, principal, artifact, request_key, approved_plan, *, expected_plan_digest, expected_source_digest
     ):
+        plan, job_id, key, command = self._prepare(
+            principal, artifact, request_key, approved_plan, expected_plan_digest, expected_source_digest
+        )
+        with self.operations.records._connection() as connection:
+            return self._admit_in_transaction(
+                connection, principal, artifact, plan, expected_plan_digest, job_id, key, command
+            )
+
+    def _prepare(
+        self, principal, artifact, request_key, approved_plan, expected_plan_digest, expected_source_digest
+    ):
         if not isinstance(principal, Principal) or not permitted(
             principal, Action.DEPLOY, ResourceOwner(principal.organization_id, principal.user_id)
         ):
@@ -127,54 +138,61 @@ class PostgresDeploymentAdmission:
                 "region": self.region,
             }
         )
-        with self.operations.records._connection() as connection:
-            self._owner(connection, principal, artifact.application_id)
-            operation = self.operations._admit_in_transaction(
-                connection, artifact.application_id, "deploy", key, command
-            )
-            document = {
-                "id": job_id,
-                "organization_id": principal.organization_id,
-                "created_by": principal.user_id,
-                "application_id": artifact.application_id,
-                "operation_id": operation.id,
-                "status": "queued",
-                "target": "aws",
-                "source_ref": artifact.record(),
-                "source_digest": artifact.source_digest,
-                "plan": plan,
-                "plan_digest": expected_plan_digest,
-                "result": None,
-                "events": [],
-                "deployment_state": "pending",
-            }
-            connection.execute(
-                """INSERT INTO sky_state.metadata_records
-                (workspace,kind,record_id,document)
-                VALUES (%s,'job',%s,%s || jsonb_build_object('created_at',clock_timestamp()))
-                ON CONFLICT DO NOTHING""",
-                (self.operations.workspace, job_id, self.operations._json(document)),
-            )
-            existing = connection.execute(
-                """SELECT document FROM sky_state.metadata_records
-                WHERE workspace=%s AND kind='job' AND record_id=%s FOR UPDATE""",
-                (self.operations.workspace, job_id),
-            ).fetchone()[0]
-            # Existing progress is preserved on replay. A colliding/foreign record is never overwritten.
-            immutable = (
-                "id",
-                "organization_id",
-                "created_by",
-                "application_id",
-                "operation_id",
-                "source_ref",
-                "source_digest",
-                "target",
-                "plan",
-                "plan_digest",
-            )
-            if not isinstance(existing, dict) or any(
-                existing.get(field) != document[field] for field in immutable
-            ):
-                raise RecordConflict("Deployment record does not match admitted operation")
-            return AdmittedDeployment(job_id, operation.id)
+        return plan, job_id, key, command
+
+    def _admit_in_transaction(
+        self, connection, principal, artifact, plan, expected_plan_digest, job_id, key, command
+    ):
+        """Caller owns the transaction; usable alongside locked approval consumption."""
+        self._owner(connection, principal, artifact.application_id)
+        operation = self.operations._admit_in_transaction(
+            connection, artifact.application_id, "deploy", key, command
+        )
+        document = {
+            "id": job_id,
+            "organization_id": principal.organization_id,
+            "created_by": principal.user_id,
+            "application_id": artifact.application_id,
+            "operation_id": operation.id,
+            "approval_id": command.get("approval_id"),
+            "status": "queued",
+            "target": "aws",
+            "source_ref": artifact.record(),
+            "source_digest": artifact.source_digest,
+            "plan": plan,
+            "plan_digest": expected_plan_digest,
+            "result": None,
+            "events": [],
+            "deployment_state": "pending",
+        }
+        connection.execute(
+            """INSERT INTO sky_state.metadata_records
+            (workspace,kind,record_id,document)
+            VALUES (%s,'job',%s,%s || jsonb_build_object('created_at',clock_timestamp()))
+            ON CONFLICT DO NOTHING""",
+            (self.operations.workspace, job_id, self.operations._json(document)),
+        )
+        existing = connection.execute(
+            """SELECT document FROM sky_state.metadata_records
+            WHERE workspace=%s AND kind='job' AND record_id=%s FOR UPDATE""",
+            (self.operations.workspace, job_id),
+        ).fetchone()[0]
+        # Existing progress is preserved on replay. A colliding/foreign record is never overwritten.
+        immutable = (
+            "id",
+            "organization_id",
+            "created_by",
+            "application_id",
+            "operation_id",
+            "approval_id",
+            "source_ref",
+            "source_digest",
+            "target",
+            "plan",
+            "plan_digest",
+        )
+        if not isinstance(existing, dict) or any(
+            existing.get(field) != document[field] for field in immutable
+        ):
+            raise RecordConflict("Deployment record does not match admitted operation")
+        return AdmittedDeployment(job_id, operation.id)
