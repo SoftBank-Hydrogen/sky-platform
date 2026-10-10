@@ -14,6 +14,7 @@ from pathlib import Path
 
 from application.agent import OpenAIDeployAgent
 from application.analysis import AISettings
+from interfaces.cli import load_local_env
 from interfaces.http.server import App, handler_for
 
 
@@ -26,6 +27,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--screenshot', type=Path, help='Write a local screenshot for visual review')
     args = parser.parse_args()
+    load_local_env(Path.cwd() / '.env')
     settings = AISettings.from_environment()
     if not settings.available:
         parser.error('OPENAI_API_KEY is required')
