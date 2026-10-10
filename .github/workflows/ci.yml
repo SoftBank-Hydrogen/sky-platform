@@ -54,7 +54,7 @@ jobs:
               'ports/operations.py', 'ports/queue.py', 'adapters/state/operations.py',
               'adapters/aws/job_queue.py', 'application/outbox.py',
               'ports/deployment_reads.py', 'adapters/state/deployment_reads.py',
-              'application/deployment_reads.py',
+              'application/deployment_reads.py', 'interfaces/http/deployment_reads.py',
           }
           assert required <= files, sorted(required - files)
           PY
@@ -68,6 +68,7 @@ jobs:
       - name: UI and PostgreSQL JavaScript tests
         run: |
           node tests/regression/test_postgres_ui.mjs
+          node tests/regression/test_deployment_read_ui.mjs
           node tests/regression/test_postgres_migrator.js
           node tests/regression/test_postgres_restore_verifier.mjs
 
