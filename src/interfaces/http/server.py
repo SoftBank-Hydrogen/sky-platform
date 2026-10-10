@@ -1477,6 +1477,10 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
 
 
 def handler_for(app: App):
+    from interfaces.http.deployment_reads import DatabaseReadApp, handler_for_reads
+    if isinstance(app, DatabaseReadApp):
+        return handler_for_reads(app)
+
     class Handler(BaseHTTPRequestHandler):
         def json_response(self, status, data):
             payload = json.dumps(data, ensure_ascii=False).encode()
@@ -2563,7 +2567,32 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
                         help="Seconds between health checks (60–3600; 0 disables monitoring)")
     parser.add_argument("--github-poll-interval", type=int, default=60,
                         help="Seconds between public GitHub branch checks (60–3600; 0 disables checks)")
+    parser.add_argument("--read-only-database", action="store_true",
+                        help="Read persisted PostgreSQL deployments without local writers (loopback only)")
     args = parser.parse_args()
+    if args.read_only_database:
+        if args.host not in {'127.0.0.1', 'localhost'}:
+            parser.error('--read-only-database requires loopback until hosted authentication is implemented')
+        from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+        from adapters.state.deployment_reads import PostgresDeploymentReads
+        from application.deployment_reads import DeploymentReadService
+        from interfaces.http.deployment_reads import DatabaseReadApp
+        try:
+            settings = PostgresStateSettings.from_environment()
+            workspace = os.environ.get('SKY_STATE_WORKSPACE', 'team')
+            reads = PostgresDeploymentReads(RotatingDatabaseConnection(settings), workspace=workspace)
+        except ValueError as error:
+            parser.error(str(error))
+        app = DatabaseReadApp(DeploymentReadService(reads), workspace=workspace)
+        server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
+        print(f"{product_name} (read-only): http://{args.host}:{args.port}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return
     if args.monitor_interval != 0 and not 60 <= args.monitor_interval <= 3600:
         parser.error('--monitor-interval must be 0 or 60–3600 seconds')
     if args.github_poll_interval != 0 and not 60 <= args.github_poll_interval <= 3600:

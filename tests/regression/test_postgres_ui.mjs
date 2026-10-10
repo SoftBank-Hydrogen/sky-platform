@@ -218,7 +218,7 @@ test('running deployment can be cancelled only before its first attempt', () => 
 });
 
 test('dashboard counts active services and jobs needing attention', async () => {
-  const start = html.indexOf('async function history()');
+  const start = html.indexOf('function deploymentPage(');
   const end = html.indexOf('async function loadRollbackTargets', start);
   assert.ok(start >= 0 && end > start);
   const elements = new Map();
@@ -237,6 +237,7 @@ test('dashboard counts active services and jobs needing attention', async () => 
   ];
   const context = {
     el: element, api: async () => jobs, busy: false, statuses: {}, open() {}, Date, String,
+    historyItems: [], historyCursor: null, historyLoading: false, historyGeneration: 0,
     document: {createElement: () => ({children: [], append(child) { this.children.push(child); }})},
   };
   runInNewContext(html.slice(start, end), context);
