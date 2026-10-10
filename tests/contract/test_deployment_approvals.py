@@ -463,3 +463,14 @@ def test_request_key_is_bound_to_exact_approval(store, database):
     with pytest.raises(IdempotencyConflict):
         store.submit(principal(), second.id, "request")
     assert counts(store, database) == [1] * 4
+
+
+@pytest.mark.parametrize("number", [1e20, -0.0])
+def test_plan_numeric_representation_survives_postgres_roundtrip(store, number):
+    approval = store.approve(principal(), artifact(), {"budget": number})
+    result = store.submit(principal(), approval.id, "request")
+    command = store.operations.get(result.operation_id).command
+    assert command["plan"]["budget"] == number
+    canonical = command["approved_plan_json"]
+    assert canonical == json.dumps({"budget": number}, separators=(",", ":"))
+    assert store.admission._digest(json.loads(canonical)) == command["plan_digest"]

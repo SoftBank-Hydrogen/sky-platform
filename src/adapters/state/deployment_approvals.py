@@ -4,6 +4,7 @@ Internal composition only: principal and validated plan come from trusted
 application code, not caller-provided HTTP identity or arbitrary execution plans.
 """
 
+import json
 from uuid import uuid4
 
 from domain.access import Action, Principal, ResourceOwner, Role, permitted
@@ -38,7 +39,7 @@ class PostgresDeploymentApprovals:
                     workspace text NOT NULL, id uuid NOT NULL,
                     organization_id text NOT NULL, approved_by text NOT NULL,
                     application_id text NOT NULL, source_ref jsonb NOT NULL CHECK(jsonb_typeof(source_ref)='object'),
-                    plan jsonb NOT NULL CHECK(jsonb_typeof(plan)='object'), plan_digest text NOT NULL,
+                    plan text NOT NULL CHECK(jsonb_typeof(plan::jsonb)='object'), plan_digest text NOT NULL,
                     source_digest text NOT NULL, account_id text NOT NULL, region text NOT NULL,
                     created_at timestamptz NOT NULL DEFAULT clock_timestamp(), expires_at timestamptz NOT NULL,
                     revoked_at timestamptz, consumed_key text, job_id text, operation_id uuid,
@@ -97,7 +98,10 @@ class PostgresDeploymentApprovals:
             artifact.source_digest if isinstance(artifact, SourceArtifact) else None,
         )
         identity = str(uuid4())
-        self.operations._document({**command, "approval_id": identity})
+        canonical_plan = json.dumps(
+            plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        self.operations._document({**command, "approval_id": identity, "approved_plan_json": canonical_plan})
         with self.operations.records._connection() as connection:
             self.admission._owner(connection, principal, artifact.application_id)
             row = connection.execute(
@@ -113,7 +117,9 @@ class PostgresDeploymentApprovals:
                     principal.user_id,
                     artifact.application_id,
                     self.operations._json(artifact.record()),
-                    self.operations._json(plan),
+                    json.dumps(
+                        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+                    ),
                     digest,
                     artifact.source_digest,
                     self.admission.account_id,
@@ -183,9 +189,11 @@ class PostgresDeploymentApprovals:
             if artifact.application_id != row[2] or artifact.organization_id != row[0]:
                 raise ApprovalUnavailable("Approval source identity is inconsistent")
             plan, job_id, key, command = self.admission._prepare(
-                principal, artifact, request_key, row[4], row[5], row[6]
+                principal, artifact, request_key, json.loads(row[4]), row[5], row[6]
             )
-            command = self.operations._document({**command, "approval_id": approval_id})
+            command = self.operations._document(
+                {**command, "approval_id": approval_id, "approved_plan_json": row[4]}
+            )
             result = self.admission._admit_in_transaction(
                 connection, principal, artifact, plan, row[5], job_id, key, command
             )

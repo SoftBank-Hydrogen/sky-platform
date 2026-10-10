@@ -9,10 +9,17 @@ migrations, AWS deployments or queue consumption are enabled by this change.
 
 `PostgresDeploymentApprovals.approve(verified_principal, prepared_artifact,
 validated_plan, seconds=900)` records the approver, organization, prepared source,
-canonical plan digest, source tree digest, server-side expiration, and configured
+canonical JSON plan text and digest, source tree digest, server-side expiration, and configured
 AWS account/region. Lifetime is 1 second to 24 hours. It establishes application
 ownership using the same admission rules (existing apps require explicit import).
 Approval creation therefore reserves ownership even before a job is admitted.
+The approved plan is stored as canonical JSON text: PostgreSQL JSONB can normalize
+scientific notation and negative zero, so re-hashing a JSONB roundtrip could
+incorrectly reject an unchanged approval. The operation also retains the exact
+approved_plan_json string. A worker must parse and hash this canonical string as
+the approved execution plan; the plan JSONB projection is only a convenience
+representation and can normalize numeric spellings. The combined command remains
+bounded to 64 KiB, including the canonical plan and its JSONB projection.
 
 This internal method is not an arbitrary client plan endpoint. The future upload,
 analysis and preview flow must validate plan semantics, secret references, policy
