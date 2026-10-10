@@ -322,6 +322,7 @@ const ignoredSource=path=>path.split('/').some(part=>['node_modules','.venv','ve
 function suggestedAppId(name){const id=name.replace(/\.zip$/i,'').toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'');return /^[a-z][a-z0-9-]{2,30}$/.test(id)?id:'my-app';}
 function postgresUploadHeaders(application){
  if(el('target').value==='cloud-run'){
+  if(el('postgresExisting').checked)throw Error('기존 RDS 연결은 AWS ECS Express에서 사용하세요. Cloud Run에서는 Cloud SQL 연결을 선택합니다.');
   if(!el('cloudSqlExisting').checked){if(el('sqliteConvert').checked)throw Error('SQLite 이전에는 기존 Cloud SQL 연결을 선택하세요.');return {};}
   if(githubMode||el('multiMode').checked)throw Error('Cloud SQL 연결은 업로드한 앱의 단일 Cloud Run 배포에서 지원합니다.');
   const binding={instance:el('cloudSqlInstance').value.trim(),database:el('cloudSqlDatabase').value.trim(),user:el('cloudSqlUser').value.trim(),password_secret:el('cloudSqlSecret').value.trim()};

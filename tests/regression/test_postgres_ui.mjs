@@ -402,6 +402,30 @@ test('database opt-in rejects unsupported target, private service and malformed 
   ]) assert.throws(() => headers(options));
 });
 
+test('Cloud SQL upload sends its explicit binding and SQLite conversion choice', () => {
+  const fields = {
+    target: {value: 'cloud-run'}, postgresExisting: {checked: false},
+    cloudSqlExisting: {checked: true}, sqliteConvert: {checked: true}, multiMode: {checked: false},
+    cloudSqlInstance: {value: 'test-instance'}, cloudSqlDatabase: {value: 'game'},
+    cloudSqlUser: {value: 'game_user'}, cloudSqlSecret: {value: 'game-password:1'},
+  };
+  const context = {el: id => fields[id], githubMode: false, Error};
+  runInNewContext(html.slice(start, html.indexOf('function localSqliteUploadHeaders()', start)), context);
+  const result = context.postgresUploadHeaders('demo-app');
+  assert.deepEqual(JSON.parse(result['X-GCP-Postgres']), {
+    instance: 'test-instance', database: 'game', user: 'game_user', password_secret: 'game-password:1',
+  });
+  assert.equal(result['X-Sqlite-Convert'], 'true');
+  assert.equal(result['X-Postgres-Existing'], undefined);
+  fields.postgresExisting.checked = true;
+  assert.throws(() => context.postgresUploadHeaders('demo-app'), /RDS/);
+  fields.postgresExisting.checked = false;
+  fields.cloudSqlExisting.checked = false;
+  assert.throws(() => context.postgresUploadHeaders('demo-app'), /Cloud SQL/);
+  fields.sqliteConvert.checked = false;
+  assert.deepEqual({...context.postgresUploadHeaders('demo-app')}, {});
+});
+
 test('automatic target keeps existing RDS binding while hiding new-DB creation', async () => {
   const elements = new Map();
   const element = id => {
