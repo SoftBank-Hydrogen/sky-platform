@@ -291,6 +291,9 @@ def _release_rollback_verified(job: dict, result: dict) -> bool:
 
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
+    if job.get("mode") == "native_aws":
+        from application.native_evidence import native_certificate
+        return native_certificate(job)
     if job.get('mode') == 'static_site':
         result = job.get('result') if isinstance(job.get('result'), dict) else {}
         infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}

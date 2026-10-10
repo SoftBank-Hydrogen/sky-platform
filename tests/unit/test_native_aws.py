@@ -18,7 +18,16 @@ IMAGE = ACCOUNT + ".dkr.ecr." + REGION + ".amazonaws.com/sky-demo@sha256:" + "a"
 def clients(monkeypatch):
     monkeypatch.setenv("SKY_AWS_ROLE_BOUNDARY_ARN", f"arn:aws:iam::{ACCOUNT}:policy/sky-runtime")
     monkeypatch.delenv("SKY_ENVIRONMENT", raising=False)
-    result = {name: Mock() for name in ("sts", "cloudformation", "lambda", "ec2", "ecr", "ssm")}
+    result = {name: Mock() for name in ("sts", "cloudformation", "lambda", "ec2", "ecr", "ssm", "iam")}
+    result["iam"].get_policy.return_value = {"Policy": {"DefaultVersionId": "v1"}}
+    result["iam"].get_policy_version.return_value = {
+        "PolicyVersion": {"Document": {"Version": "2012-10-17", "Statement": []}}
+    }
+    result["iam"].simulate_custom_policy.side_effect = lambda **kw: {
+        "EvaluationResults": [
+            {"EvalActionName": action, "EvalDecision": "allowed"} for action in kw["ActionNames"]
+        ]
+    }
     result["sts"].get_caller_identity.return_value = {"Account": ACCOUNT}
     return result
 
@@ -254,3 +263,14 @@ def test_aws_sdk_request_shapes(clients, tmp_path):
             shape = model.operation_model(names[name]).input_shape
             for call in child.call_args_list:
                 validate_parameters(call.kwargs, shape)
+
+
+def test_ec2_boundary_missing_ssm_fails_before_allocating_any_resources(clients):
+    clients["iam"].simulate_custom_policy.side_effect = None
+    clients["iam"].simulate_custom_policy.return_value = {"EvaluationResults": []}
+    with pytest.raises(ValueError, match="SSM agent permissions"):
+        adapter(AwsEc2Adapter, clients).deploy(
+            IMAGE, "demo-app", ATTEMPT, subnet_id="subnet-12345678", public_access=True, stateless=True
+        )
+    clients["cloudformation"].create_stack.assert_not_called()
+    clients["ec2"].describe_subnets.assert_not_called()

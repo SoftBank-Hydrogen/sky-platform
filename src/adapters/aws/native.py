@@ -14,6 +14,7 @@ import io
 import json
 import re
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -179,9 +180,17 @@ class NativeAwsAdapter:
 
     @staticmethod
     def _probe(url):
-        with urllib.request.urlopen(url, timeout=15) as response:
-            if response.status != 200 or response.url != url:
-                raise ValueError("HTTP health verification failed or redirected")
+        # A fresh URL/permission can take time to propagate; never promote on configuration alone.
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    if response.status == 200 and response.url == url:
+                        return
+            except OSError:
+                pass
+            if attempt < 29:
+                time.sleep(2)
+        raise ValueError("HTTP health verification failed or redirected")
 
     def role(self, service, policies):
         return {
@@ -305,11 +314,47 @@ class AwsLambdaAdapter(NativeAwsAdapter):
 class AwsEc2Adapter(NativeAwsAdapter):
     backend = "ec2"
 
+    def check_runtime_permissions(self):
+        # An ECS-oriented boundary may allow ECR but block the SSM runtime agent.
+        # Fail before creating repositories/instances rather than launching an unverifiable VM.
+        self.identity()
+        iam = self.client("iam")
+        version = iam.get_policy(PolicyArn=self.boundary)["Policy"]["DefaultVersionId"]
+        document = iam.get_policy_version(PolicyArn=self.boundary, VersionId=version)["PolicyVersion"][
+            "Document"
+        ]
+        actions = [
+            "ssmmessages:CreateControlChannel",
+            "ssmmessages:CreateDataChannel",
+            "ssmmessages:OpenControlChannel",
+            "ssmmessages:OpenDataChannel",
+            "ssm:UpdateInstanceInformation",
+        ]
+        evaluations = iam.simulate_custom_policy(
+            PolicyInputList=[json.dumps(document)], ActionNames=actions, ResourceArns=["*"]
+        )["EvaluationResults"]
+        allowed = {item["EvalActionName"] for item in evaluations if item["EvalDecision"] == "allowed"}
+        if set(actions) - allowed:
+            raise ValueError(
+                "EC2 runtime verification requires SSM agent permissions in the configured IAM boundary"
+            )
+
     def deploy(
-        self, image, application_id, attempt_id, *, subnet_id, port=8080, public_access=False, stateless=False
+        self,
+        image,
+        application_id,
+        attempt_id,
+        *,
+        subnet_id,
+        port=8080,
+        public_access=False,
+        stateless=False,
+        health_path="/",
     ):
         if public_access is not True or stateless is not True:
             raise ValueError("This profile requires explicit public access and a stateless container")
+        if not re.fullmatch(r"/[A-Za-z0-9/_.-]*", health_path) or ".." in health_path or "//" in health_path:
+            raise ValueError("Invalid health path")
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Invalid container port")
         account, region = self.settings.expected_account, self.settings.region
@@ -319,7 +364,7 @@ class AwsEc2Adapter(NativeAwsAdapter):
             raise ValueError("An immutable private ECR image in the pinned account/region is required")
         if not re.fullmatch(r"subnet-[a-f0-9]{8,17}", subnet_id):
             raise ValueError("Invalid subnet")
-        self.identity()
+        self.check_runtime_permissions()
         ec2 = self.client("ec2")
         subnet = ec2.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
         if subnet["OwnerId"] != account or subnet.get("State") != "available":
@@ -442,7 +487,7 @@ docker run -d --name sky-app --restart unless-stopped --read-only --tmpfs /tmp:s
                     ],
                     "NetworkInterfaces": [
                         {
-                            "DeviceIndex": "0",
+                            "DeviceIndex": 0,
                             "AssociatePublicIpAddress": True,
                             "SubnetId": subnet_id,
                             "GroupSet": [{"Ref": "Group"}],
@@ -479,6 +524,8 @@ docker run -d --name sky-app --restart unless-stopped --read-only --tmpfs /tmp:s
         }
         launch_data = resources["Instance"]["Properties"]
         launch_data["IamInstanceProfile"] = {"Name": {"Ref": "Profile"}}
+        for interface in launch_data["NetworkInterfaces"]:
+            interface["Groups"] = interface.pop("GroupSet")
         resources["LaunchTemplate"] = {
             "Type": "AWS::EC2::LaunchTemplate",
             "Properties": {"LaunchTemplateData": launch_data},
@@ -501,6 +548,7 @@ docker run -d --name sky-app --restart unless-stopped --read-only --tmpfs /tmp:s
         }
         receipt = self.start(application_id, attempt_id, template, image)
         receipt["image"] = image
+        receipt["health_path"] = health_path
         self.checkpoint(dict(receipt))
         return self.verify(receipt)
 

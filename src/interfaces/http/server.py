@@ -51,6 +51,7 @@ from adapters.onprem.vm import RemoteVmComposeAdapter, VmSettings
 from application.health import check_deployment
 from application.monitoring import MonitoringMixin
 from application.static_deployments import StaticDeploymentsMixin
+from application.native_deployments import NativeDeploymentsMixin, NATIVE_TARGETS
 from application.infrastructure import (OpenAIInfrastructurePlanner,
                                       deployment_access_mode, explicit_infrastructure_plan,
                                       infrastructure_compatibility,
@@ -83,7 +84,7 @@ def dockerfile_diff(source: Path, plan: dict) -> str:
                                         tofile="Dockerfile"))
 
 
-class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDeploymentsMixin):
+class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDeploymentsMixin, NativeDeploymentsMixin):
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
@@ -1648,7 +1649,11 @@ def handler_for(app: App):
                     "ai_model": app.ai_settings.model if app.ai_settings.available else None,
                     "monitor_interval": app.monitor_interval,
                     "github_poll_interval": app.github_poll_interval,
-                    "targets": [{"id": "auto", "name": "자동 선택 (AI·정적 규칙)", "available": app.ai_settings.available},
+                    "targets": [{"id": target, "name": name,
+                                 "available": app.native_unavailable_reason(target) is None,
+                                 "reason": app.native_unavailable_reason(target)}
+                                for target, name in (("aws-lambda", "AWS Lambda (Python 핸들러)"),
+                                                     ("aws-ec2", "AWS EC2 (무상태 컨테이너)"))] + [{"id": "auto", "name": "자동 선택 (AI·정적 규칙)", "available": app.ai_settings.available},
                                 {"id": "local-docker", "name": "Local Docker", "available": True},
                                 {"id": "onprem-compose", "name": "On-prem Compose (same PC)",
                                  "available": LocalComposeAdapter.unavailable_reason() is None,
@@ -2051,16 +2056,19 @@ def handler_for(app: App):
                                         and not job.get('result')
                                         and type(job.get('attempts')) is int
                                         and 1 <= job['attempts'] <= 3)
+                        orphan_native = (job and job.get('mode') == 'native_aws'
+                                         and job.get('status') in {'failed', 'interrupted'}
+                                         and (job.get('native_receipt') or job.get('native_image')))
                         orphan_static = (job and job.get('mode') == 'static_site'
                                          and job.get('status') in {'failed', 'interrupted'}
                                          and job.get('static_stack_id'))
                         successful = (job and job.get('status') == 'succeeded'
-                                      and job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront', 'local-docker', 'onprem-compose', 'onprem-vm', 'cloud-run'}
+                                      and job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront', 'local-docker', 'onprem-compose', 'onprem-vm', 'cloud-run', 'aws-lambda', 'aws-ec2'}
                                       and job.get('result'))
-                        if (not (orphan_local or orphan_static or successful)
+                        if (not (orphan_local or orphan_static or orphan_native or successful)
                                 or job.get('deployment_state', 'active') not in (
                                     {'active', 'delete_failed', 'needs_attention'}
-                                    if job.get('target') == 'aws-s3-cloudfront' else {'active', 'delete_failed'})
+                                    if job.get('target') == 'aws-s3-cloudfront' or job.get('mode') == 'native_aws' else {'active', 'delete_failed'})
                                 or job.get('release_rollback_state') in {'running', 'needs_attention'}
                                 or (job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront'} and any(other is not job and other.get('application_id') == job.get('application_id')
                                        and other.get('target') == job.get('target')
@@ -2079,7 +2087,8 @@ def handler_for(app: App):
                         job['deployment_state'] = 'deleting'
                         job.pop('retire_error', None)
                         app.save(job_id)
-                    threading.Thread(target=app.retire_static_site if target == 'aws-s3-cloudfront' else
+                    threading.Thread(target=app.retire_native if target in NATIVE_TARGETS else
+                                     app.retire_static_site if target == 'aws-s3-cloudfront' else
                                      app.retire_aws if target == 'aws-ecs-express' else
                                      app.retire_cloud if target == 'cloud-run' else
                                      app.retire_compose if target == 'onprem-compose' else
@@ -2257,6 +2266,56 @@ def handler_for(app: App):
                             shutil.rmtree(directory, ignore_errors=True)
                         raise
                     started = app.start_job_worker(job_id, app.run_static_site)
+                    self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
+                    return
+                if (self.path == "/api/deployments"
+                        and self.headers.get("X-Deploy-Target") in NATIVE_TARGETS):
+                    target = self.headers["X-Deploy-Target"]
+                    if self.headers.get("X-Public-Access") != "true":
+                        raise ValueError("네이티브 AWS HTTPS 배포에는 인터넷 공개 동의가 필요합니다.")
+                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-', 'x-local-sqlite-', 'x-gcp-postgres'))
+                           for name in self.headers):
+                        raise ValueError("현재 네이티브 AWS 경로는 DB 연결·이전을 지원하지 않습니다.")
+                    application_id = self.headers.get("X-Application-Id", "")
+                    if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
+                        raise ValueError("올바른 앱 ID가 필요합니다.")
+                    if not self.require_access(app.application_access(self.principal, application_id, Action.DEPLOY)):
+                        return
+                    reason = app.native_unavailable_reason(target)
+                    if reason:
+                        raise ValueError(reason)
+                    size = int(self.headers.get("Content-Length", "0"))
+                    content_type = self.headers.get("Content-Type", "")
+                    folder_upload = content_type.lower().startswith("multipart/form-data;")
+                    if not 0 < size <= MAX_UPLOAD + (1024 * 1024 if folder_upload else 0):
+                        raise ValueError("업로드 크기는 20 MiB 이하여야 합니다.")
+                    job_id = uuid.uuid4().hex[:16]
+                    directory = app.root / job_id
+                    directory.mkdir()
+                    try:
+                        (directory / ".uncommitted-upload").touch(mode=0o600)
+                        archive = directory / "source.zip"
+                        upload = self.rfile.read(size)
+                        if len(upload) != size:
+                            raise ValueError("업로드가 완료되지 않았습니다.")
+                        if folder_upload:
+                            folder_upload_to_zip(upload, content_type, archive)
+                        else:
+                            archive.write_bytes(upload)
+                        try:
+                            project = extract_project(archive, directory / "source")
+                        finally:
+                            archive.unlink(missing_ok=True)
+                        app.create_native_job(job_id, project, application_id, target,
+                            handler=self.headers.get("X-Lambda-Handler", "handler.handler"), owner=self.request_owner())
+                        app.clear_upload_marker(directory)
+                    except Exception:
+                        if not (directory / "job.json").is_file():
+                            with app.lock:
+                                app.jobs.pop(job_id, None)
+                            shutil.rmtree(directory, ignore_errors=True)
+                        raise
+                    started = app.start_job_worker(job_id, app.run_native)
                     self.json_response(202, {"id": job_id, "status": "running" if started else "interrupted"})
                     return
                 if self.path == "/api/deployments":
