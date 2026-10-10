@@ -7,7 +7,7 @@ revalidated against the current job, pool registration and current membership.
 import re
 from dataclasses import asdict
 
-from application.deployment_writes import DeploymentMetadataWriter
+from application.deployment_writes import DeploymentMetadataWriter, authorize_job_snapshot
 from application.shared_database import (
     ManagedSharedDatabaseService,
     authorize_allocation,
@@ -20,6 +20,28 @@ from ports.shared_database import ManagedSharedDatabaseAllocator
 from ports.state import RecordConflict, VersionedDeploymentRecordStore
 
 KIND = "db_shared_allocate"
+
+
+def allocation_command(principal, job_id, snapshot, selection, pool, config_digest):
+    """Recompute reviewed intent over an authorized, optionally locked snapshot."""
+    authorize_job_snapshot(principal, job_id, snapshot)
+    if not isinstance(selection, dict) or not isinstance(selection.get("allocation"), dict):
+        raise ValueError("Reviewed database choice is required")  # noqa: TRY004 -- document port uses ValueError
+    expected = select_shared_database(
+        snapshot.record,
+        pool,
+        config_digest=config_digest,
+        connection_limit=selection["allocation"].get("connection_limit"),
+    )
+    if selection != expected:
+        raise ValueError("Database choice changed; review it again")
+    return {
+        "schema_version": 1,
+        "job_id": job_id,
+        "job_revision": snapshot.revision,
+        "requested_by": {"user_id": principal.user_id, "organization_id": principal.organization_id},
+        "selection": expected,
+    }
 
 
 class SharedDatabaseAdmission:
@@ -41,23 +63,7 @@ class SharedDatabaseAdmission:
 
     def admit(self, principal: Principal, job_id: str, selection: dict, request_key: str):
         snapshot = self.writer.snapshot(principal, job_id)
-        if not isinstance(selection, dict) or not isinstance(selection.get("allocation"), dict):
-            raise ValueError("Reviewed database choice is required")
-        expected = select_shared_database(
-            snapshot.record,
-            self.pool,
-            config_digest=self.config_digest,
-            connection_limit=selection["allocation"].get("connection_limit"),
-        )
-        if selection != expected:
-            raise ValueError("Database choice changed; review it again")
-        command = {
-            "schema_version": 1,
-            "job_id": job_id,
-            "job_revision": snapshot.revision,
-            "requested_by": {"user_id": principal.user_id, "organization_id": principal.organization_id},
-            "selection": expected,
-        }
+        command = allocation_command(principal, job_id, snapshot, selection, self.pool, self.config_digest)
         # The existing app reservation prevents concurrent deployment/retirement.
         return self.operations.admit(snapshot.record["application_id"], KIND, request_key, command)
 
@@ -103,7 +109,7 @@ class SharedDatabaseWorker:
             raise RecordConflict("Deployment changed before database allocation")
         selection = command["selection"]
         if not isinstance(selection, dict) or not isinstance(selection.get("allocation"), dict):
-            raise ValueError("Invalid allocation selection")
+            raise ValueError("Invalid allocation selection")  # noqa: TRY004 -- malformed persisted document
         expected = select_shared_database(
             snapshot.record,
             self.pool,
@@ -159,7 +165,7 @@ class SharedDatabaseWorker:
             try:
                 receipt = self.service.allocate(principal, job, request)
                 safe = safe_receipt(receipt, request, require_ready=True)
-            except Exception:
+            except Exception:  # noqa: BLE001 -- all uncertain external effects need reconciliation
                 # The adapter may have created a secret/DB. Preserve the intent and reservation.
                 self.operations.interrupt(lease, {"stage": "allocation_outcome_uncertain"})
                 return {"status": "needs_attention", "operation_id": operation_id}

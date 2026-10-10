@@ -72,6 +72,23 @@ def _identity(job_id):
         raise ValueError("Invalid job identity")
 
 
+def authorize_job_snapshot(principal, job_id, snapshot, *, action=Action.DEPLOY):
+    """Validate a detached or transaction-locked owned metadata snapshot."""
+    _identity(job_id)
+    if not isinstance(principal, Principal) or action not in {Action.DEPLOY, Action.RETIRE}:
+        raise PermissionError("Metadata write access denied")
+    if not permitted(principal, action, ResourceOwner(principal.organization_id, principal.user_id)):
+        raise PermissionError("Metadata write access denied")
+    record = snapshot.record
+    owner = owner_from_record(record) if isinstance(record, dict) else None
+    if owner is None or not permitted(principal, action, owner):
+        raise FileNotFoundError("Deployment not found")
+    if record.get("id") != job_id:
+        raise ValueError("Invalid persisted deployment record")
+    _revision(snapshot.revision)
+    return snapshot
+
+
 class DeploymentMetadataWriter:
     def __init__(self, records: VersionedDeploymentRecordStore):
         self.records = records
@@ -83,15 +100,7 @@ class DeploymentMetadataWriter:
         if not permitted(principal, action, ResourceOwner(principal.organization_id, principal.user_id)):
             raise PermissionError("Metadata write access denied")
         snapshot = self.records.load_job(job_id)
-        record = snapshot.record
-        # Shared DB writes never use the local legacy-owner exception.
-        owner = owner_from_record(record) if isinstance(record, dict) else None
-        if owner is None or not permitted(principal, action, owner):
-            raise FileNotFoundError("Deployment not found")
-        if record.get("id") != job_id:
-            raise ValueError("Invalid persisted deployment record")
-        _revision(snapshot.revision)
-        return snapshot
+        return authorize_job_snapshot(principal, job_id, snapshot, action=action)
 
     def snapshot(self, principal, job_id, *, action=Action.DEPLOY) -> StoredJob:
         """Carry the revision with an authorized detached write snapshot."""
