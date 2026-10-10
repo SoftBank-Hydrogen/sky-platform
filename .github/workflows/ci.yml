@@ -74,6 +74,7 @@ jobs:
       - name: UI and PostgreSQL JavaScript tests
         run: |
           node tests/regression/test_postgres_ui.mjs
+          node tests/regression/test_aws_backend_ui.mjs
           node tests/regression/test_deployment_read_ui.mjs
           node tests/regression/test_postgres_migrator.js
           node tests/regression/test_postgres_restore_verifier.mjs

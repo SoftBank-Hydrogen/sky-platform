@@ -35,7 +35,7 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
     requirements = _items(ir.get('requirements'))
     hypotheses = _items(ir.get('hypotheses'))
     constraints = _items(compatibility.get('constraint_results'))
-    candidates = _items(infrastructure.get('candidates'))
+    candidates = [*_items(infrastructure.get('candidates')), *_items(infrastructure.get('architecture_options'))]
     source_revision = _digest(job.get('source_digest'))
     ir_revision = _digest(ir.get('source_revision'))
     source_evidence = []
@@ -60,13 +60,14 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
     evidence_ids = {item['id'] for item in source_evidence}
     referenced_ids = {
         identifier
-        for record in (*requirements, *hypotheses, *constraints)
+        for record in (*requirements, *hypotheses, *constraints, *candidates)
         if isinstance(record, dict)
         for identifier in _items(record.get('evidence_ids'))
         if isinstance(identifier, str)
     }
     selected = [item for item in candidates if isinstance(item, dict) and item.get('selected') is True]
-    decision_consistent = (not candidates or len(selected) == 1 and selected[0].get('id') == job.get('target'))
+    decision_consistent = (not _items(infrastructure.get('candidates')) and not selected
+                          or len(selected) == 1 and selected[0].get('id') == job.get('target'))
     if infrastructure.get('target') is not None and infrastructure['target'] != job.get('target'):
         decision_consistent = False
     decision = job.get('architecture_decision')
@@ -114,6 +115,12 @@ def _decision_trace(job: dict, infrastructure: dict, compatibility: dict) -> dic
         'candidate_evaluations': [
             {'target': item['id'], 'status': item['status'], 'selected': item.get('selected') is True,
              'violated_rule_ids': item.get('violated_rule_ids', [])}
+            | ({'structural_status': item.get('structural_status'),
+                'execution_status': item.get('execution_status'),
+                'reason_codes': item.get('reason_codes', []),
+                'evidence_ids': item.get('evidence_ids', []),
+                'pending_verification_rule_ids': item.get('unknown_rule_ids', [])}
+               if item.get('execution_status') == 'unsupported_by_sky' else {})
             for item in candidates if isinstance(item, dict)
             and isinstance(item.get('id'), str) and isinstance(item.get('status'), str)
         ],
@@ -284,6 +291,9 @@ def _release_rollback_verified(job: dict, result: dict) -> bool:
 
 def deployment_certificate(job: dict, health_history: list[dict] | None = None) -> dict:
     """Build a safe, explicit evidence snapshot without modifying the job."""
+    if job.get("mode") == "native_aws":
+        from application.native_evidence import native_certificate
+        return native_certificate(job)
     if job.get('mode') == 'static_site':
         result = job.get('result') if isinstance(job.get('result'), dict) else {}
         infrastructure = job.get('infrastructure_plan') if isinstance(job.get('infrastructure_plan'), dict) else {}

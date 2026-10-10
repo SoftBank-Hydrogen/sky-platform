@@ -29,6 +29,8 @@ BACKENDS = {
         BackendIdentity("aws-ecs-express", "aws", "ecs_express", "implemented", "automatic"),
         BackendIdentity("aws-s3-cloudfront", "aws", "static_hosting", "implemented", "automatic"),
         BackendIdentity("aws-ecs-standard", "aws", "ecs_standard", "unimplemented", "unavailable"),
+        BackendIdentity("aws-lambda", "aws", "lambda_request_handler", "unimplemented", "unavailable"),
+        BackendIdentity("aws-ec2", "aws", "ec2_host", "unimplemented", "unavailable"),
     )
 }
 

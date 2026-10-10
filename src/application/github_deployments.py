@@ -30,6 +30,7 @@ from application.infrastructure import (
 )
 from engine.application_ir import application_ir
 from engine.architecture_decision import architecture_decision
+from engine.aws_backend_assessment import with_aws_backend_options
 from engine.compilation import compile_decision
 from engine.deployment_policy import deployment_policy
 from engine.static_site import assess_static_site
@@ -206,6 +207,7 @@ class GitHubDeploymentsMixin:
             target = requested_target
             plan = explicit_infrastructure_plan(target, profile)
         plan["compatibility"] = infrastructure_compatibility(profile, target, public_access=public)
+        plan = with_aws_backend_options(profile, plan)
         if plan["compatibility"]["access_mode"] is None:
             raise ValueError("선택한 배포 대상의 공개 범위를 지원하지 않습니다.")
         policy.require(target, plan["compatibility"]["access_mode"])

@@ -116,6 +116,21 @@ def check_deployment(job: dict) -> dict:
                 if not token:
                     raise RuntimeError('No identity token available')
             healthy = probe(url + health_path, token)
+        elif target in {'aws-lambda', 'aws-ec2'}:
+            from adapters.aws.native import AwsLambdaAdapter, AwsEc2Adapter
+            receipt = job.get('native_receipt') or {}
+            if (receipt.get('application_id') != job.get('application_id')
+                    or receipt.get('attempt_id') != job.get('attempt_id')
+                    or receipt.get('target') != target
+                    or result.get('artifact_digest') != receipt.get('artifact_digest')):
+                raise ValueError('Native runtime identity differs from the job')
+            try:
+                adapter_type = AwsLambdaAdapter if target == 'aws-lambda' else AwsEc2Adapter
+                verified = adapter_type(AwsSettings(**job['aws'])).verify(dict(receipt))
+                healthy = verified.get('url') == result.get('url') and verified.get('status') == 'verified'
+            except Exception as error:
+                return {'healthy': False, 'checked_at': checked_at,
+                        'reason': 'Native runtime verification failed (' + type(error).__name__ + ')'}
         elif target == 'aws-s3-cloudfront':
             settings = AwsSettings(**job['aws'])
             healthy = AwsStaticSiteAdapter(settings).check(
