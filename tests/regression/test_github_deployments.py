@@ -11,6 +11,7 @@ from application.github_source import parse_repository_url, resolve_revision, va
 from adapters.aws.ecs import AwsSettings
 from adapters.gcp.cloud_run import CloudRunSettings
 from interfaces.http.server import App
+from domain.access import ResourceOwner
 
 
 FIRST = "a" * 40
@@ -34,6 +35,33 @@ def write_static_archive(_repository, commit, destination):
 
 
 class GitHubSourceTests(unittest.TestCase):
+    def test_poll_inherits_original_subscription_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings("fixture-key", "fixture-model"),
+                      monitor_interval=0, github_poll_interval=60)
+            owner = ResourceOwner("team_a", "user_1")
+            with (patch("application.github_deployments.resolve_revision",
+                        side_effect=[("main", FIRST), ("main", SECOND)]),
+                  patch("application.github_deployments.download_revision", side_effect=write_app_archive),
+                  patch.object(app, "start_job_worker", return_value=True)):
+                created = app.create_github_deployment(
+                    "https://github.com/team/app", None, "demo-app", ["local-docker"],
+                    False, True, owner=owner)
+                source_id = created["source_id"]
+                first = created["deployment"]["id"]
+                app.jobs[first]["status"] = "succeeded"
+                app.save(first)
+                changed = app.poll_github_source(source_id)
+            second = changed["job_ids"][0]
+            self.assertEqual(app.github_sources[source_id]["organization_id"], "team_a")
+            self.assertEqual(app.jobs[first]["created_by"], "user_1")
+            self.assertEqual(app.jobs[second]["organization_id"], "team_a")
+            self.assertEqual(app.jobs[second]["created_by"], "user_1")
+            recovered = App(Path(directory), AISettings("fixture-key", "fixture-model"),
+                            monitor_interval=0, github_poll_interval=0)
+            self.assertEqual(recovered.github_sources[source_id]["organization_id"], "team_a")
+            self.assertEqual(recovered.jobs[second]["created_by"], "user_1")
+
     def test_static_push_preserves_old_release_until_new_one_is_verified(self):
         with tempfile.TemporaryDirectory() as directory:
             app = App(

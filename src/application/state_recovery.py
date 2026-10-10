@@ -10,6 +10,7 @@ from pathlib import Path
 from application.deployment_core import DeploymentPlan
 from adapters.aws.postgres import PostgresRequest
 from engine.deployment_policy import policy_from_record
+from domain.access import owner_from_record
 
 
 JOB_RECORD_VERSION = 1
@@ -99,6 +100,13 @@ class StateRecoveryMixin:
                     raise ValueError('Unsupported job record version')
                 if not re.fullmatch(r"[a-f0-9]{16}", job_id) or job.get("id") != job_id:
                     raise ValueError("Invalid job identity")
+                owner = owner_from_record(job)
+                if ("organization_id" in job or "created_by" in job) and owner is None:
+                    raise ValueError("Invalid job owner")
+                source = job.get("github_source")
+                if isinstance(source, dict) and ("organization_id" in source or "created_by" in source):
+                    if owner_from_record(source) != owner:
+                        raise ValueError("GitHub source owner does not match job owner")
                 if ("application_id" in job and not re.fullmatch(
                         r"[a-z][a-z0-9-]{2,30}", job["application_id"])):
                     raise ValueError("Invalid application identity")

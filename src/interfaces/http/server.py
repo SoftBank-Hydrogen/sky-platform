@@ -67,6 +67,8 @@ from adapters.state.directory import StateDirectoryLock
 from adapters.state.records import DirectoryDeploymentRecordStore
 from ports.state import DeploymentRecordStore
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
+from domain.access import ResourceOwner
+from interfaces.http.auth import LocalTokenAuthenticator
 
 
 def dockerfile_diff(source: Path, plan: dict) -> str:
@@ -87,6 +89,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         self.root.chmod(0o700)
         self.record_store = record_store if record_store is not None else DirectoryDeploymentRecordStore(self.root)
         self.token = secrets.token_urlsafe(32)
+        self.authenticator = LocalTokenAuthenticator(self.token)
         self.lock = threading.Lock()
         self.jobs = {}
         self.active_groups = set()
@@ -410,7 +413,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             if submitted_environment is not None:
                 submitted_environment.clear()
 
-    def create_deployment_group(self, project, application_id, targets, public, source=None):
+    def create_deployment_group(self, project, application_id, targets, public, source=None,
+                                owner: ResourceOwner | None = None):
         """Reserve stateless target jobs from one checked upload before starting any adapter."""
         if (not isinstance(targets, list) or len(targets) < 2 or len(targets) > 3
                 or len(set(targets)) != len(targets)
@@ -458,7 +462,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                        'application_ir': application_ir(profile, digest).as_dict(),
                        'deployment_policy': policy.as_dict(),
                        'events': [], 'source_digest': digest,
-                       'group_id': group_id, 'group_order': order}
+                       'group_id': group_id, 'group_order': order,
+                       **(owner.record() if owner else {})}
                 job['architecture_decision'] = architecture_decision(
                     job['application_ir'], policy, plan).as_dict()
                 job['compilation'] = compile_decision(
@@ -1482,6 +1487,16 @@ def handler_for(app: App):
             self.end_headers()
             self.wfile.write(payload)
 
+        def authenticate_api(self):
+            self.principal = app.authenticator.authenticate(self.headers.get("X-Sky-Token"))
+            if self.principal is None:
+                self.json_response(403, {"error": "Invalid session token"})
+                return False
+            return True
+
+        def request_owner(self):
+            return ResourceOwner(self.principal.organization_id, self.principal.user_id)
+
         def do_GET(self):
             if self.path == "/health":
                 # Service liveness only; user-app readiness is checked separately.
@@ -1497,8 +1512,7 @@ def handler_for(app: App):
                 self.end_headers()
                 self.wfile.write(payload)
                 return
-            if self.headers.get("X-Sky-Token") != app.token:
-                self.json_response(403, {"error": "Invalid session token"})
+            if not self.authenticate_api():
                 return
             if self.path == "/api/config":
                 self.json_response(200, {"ai_available": app.ai_settings.available,
@@ -1634,8 +1648,7 @@ def handler_for(app: App):
             self.json_response(404, {"error": "Not found"})
 
         def do_POST(self):
-            if self.headers.get("X-Sky-Token") != app.token:
-                self.json_response(403, {"error": "Invalid session token"})
+            if not self.authenticate_api():
                 return
             try:
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
@@ -1654,7 +1667,8 @@ def handler_for(app: App):
                         raise ValueError('GitHub 저장소와 배포 설정이 필요합니다.')
                     self.json_response(202, app.create_github_deployment(
                         payload['repository_url'], payload['branch'], payload['application_id'],
-                        payload['targets'], payload['public'], payload['auto_deploy']))
+                        payload['targets'], payload['public'], payload['auto_deploy'],
+                        owner=self.request_owner()))
                     return
                 if re.fullmatch(r'/api/github/sources/[a-f0-9]{16}/(pause|resume|check|retry|disconnect)', self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
@@ -2015,7 +2029,8 @@ def handler_for(app: App):
                             archive.write_bytes(upload)
                         project = extract_project(archive, directory / 'source')
                         group = app.create_deployment_group(
-                            project, application_id, targets, public_flag == 'true')
+                            project, application_id, targets, public_flag == 'true',
+                            owner=self.request_owner())
                     try:
                         app.start_group_worker(group['id'])
                     except Exception:
@@ -2069,7 +2084,8 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         app.create_static_job(
-                            job_id, project, application_id, requested_target="aws-s3-cloudfront"
+                            job_id, project, application_id, requested_target="aws-s3-cloudfront",
+                            owner=self.request_owner(),
                         )
                         app.clear_upload_marker(directory)
                     except Exception:
@@ -2205,6 +2221,7 @@ def handler_for(app: App):
                             app.create_static_job(
                                 job_id, project, application_id, requested_target='auto',
                                 public_url_required=public_url_required == 'true',
+                                owner=self.request_owner(),
                             )
                             app.clear_upload_marker(directory)
                             started = app.start_job_worker(job_id, app.run_static_site)
@@ -2319,6 +2336,7 @@ def handler_for(app: App):
                             app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
+                                **self.request_owner().record(),
                                 "public": access_mode == 'public',
                                 "status": "provisioning" if create_plan_id is not None else "running",
                                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2486,6 +2504,7 @@ def handler_for(app: App):
                         with app.lock:
                             app.jobs[job_id] = {"id": job_id, "status": "planned",
                                 "created_at": datetime.now(timezone.utc).isoformat(),
+                                **self.request_owner().record(),
                                 "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
                             app.save(job_id)
                         app.clear_upload_marker(directory)
