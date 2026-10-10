@@ -15,6 +15,7 @@ from adapters.state.postgres import PostgresDeploymentRecordStore
 from ports.operations import (
     ApplicationBusy,
     ExecutionLease,
+    FailedOutbox,
     IdempotencyConflict,
     Operation,
     OutboxDelivery,
@@ -79,9 +80,20 @@ DDL = (
 
 
 class PostgresOperationStore:
-    def __init__(self, connection_factory, *, workspace="team"):
+    def __init__(
+        self,
+        connection_factory,
+        *,
+        workspace="team",
+        outbox_max_attempts=8,
+        outbox_retry_base=5,
+        outbox_retry_cap=300,
+    ):
         self.records = PostgresDeploymentRecordStore(connection_factory, workspace=workspace)
         self.workspace = workspace
+        self.outbox_max_attempts = self._bounded(outbox_max_attempts, 1, 100)
+        self.outbox_retry_base = self._bounded(outbox_retry_base, 0, 3600)
+        self.outbox_retry_cap = self._bounded(outbox_retry_cap, self.outbox_retry_base, 3600)
 
     def initialize(self):
         self.records.initialize()
@@ -96,13 +108,21 @@ class PostgresOperationStore:
                     "SELECT version FROM sky_state.operation_schema_versions ORDER BY version"
                 ).fetchall()
             )
-            if versions and versions != (1,):
+            if versions not in ((), (1,), (1, 2)):
                 raise ValueError("Unsupported operation schema version")
-            if versions:
-                return
-            for statement in DDL:
-                connection.execute(statement)
-            connection.execute("INSERT INTO sky_state.operation_schema_versions (version) VALUES (1)")
+            if not versions:
+                for statement in DDL:
+                    connection.execute(statement)
+                connection.execute("INSERT INTO sky_state.operation_schema_versions (version) VALUES (1)")
+            if 2 not in versions:
+                connection.execute("""ALTER TABLE sky_state.outbox_events
+                    ADD COLUMN max_attempts integer NOT NULL DEFAULT 8 CHECK (max_attempts BETWEEN 1 AND 100),
+                    ADD COLUMN retry_base_seconds integer NOT NULL DEFAULT 5 CHECK (retry_base_seconds BETWEEN 0 AND 3600),
+                    ADD COLUMN retry_cap_seconds integer NOT NULL DEFAULT 300 CHECK (retry_cap_seconds BETWEEN retry_base_seconds AND 3600),
+                    ADD COLUMN failed_at timestamptz,
+                    ADD COLUMN failure_code text CHECK (failure_code = 'retry_exhausted'),
+                    ADD CONSTRAINT outbox_failure_consistent CHECK ((failed_at IS NULL) = (failure_code IS NULL))""")
+                connection.execute("INSERT INTO sky_state.operation_schema_versions (version) VALUES (2)")
 
     @staticmethod
     def _text(value, label, *, maximum=128):
@@ -187,10 +207,17 @@ class PostgresOperationStore:
     def _outbox(self, connection, operation_id):
         connection.execute(
             """INSERT INTO sky_state.outbox_events
-            (workspace,id,operation_id,attempt_id,application_id,generation)
-            SELECT workspace,%s,id,attempt_id,application_id,generation FROM sky_state.operations
+            (workspace,id,operation_id,attempt_id,application_id,generation,max_attempts,retry_base_seconds,retry_cap_seconds)
+            SELECT workspace,%s,id,attempt_id,application_id,generation,%s,%s,%s FROM sky_state.operations
             WHERE workspace=%s AND id=%s""",
-            (str(uuid4()), self.workspace, operation_id),
+            (
+                str(uuid4()),
+                self.outbox_max_attempts,
+                self.outbox_retry_base,
+                self.outbox_retry_cap,
+                self.workspace,
+                operation_id,
+            ),
         )
 
     def admit(self, application_id, kind, request_key, command):
@@ -412,21 +439,123 @@ class PostgresOperationStore:
                 self._resume_or_block(connection, self._select(connection, identity))
             return tuple(str(row[0]) for row in rows)
 
+    def resolve_attention(
+        self,
+        operation_id,
+        attempt_id,
+        expected_version,
+        expected_intent,
+        receipt,
+        checkpoint,
+        *,
+        resolver,
+        outcome,
+        result=None,
+    ):
+        """Commit an externally verified resolution against the original snapshot.
+
+        The trusted caller must observe the original resource/request outside this
+        transaction and establish that the old executor cannot issue late effects.
+        This method performs no AWS calls and cannot verify arbitrary JSON evidence.
+        Unknown or merely absent resources must remain blocked. Resume means start
+        a new attempt at the verified checkpoint, never blindly repeat the intent.
+        """
+        operation_id, attempt_id = self._uuid(operation_id), self._uuid(attempt_id)
+        resolver = self._text(resolver, "resolver identity")
+        if type(expected_version) is not int or expected_version <= 0:
+            raise ValueError("Invalid expected operation version")
+        if not isinstance(outcome, str) or outcome not in {"succeeded", "failed", "resume"}:
+            raise ValueError("Invalid reconciliation outcome")
+        expected_intent = self._document(expected_intent)
+        receipt, checkpoint = self._document(receipt), self._document(checkpoint)
+        if not expected_intent or not receipt or not checkpoint:
+            raise ValueError("Original intent, verified receipt and checkpoint are required")
+        if outcome == "resume":
+            if result is not None:
+                raise ValueError("Resume cannot include a terminal result")
+        else:
+            result = self._document(result)
+        evidence = self._document(
+            {
+                "observation": receipt,
+                "resolution": {
+                    "resolver": resolver,
+                    "outcome": outcome,
+                    "attempt_id": attempt_id,
+                    "row_version": expected_version,
+                },
+            }
+        )
+        with self.records._connection() as connection:
+            operation = self._select(connection, operation_id, lock=True)
+            if (
+                operation.status != "needs_attention"
+                or not operation.external_pending
+                or operation.attempt_id != attempt_id
+                or operation.row_version != expected_version
+                or operation.external_intent != expected_intent
+            ):
+                return False
+            reserved = connection.execute(
+                """SELECT operation_id FROM sky_state.mutation_scopes
+                WHERE workspace=%s AND application_id=%s AND operation_id=%s FOR UPDATE""",
+                (self.workspace, operation.application_id, operation_id),
+            ).fetchone()
+            if reserved is None:
+                raise ValueError("Reconciliation requires the original application reservation")
+            connection.execute(
+                """UPDATE sky_state.operations SET external_pending=false,
+                external_receipt=%s,checkpoint=%s,row_version=row_version+1
+                WHERE workspace=%s AND id=%s""",
+                (self._json(evidence), self._json(checkpoint), self.workspace, operation_id),
+            )
+            self._event(connection, operation_id, "reconciled_" + outcome)
+            if outcome == "resume":
+                self._resume_or_block(connection, self._select(connection, operation_id))
+            else:
+                connection.execute(
+                    """UPDATE sky_state.operations SET status=%s,result=%s,
+                    lease_owner=NULL,lease_until=NULL WHERE workspace=%s AND id=%s""",
+                    (outcome, self._json(result), self.workspace, operation_id),
+                )
+                connection.execute(
+                    "DELETE FROM sky_state.mutation_scopes WHERE workspace=%s AND operation_id=%s",
+                    (self.workspace, operation_id),
+                )
+                self._event(connection, operation_id, outcome)
+            return True
+
     def claim_outbox(self, owner, *, seconds=60, limit=10):
         owner = self._text(owner, "publisher identity")
         seconds, limit = self._bounded(seconds, 1, 3600), self._bounded(limit, 1, 100)
         with self.records._connection() as connection:
+            # Final claims lost to process/DB failure still consume the durable budget.
+            connection.execute(
+                """WITH exhausted AS (
+                SELECT id FROM sky_state.outbox_events WHERE workspace=%s
+                AND published_at IS NULL AND failed_at IS NULL AND publish_attempts >= max_attempts
+                AND (publisher_until IS NULL OR publisher_until <= clock_timestamp())
+                ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED)
+                UPDATE sky_state.outbox_events e SET failed_at=clock_timestamp(),
+                failure_code='retry_exhausted',publisher_owner=NULL,publisher_until=NULL
+                FROM exhausted WHERE e.workspace=%s AND e.id=exhausted.id""",
+                (self.workspace, limit, self.workspace),
+            )
             rows = connection.execute(
                 """WITH pending AS (
                 SELECT id FROM sky_state.outbox_events WHERE workspace=%s AND published_at IS NULL
+                AND failed_at IS NULL AND publish_attempts < max_attempts
                 AND available_at <= clock_timestamp()
                 AND (publisher_until IS NULL OR publisher_until <= clock_timestamp())
                 ORDER BY available_at,id LIMIT %s FOR UPDATE SKIP LOCKED)
                 UPDATE sky_state.outbox_events e SET publisher_owner=%s,publisher_epoch=publisher_epoch+1,
-                publisher_until=clock_timestamp()+(%s * interval '1 second'),publish_attempts=publish_attempts+1
+                publisher_until=clock_timestamp()+(%s * interval '1 second'),
+                available_at=clock_timestamp()+((%s + LEAST(retry_cap_seconds,
+                    retry_base_seconds * power(2::numeric,LEAST(publish_attempts,30)))) * interval '1 second'),
+                publish_attempts=publish_attempts+1
                 FROM pending WHERE e.workspace=%s AND e.id=pending.id
                 RETURNING e.id,e.publisher_epoch,e.operation_id,e.attempt_id,e.application_id""",
-                (self.workspace, limit, owner, seconds, self.workspace),
+                (self.workspace, limit, owner, seconds, seconds, self.workspace),
             ).fetchall()
             return tuple(
                 OutboxDelivery(str(r[0]), owner, r[1], str(r[2]), str(r[3]), r[4], self.workspace)
@@ -441,25 +570,45 @@ class PostgresOperationStore:
                 connection.execute(
                     """UPDATE sky_state.outbox_events SET published_at=clock_timestamp(),
                 publisher_owner=NULL,publisher_until=NULL WHERE workspace=%s AND id=%s AND published_at IS NULL
-                AND publisher_owner=%s AND publisher_epoch=%s AND publisher_until > clock_timestamp()
-                RETURNING id""",
+                AND failed_at IS NULL AND publisher_owner=%s AND publisher_epoch=%s
+                AND publisher_until > clock_timestamp() RETURNING id""",
                     (self.workspace, delivery.id, delivery.owner, delivery.epoch),
                 ).fetchone()
                 is not None
             )
 
-    def release_outbox(self, delivery, *, delay=5):
-        delay = self._bounded(delay, 0, 3600)
+    def release_outbox(self, delivery, *, delay=None):
+        # Optional explicit delay is for controlled recovery/tests; default is persisted policy.
+        if delay is not None:
+            delay = self._bounded(delay, 0, 3600)
         if delivery.workspace != self.workspace:
             return False
         with self.records._connection() as connection:
             return (
                 connection.execute(
-                    """UPDATE sky_state.outbox_events SET publisher_owner=NULL,
-                publisher_until=NULL,available_at=clock_timestamp()+(%s * interval '1 second')
-                WHERE workspace=%s AND id=%s AND published_at IS NULL AND publisher_owner=%s
-                AND publisher_epoch=%s AND publisher_until > clock_timestamp() RETURNING id""",
+                    """UPDATE sky_state.outbox_events SET publisher_owner=NULL,publisher_until=NULL,
+                available_at=clock_timestamp()+(COALESCE(%s,LEAST(retry_cap_seconds,
+                    retry_base_seconds * power(2::numeric,LEAST(GREATEST(publish_attempts-1,0),30)))) * interval '1 second'),
+                failed_at=CASE WHEN publish_attempts >= max_attempts THEN clock_timestamp() ELSE NULL END,
+                failure_code=CASE WHEN publish_attempts >= max_attempts THEN 'retry_exhausted' ELSE NULL END
+                WHERE workspace=%s AND id=%s AND published_at IS NULL AND failed_at IS NULL
+                AND publisher_owner=%s AND publisher_epoch=%s AND publisher_until > clock_timestamp()
+                RETURNING id""",
                     (delay, self.workspace, delivery.id, delivery.owner, delivery.epoch),
                 ).fetchone()
                 is not None
+            )
+
+    def list_failed_outbox(self, *, limit=100):
+        limit = self._bounded(limit, 1, 1000)
+        with self.records._connection() as connection:
+            rows = connection.execute(
+                """SELECT id,operation_id,attempt_id,application_id,publish_attempts,
+                max_attempts,failure_code,failed_at FROM sky_state.outbox_events
+                WHERE workspace=%s AND failed_at IS NOT NULL ORDER BY failed_at,id LIMIT %s""",
+                (self.workspace, limit),
+            ).fetchall()
+            return tuple(
+                FailedOutbox(str(r[0]), str(r[1]), str(r[2]), r[3], self.workspace, r[4], r[5], r[6], r[7])
+                for r in rows
             )

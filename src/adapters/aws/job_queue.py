@@ -26,7 +26,15 @@ class SqsOperationQueue:
         if client is None:
             import boto3
 
-            client = boto3.client("sqs", region_name=region)
+            from botocore.config import Config
+
+            client = boto3.client(
+                "sqs",
+                region_name=region,
+                config=Config(
+                    connect_timeout=5, read_timeout=20, retries={"mode": "standard", "total_max_attempts": 1}
+                ),
+            )
         self.client = client
         self.url = url
 

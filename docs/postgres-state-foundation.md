@@ -1,6 +1,6 @@
 # PostgreSQL state foundation
 
-This step depends on the state port in PR #6. The adapter implements deployment metadata, health history and GitHub-source settings through the existing port. It is a compatibility projection, not the final operation/lease/outbox schema.
+This step depends on the state port in PR #6. The adapter implements deployment metadata, health history and GitHub-source settings through an explicit versioned write port. It is a compatibility projection, not the final operation/lease/outbox schema.
 
 ## Infrastructure contract
 
@@ -10,7 +10,7 @@ Credential cache is five minutes. A connection failure refreshes the secret and 
 
 ## Schema lifecycle
 
-Explicit initialize() applies migration 1 under a transaction-scoped advisory lock. Unknown schema versions stop startup; errors roll back the migration. Additive, future migrations must preserve old readers during rolling deployment. The current metadata_records JSONB table is namespaced under sky_state and scoped by workspace. It does not create, change or manage the RDS instance; sky-infra owns that resource.
+Explicit initialize() applies migrations 1 and 2 under a transaction-scoped advisory lock. Migration 2 adds a positive revision, starting at 1, without replacing documents or timestamps. Only the known version prefixes are accepted; unknown versions stop startup and errors roll back the migration. All metadata writers must upgrade before enabling this schema; the old unconditional-write adapter cannot participate in a rolling mixture of writers. The current metadata_records JSONB table is namespaced under sky_state and scoped by workspace. It does not create, change or manage the RDS instance; sky-infra owns that resource.
 
 ## Activation gate
 
@@ -23,3 +23,11 @@ The infra contract selects PostgreSQL 17, FIFO message groups by app ID, dedupli
 Install `pip install -e '.[dev,state-postgres]'`. Default tests do not need AWS. Unit tests cover credential rotation, TLS configuration, bounded connection retries and non-retried write failures. GitHub CI starts a disposable PostgreSQL 17 service and sets SKY_TEST_POSTGRES_DSN; integration tests reject non-loopback endpoints. They check independent adapter instances, workspace isolation, concurrent schema initialization, rollback preservation and future-schema refusal. The local integration DB uses plaintext loopback transport; an actual RDS/TLS connection is not claimed by these tests.
 
 A disposable local PostgreSQL server was additionally configured with a test certificate: the factory connected successfully over TLS with a trusted CA and rejected the mismatching host name. This is a local TLS check, not an AWS RDS connectivity check.
+
+## Optimistic concurrency contract
+
+The PostgreSQL adapter implements VersionedDeploymentRecordStore, separately from the legacy file store's unconditional-write contract. load_job returns a detached document, timestamp and revision. load_health_record and load_github_sources_record return equivalent optional snapshots; the original read conveniences still return raw documents.
+
+A save without expected_revision is create-only and conflicts if the record already exists. To update, pass the revision from the snapshot used to construct the new document. The database atomically checks it and increments the revision, returning the new revision. A stale revision, deleted row or duplicate creation raises RecordConflict without changing the document, timestamp or revision. Conflicts are not database failures and are never retried automatically. Reload and explicitly resolve the changes before issuing a new update; do not blindly resubmit a stale document with a newer revision.
+
+Real PostgreSQL tests cover stale writes across independent adapters, eight concurrent writers with exactly one winner, optional-record conflicts, rollback of revision increments and migration of existing version-1 data. This protection does not provide multi-record transactions, worker leases or production runtime wiring.

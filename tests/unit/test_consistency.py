@@ -89,42 +89,52 @@ def test_new_async_postgres_methods_require_callers_to_change(tmp_path):
 
 
 def test_async_caller_paths_do_not_depend_on_server_working_directory(tmp_path, monkeypatch):
-    source, work = tmp_path / 'source', tmp_path / 'work'
+    source, work = tmp_path / "source", tmp_path / "work"
     source.mkdir()
     work.mkdir()
-    (source / 'db.js').write_text("require('node:sqlite'); function open() { return { summary() {} }; }\nmodule.exports = { open };\n")
-    (work / 'db.js').write_text("require('pg'); function open() { return { summary: async () => 1 }; }\nmodule.exports = { open };\n")
+    (source / "db.js").write_text(
+        "require('node:sqlite'); function open() { return { summary() {} }; }\nmodule.exports = { open };\n"
+    )
+    (work / "db.js").write_text(
+        "require('pg'); function open() { return { summary: async () => 1 }; }\nmodule.exports = { open };\n"
+    )
     caller = "const {open} = require('./db'); const db = open(); db.summary();\n"
-    (source / 'server.js').write_text(caller)
-    (work / 'server.js').write_text(caller)
+    (source / "server.js").write_text(caller)
+    (work / "server.js").write_text(caller)
+
     def unavailable_cwd():
-        raise FileNotFoundError(2, 'No such file or directory')
+        raise FileNotFoundError(2, "No such file or directory")
+
     with monkeypatch.context() as patch:
-        patch.setattr(os, 'getcwd', unavailable_cwd)
-        with pytest.raises(ValueError, match='CV-04.*summary@1'):
+        patch.setattr(os, "getcwd", unavailable_cwd)
+        with pytest.raises(ValueError, match="CV-04.*summary@1"):
             check_async_database_callers(source, work)
-    (work / 'server.js').write_text(caller.replace('db.summary();', 'db.summary().then(console.log);'))
+    (work / "server.js").write_text(caller.replace("db.summary();", "db.summary().then(console.log);"))
     with monkeypatch.context() as patch:
-        patch.setattr(os, 'getcwd', unavailable_cwd)
+        patch.setattr(os, "getcwd", unavailable_cwd)
         check_async_database_callers(source, work)
 
 
 def test_async_database_factory_must_resolve_before_server_uses_it(tmp_path):
-    source, work = tmp_path / 'source', tmp_path / 'work'
+    source, work = tmp_path / "source", tmp_path / "work"
     source.mkdir()
     work.mkdir()
-    (source / 'db.js').write_text(
-        "require('node:sqlite'); function openScores() { return {}; }\nmodule.exports = { openScores };\n")
-    (work / 'db.js').write_text(
-        "require('pg'); async function openScores() { return {}; }\nmodule.exports = { openScores };\n")
-    caller = "const {openScores} = require('./db');\nasync function start() {\nconst scores = openScores();\n}\n"
-    (source / 'server.js').write_text(caller)
-    (work / 'server.js').write_text(caller)
-    with pytest.raises(ValueError, match=r'openScores@3.*Remaining source: 3: const scores'):
+    (source / "db.js").write_text(
+        "require('node:sqlite'); function openScores() { return {}; }\nmodule.exports = { openScores };\n"
+    )
+    (work / "db.js").write_text(
+        "require('pg'); async function openScores() { return {}; }\nmodule.exports = { openScores };\n"
+    )
+    caller = (
+        "const {openScores} = require('./db');\nasync function start() {\nconst scores = openScores();\n}\n"
+    )
+    (source / "server.js").write_text(caller)
+    (work / "server.js").write_text(caller)
+    with pytest.raises(ValueError, match=r"openScores@3.*Remaining source: 3: const scores"):
         check_async_database_callers(source, work, include_factories=True)
     # Other targets (AWS) keep the check they were verified with, which does not inspect factories.
     check_async_database_callers(source, work)
-    (work / 'server.js').write_text(caller.replace('= openScores()', '= await openScores()'))
+    (work / "server.js").write_text(caller.replace("= openScores()", "= await openScores()"))
     check_async_database_callers(source, work, include_factories=True)
 
 

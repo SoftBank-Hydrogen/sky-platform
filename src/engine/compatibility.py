@@ -395,17 +395,30 @@ def explicit_infrastructure_plan(
             "planner": "user",
         }
     database_id = create_postgres_id or existing_postgres_id
-    if target == 'cloud-run':
-        if (create_postgres_id is not None or profile.database_engines != ('postgresql',)
-                or 'database' not in profile.requirements
-                or not re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]:[a-z]+-[a-z]+[0-9]+:[a-z][a-z0-9-]+/[a-z][a-z0-9_]{0,62}', database_id or '')):
-            raise ValueError('Cloud SQL 기존 DB 연결 계획이 올바르지 않습니다.')
+    if target == "cloud-run":
+        if (
+            create_postgres_id is not None
+            or profile.database_engines != ("postgresql",)
+            or "database" not in profile.requirements
+            or not re.fullmatch(
+                r"[a-z][a-z0-9-]{4,28}[a-z0-9]:[a-z]+-[a-z]+[0-9]+:[a-z][a-z0-9-]+/[a-z][a-z0-9_]{0,62}",
+                database_id or "",
+            )
+        ):
+            raise ValueError("Cloud SQL 기존 DB 연결 계획이 올바르지 않습니다.")
         return {
-            'target': target, 'workload': 'postgresql-http', 'planner': 'user',
-            'rationale': '선택한 기존 Cloud SQL에 연결하고 SQL 이전 작업을 실행합니다. DB와 Secret은 생성하거나 삭제하지 않습니다.',
-            'evidence': [], 'detected_files': list(profile.evidence),
-            'resources': [*TARGET_RESOURCES[target], 'existing Cloud SQL PostgreSQL', 'one-off SQL migration task'],
-            'database': {'binding': 'existing', 'database_id': database_id},
+            "target": target,
+            "workload": "postgresql-http",
+            "planner": "user",
+            "rationale": "선택한 기존 Cloud SQL에 연결하고 SQL 이전 작업을 실행합니다. DB와 Secret은 생성하거나 삭제하지 않습니다.",
+            "evidence": [],
+            "detected_files": list(profile.evidence),
+            "resources": [
+                *TARGET_RESOURCES[target],
+                "existing Cloud SQL PostgreSQL",
+                "one-off SQL migration task",
+            ],
+            "database": {"binding": "existing", "database_id": database_id},
         }
     if (
         target != "aws-ecs-express"

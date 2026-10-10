@@ -123,3 +123,12 @@ def test_secrets_manager_failure_does_not_fall_back_to_local_credentials():
         RotatingDatabaseConnection(settings(), secrets_client=secrets, connect=connect)()
     assert "private-token" not in str(error.value)
     connect.assert_not_called()
+
+
+@pytest.mark.parametrize("revision", [True, False, 0, -1, "1", 1.5, 9223372036854775807])
+def test_invalid_expected_revision_does_not_open_connection(revision):
+    connect = Mock()
+    store = PostgresDeploymentRecordStore(connect)
+    with pytest.raises(ValueError, match="revision"):
+        store.save_job("job1", {}, expected_revision=revision)
+    connect.assert_not_called()

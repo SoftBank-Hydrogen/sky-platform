@@ -65,6 +65,19 @@ class OutboxDelivery:
         }
 
 
+@dataclass(frozen=True)
+class FailedOutbox:
+    id: str
+    operation_id: str
+    attempt_id: str
+    application_id: str
+    workspace: str
+    publish_attempts: int
+    max_attempts: int
+    failure_code: str
+    failed_at: datetime
+
+
 class OperationStore(Protocol):
     def admit(self, application_id: str, kind: str, request_key: str, command: dict) -> Operation: ...
 
@@ -88,10 +101,26 @@ class OperationStore(Protocol):
 
     def recover_expired(self, *, limit: int = 100) -> tuple[str, ...]: ...
 
+    def resolve_attention(
+        self,
+        operation_id: str,
+        attempt_id: str,
+        expected_version: int,
+        expected_intent: dict,
+        receipt: dict,
+        checkpoint: dict,
+        *,
+        resolver: str,
+        outcome: str,
+        result: dict | None = None,
+    ) -> bool: ...
+
     def claim_outbox(
         self, owner: str, *, seconds: int = 60, limit: int = 10
     ) -> tuple[OutboxDelivery, ...]: ...
 
     def confirm_outbox(self, delivery: OutboxDelivery) -> bool: ...
 
-    def release_outbox(self, delivery: OutboxDelivery, *, delay: int = 5) -> bool: ...
+    def release_outbox(self, delivery: OutboxDelivery, *, delay: int | None = None) -> bool: ...
+
+    def list_failed_outbox(self, *, limit: int = 100) -> tuple[FailedOutbox, ...]: ...

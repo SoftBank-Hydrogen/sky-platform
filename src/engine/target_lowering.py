@@ -82,10 +82,10 @@ def lower_target_configuration(plan: dict, deployment_ir: dict) -> dict:
             raise ValueError("CV-09: PostgreSQL binding is missing")
         binding = database["binding"]
         required = "new RDS PostgreSQL" if binding == "create" else "existing RDS PostgreSQL"
-        if target == 'cloud-run':
-            if binding != 'existing':
-                raise ValueError('CV-09: Cloud SQL creation is not implemented')
-            required = 'existing Cloud SQL PostgreSQL'
+        if target == "cloud-run":
+            if binding != "existing":
+                raise ValueError("CV-09: Cloud SQL creation is not implemented")
+            required = "existing Cloud SQL PostgreSQL"
         if (
             target not in {"aws-ecs-express", "cloud-run"}
             or not isinstance(database.get("database_id"), str)
@@ -96,8 +96,13 @@ def lower_target_configuration(plan: dict, deployment_ir: dict) -> dict:
             or sqlite_volume is not None
         ):
             raise ValueError("CV-09: PostgreSQL resources disagree with the selected binding")
-        database_mode = ('existing_cloud_sql' if target == 'cloud-run' else
-                         'create_rds' if binding == 'create' else 'existing_rds')
+        database_mode = (
+            "existing_cloud_sql"
+            if target == "cloud-run"
+            else "create_rds"
+            if binding == "create"
+            else "existing_rds"
+        )
     elif local_sqlite_binding:
         if (
             target not in {"local-docker", "onprem-compose"}

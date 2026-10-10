@@ -26,6 +26,7 @@ from engine.static_site import assess_static_site
 from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from application.application_registry import ApplicationRegistry
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.aws.network import ServiceNetworkRequest, discover_default_network
@@ -68,7 +69,9 @@ from adapters.state.directory import StateDirectoryLock
 from adapters.state.records import DirectoryDeploymentRecordStore
 from ports.state import DeploymentRecordStore
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
-from interfaces.http.auth import LocalTokenAuthenticator
+from domain.access import AccessResult, Action, LoginSource, ResourceOwner, Role, permitted, record_access
+from interfaces.http.alb_identity import AlbRequestAuthenticator
+from interfaces.http.auth import LocalTokenAuthenticator, RequestAuthenticator
 
 
 def dockerfile_diff(source: Path, plan: dict) -> str:
@@ -83,13 +86,22 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
-                 github_poll_interval: int = 60, *, record_store: DeploymentRecordStore | None = None):
+                 github_poll_interval: int = 60, authenticator: RequestAuthenticator | None = None,
+                 *, record_store: DeploymentRecordStore | None = None):
         self.root = root.resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
+        self.hosted = authenticator is not None
+        if self.hosted:
+            if isinstance(authenticator, LocalTokenAuthenticator) or not callable(
+                    getattr(authenticator, 'authenticate_request', None)):
+                raise ValueError('Hosted mode requires a request authenticator')
+            self.token = None
+            self.authenticator = authenticator
+        else:
+            self.token = secrets.token_urlsafe(32)
+            self.authenticator = LocalTokenAuthenticator(self.token)
         self.record_store = record_store if record_store is not None else DirectoryDeploymentRecordStore(self.root)
-        self.token = secrets.token_urlsafe(32)
-        self.authenticator = LocalTokenAuthenticator(self.token)
         self.lock = threading.Lock()
         self.jobs = {}
         self.active_groups = set()
@@ -108,6 +120,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
         self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
         self.recovery_warnings = []
+        self.application_registry = ApplicationRegistry(self.root)
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings,
             max_baseline_730h_usd=os.environ.get('SKY_MAX_RDS_730H_USD'))
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
@@ -124,7 +137,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
 
 
 
-    def summaries(self):
+    def summaries(self, principal=None):
         with self.lock:
             return [{"id": job["id"], "status": job["status"], "created_at": job.get("created_at"),
                      "application_id": job.get("application_id", job["id"]),
@@ -134,7 +147,49 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                      "result": job.get("result"),
                      "last_health": (self.health_history.get(job['id']) or [None])[-1],
                      "monitor_error": self.monitor_errors.get(job['id'])}
-                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)]
+                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
+                    if principal is None or record_access(principal, Action.READ, job) is AccessResult.GRANTED]
+
+    def application_access(self, principal, application_id, action):
+        with self.lock:
+            records = [job for job in self.jobs.values() if job.get('application_id') == application_id]
+            records.extend(source for source in self.github_sources.values()
+                           if source.get('application_id') == application_id)
+            registered = self.application_registry.records.get(application_id)
+        if registered is not None:
+            records.append(registered)
+        if not records:
+            if principal.login_source is LoginSource.LOCAL and principal.role is Role.ADMIN:
+                return AccessResult.GRANTED
+            return AccessResult.NOT_FOUND
+        decisions = [record_access(principal, action, record) for record in records]
+        if AccessResult.NOT_FOUND in decisions:
+            return AccessResult.NOT_FOUND
+        return AccessResult.FORBIDDEN if AccessResult.FORBIDDEN in decisions else AccessResult.GRANTED
+
+    def register_application(self, application_id, principal):
+        with self.lock:
+            existing = [job for job in self.jobs.values() if job.get('application_id') == application_id]
+            existing.extend(source for source in self.github_sources.values()
+                            if source.get('application_id') == application_id)
+            if application_id not in self.application_registry.records and (
+                    application_id in self.postgres_operations.operations
+                    or application_id in self.postgres_operations.cleaned_records
+                    or application_id in self.postgres_operations.untrusted_applications
+                    or self.postgres_operations.untrusted_unknown
+                    or application_id in self.postgres_retirement_operations.operations
+                    or application_id in self.network_operations.operations
+                    or any(operation.get('application_id') == application_id
+                           for operation in self.snapshot_operations.operations.values())):
+                raise ValueError('Application ID is unavailable')
+            return self.application_registry.register(
+                application_id, ResourceOwner(principal.organization_id, principal.user_id), existing)
+
+    def application_summaries(self, principal):
+        with self.lock:
+            return [{'id': application_id, **record}
+                    for application_id, record in sorted(self.application_registry.records.items())
+                    if record_access(principal, Action.READ, record) is AccessResult.GRANTED]
 
     def releases(self, application_id):
         with self.lock:
@@ -413,7 +468,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             if submitted_environment is not None:
                 submitted_environment.clear()
 
-    def create_deployment_group(self, project, application_id, targets, public, source=None):
+    def create_deployment_group(self, project, application_id, targets, public, source=None,
+                                owner: ResourceOwner | None = None):
         """Reserve stateless target jobs from one checked upload before starting any adapter."""
         if (not isinstance(targets, list) or len(targets) < 2 or len(targets) > 3
                 or len(set(targets)) != len(targets)
@@ -461,7 +517,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                        'application_ir': application_ir(profile, digest).as_dict(),
                        'deployment_policy': policy.as_dict(),
                        'events': [], 'source_digest': digest,
-                       'group_id': group_id, 'group_order': order}
+                       'group_id': group_id, 'group_order': order,
+                       **(owner.record() if owner else {})}
                 job['architecture_decision'] = architecture_decision(
                     job['application_ir'], policy, plan).as_dict()
                 job['compilation'] = compile_decision(
@@ -1475,6 +1532,10 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
 
 
 def handler_for(app: App):
+    from interfaces.http.deployment_reads import DatabaseReadApp, handler_for_reads
+    if isinstance(app, DatabaseReadApp):
+        return handler_for_reads(app)
+
     class Handler(BaseHTTPRequestHandler):
         def json_response(self, status, data):
             payload = json.dumps(data, ensure_ascii=False).encode()
@@ -1486,10 +1547,78 @@ def handler_for(app: App):
             self.wfile.write(payload)
 
         def authenticate_api(self):
-            self.principal = app.authenticator.authenticate(self.headers.get("X-Sky-Token"))
+            if app.hosted and self.headers.get('X-Sky-Token') is not None:
+                self.json_response(403, {"error": "Local session token is unavailable in hosted mode"})
+                return False
+            self.principal = app.authenticator.authenticate_request(self.headers)
+            if app.hosted and self.principal is not None and self.principal.login_source is LoginSource.LOCAL:
+                self.principal = None
             if self.principal is None:
                 self.json_response(403, {"error": "Invalid session token"})
                 return False
+            return True
+
+        def request_owner(self):
+            return ResourceOwner(self.principal.organization_id, self.principal.user_id)
+
+        def require_access(self, decision):
+            if decision is AccessResult.GRANTED:
+                return True
+            if decision is AccessResult.FORBIDDEN:
+                self.json_response(403, {'error': 'Insufficient permission'})
+            else:
+                self.json_response(404, {'error': 'Not found'})
+            return False
+
+        def authorize_resource(self, method):
+            parts = self.path.split('/')
+            if len(parts) < 3 or parts[1] != 'api':
+                return True
+            if method == 'POST' and self.path in {
+                    '/api/analyze', '/api/applications', '/api/deployments', '/api/static-deployments',
+                    '/api/deployment-groups', '/api/github/deployments'}:
+                if not permitted(self.principal, Action.DEPLOY, self.request_owner()):
+                    return self.require_access(AccessResult.FORBIDDEN)
+            if len(parts) < 4:
+                return True
+            kind, identifier = parts[2], parts[3]
+            action = Action.READ if method == 'GET' else Action.DEPLOY
+            if kind == 'jobs' or kind == 'deployments':
+                if not re.fullmatch(r'[a-f0-9]{16}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and (self.path.endswith('/retire')
+                                         or self.path.endswith('/migration/cleanup')):
+                    action = Action.RETIRE
+                with app.lock:
+                    record = app.jobs.get(identifier)
+                return self.require_access(record_access(self.principal, action, record))
+            if kind == 'deployment-groups':
+                if not re.fullmatch(r'[a-f0-9]{16}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                with app.lock:
+                    records = [job for job in app.jobs.values() if job.get('group_id') == identifier]
+                decisions = [record_access(self.principal, action, record) for record in records]
+                if not decisions or AccessResult.NOT_FOUND in decisions:
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if AccessResult.FORBIDDEN in decisions:
+                    return self.require_access(AccessResult.FORBIDDEN)
+                return True
+            if kind == 'github' and len(parts) >= 5 and parts[3] == 'sources':
+                source_id = parts[4]
+                if not re.fullmatch(r'[a-f0-9]{16}', source_id):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and self.path.endswith('/disconnect'):
+                    action = Action.RETIRE
+                with app.lock:
+                    record = app.github_sources.get(source_id)
+                return self.require_access(record_access(self.principal, action, record))
+            if kind == 'applications':
+                if not re.fullmatch(r'[a-z][a-z0-9-]{2,30}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and ('/retirement/start' in self.path
+                                         or '/failed-create/start' in self.path):
+                    action = Action.RETIRE
+                return self.require_access(app.application_access(self.principal, identifier, action))
             return True
 
         def do_GET(self):
@@ -1498,8 +1627,10 @@ def handler_for(app: App):
                 self.json_response(200, {"status": "ok"})
                 return
             if self.path == "/":
+                if app.hosted and not self.authenticate_api():
+                    return
                 content = (ASSET_ROOT / "static/index.html").read_text()
-                payload = content.replace("__TOKEN__", app.token).encode()
+                payload = content.replace("__TOKEN__", app.token or '').encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
@@ -1508,6 +1639,8 @@ def handler_for(app: App):
                 self.wfile.write(payload)
                 return
             if not self.authenticate_api():
+                return
+            if not self.authorize_resource('GET'):
                 return
             if self.path == "/api/config":
                 self.json_response(200, {"ai_available": app.ai_settings.available,
@@ -1534,10 +1667,13 @@ def handler_for(app: App):
                     "recovery_warnings": app.recovery_warnings})
                 return
             if self.path == "/api/jobs":
-                self.json_response(200, app.summaries())
+                self.json_response(200, app.summaries(self.principal))
+                return
+            if self.path == "/api/applications":
+                self.json_response(200, app.application_summaries(self.principal))
                 return
             if self.path == "/api/github/sources":
-                self.json_response(200, app.github_source_summaries())
+                self.json_response(200, app.github_source_summaries(self.principal))
                 return
             if re.fullmatch(r'/api/deployment-groups/[a-f0-9]{16}', self.path):
                 try:
@@ -1645,7 +1781,27 @@ def handler_for(app: App):
         def do_POST(self):
             if not self.authenticate_api():
                 return
+            if not self.authorize_resource('POST'):
+                return
             try:
+                if self.path == '/api/applications':
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('앱 등록 요청은 256바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict) or set(payload) != {'application_id'}:
+                        raise ValueError('앱 ID가 필요합니다.')
+                    application_id = payload['application_id']
+                    if not isinstance(application_id, str) or not re.fullmatch(
+                            r'[a-z][a-z0-9-]{2,30}', application_id):
+                        raise ValueError('앱 ID는 소문자로 시작하는 3~31자의 소문자·숫자·하이픈이어야 합니다.')
+                    try:
+                        created = app.register_application(application_id, self.principal)
+                    except ValueError as exc:
+                        self.json_response(409, {'error': str(exc)})
+                        return
+                    self.json_response(201 if created else 200, {'application_id': application_id})
+                    return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('WebSocket 검사 요청에는 본문을 넣을 수 없습니다.')
@@ -1660,9 +1816,13 @@ def handler_for(app: App):
                             'repository_url', 'branch', 'application_id', 'targets',
                             'public', 'auto_deploy'}):
                         raise ValueError('GitHub 저장소와 배포 설정이 필요합니다.')
+                    if not self.require_access(app.application_access(
+                            self.principal, payload['application_id'], Action.DEPLOY)):
+                        return
                     self.json_response(202, app.create_github_deployment(
                         payload['repository_url'], payload['branch'], payload['application_id'],
-                        payload['targets'], payload['public'], payload['auto_deploy']))
+                        payload['targets'], payload['public'], payload['auto_deploy'],
+                        owner=self.request_owner()))
                     return
                 if re.fullmatch(r'/api/github/sources/[a-f0-9]{16}/(pause|resume|check|retry|disconnect)', self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
@@ -1998,6 +2158,9 @@ def handler_for(app: App):
                         return
                     targets = self.headers.get('X-Deploy-Targets', '').split(',')
                     application_id = self.headers.get('X-Application-Id', '')
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     public_flag = self.headers.get('X-Public-Access', 'false')
                     if public_flag not in {'true', 'false'}:
                         raise ValueError('공개 접근 선택이 올바르지 않습니다.')
@@ -2023,7 +2186,8 @@ def handler_for(app: App):
                             archive.write_bytes(upload)
                         project = extract_project(archive, directory / 'source')
                         group = app.create_deployment_group(
-                            project, application_id, targets, public_flag == 'true')
+                            project, application_id, targets, public_flag == 'true',
+                            owner=self.request_owner())
                     try:
                         app.start_group_worker(group['id'])
                     except Exception:
@@ -2054,6 +2218,9 @@ def handler_for(app: App):
                     application_id = self.headers.get("X-Application-Id", "")
                     if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
                         raise ValueError("앱 ID는 소문자로 시작하는 3~31자의 소문자·숫자·하이픈이어야 합니다.")
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     size = int(self.headers.get("Content-Length", "0"))
                     content_type = self.headers.get("Content-Type", "")
                     folder_upload = content_type.lower().startswith("multipart/form-data;")
@@ -2077,7 +2244,8 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         app.create_static_job(
-                            job_id, project, application_id, requested_target="aws-s3-cloudfront"
+                            job_id, project, application_id, requested_target="aws-s3-cloudfront",
+                            owner=self.request_owner(),
                         )
                         app.clear_upload_marker(directory)
                     except Exception:
@@ -2123,6 +2291,9 @@ def handler_for(app: App):
                     application_id = self.headers.get("X-Application-Id", "app-" + job_id)
                     if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
                         raise ValueError("Application ID must be 3-31 lowercase letters, digits or hyphens, starting with a letter")
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
                     if postgres_flag not in {'true', 'false'}:
                         raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')
@@ -2227,6 +2398,7 @@ def handler_for(app: App):
                             app.create_static_job(
                                 job_id, project, application_id, requested_target='auto',
                                 public_url_required=public_url_required == 'true',
+                                owner=self.request_owner(),
                             )
                             app.clear_upload_marker(directory)
                             started = app.start_job_worker(job_id, app.run_static_site)
@@ -2345,6 +2517,7 @@ def handler_for(app: App):
                             app.jobs[job_id] = {"id": job_id, "mode": "agent", "target": target,
                                 "requested_target": requested_target, "infrastructure_plan": infrastructure_plan,
                                 "application_id": application_id,
+                                **self.request_owner().record(),
                                 "public": access_mode == 'public',
                                 "status": "provisioning" if create_plan_id is not None else "running",
                                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2514,6 +2687,7 @@ def handler_for(app: App):
                         with app.lock:
                             app.jobs[job_id] = {"id": job_id, "status": "planned",
                                 "created_at": datetime.now(timezone.utc).isoformat(),
+                                **self.request_owner().record(),
                                 "plan": asdict(plan), "diff": diff, "project": str(project), "events": []}
                             app.save(job_id)
                         app.clear_upload_marker(directory)
@@ -2568,18 +2742,57 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
                         help="HTTP bind address; use 0.0.0.0 behind the service load balancer")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--state-dir", type=Path, default=Path(default_state_dir))
+    parser.add_argument("--auth-mode", choices=("local", "alb"), default="local")
+    parser.add_argument("--alb-trusts-file", type=Path)
+    parser.add_argument("--memberships-file", type=Path)
     parser.add_argument("--monitor-interval", type=int, default=300,
                         help="Seconds between health checks (60–3600; 0 disables monitoring)")
     parser.add_argument("--github-poll-interval", type=int, default=60,
                         help="Seconds between public GitHub branch checks (60–3600; 0 disables checks)")
+    parser.add_argument("--read-only-database", action="store_true",
+                        help="Read persisted PostgreSQL deployments without local writers")
     args = parser.parse_args()
+    if args.auth_mode == 'local' and (args.alb_trusts_file or args.memberships_file):
+        parser.error('ALB trust and membership files require --auth-mode alb')
+    if args.auth_mode == 'alb' and (not args.alb_trusts_file or not args.memberships_file):
+        parser.error('--auth-mode alb requires both trust and membership files')
+    authenticator = None
+    if args.auth_mode == 'alb':
+        try:
+            authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            parser.error(f'Invalid hosted identity configuration: {exc}')
+    if args.read_only_database:
+        if authenticator is None and args.host not in {'127.0.0.1', 'localhost'}:
+            parser.error('--read-only-database requires loopback or --auth-mode alb')
+        from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+        from adapters.state.deployment_reads import PostgresDeploymentReads
+        from application.deployment_reads import DeploymentReadService
+        from interfaces.http.deployment_reads import DatabaseReadApp
+        try:
+            settings = PostgresStateSettings.from_environment()
+            workspace = os.environ.get('SKY_STATE_WORKSPACE', 'team')
+            reads = PostgresDeploymentReads(RotatingDatabaseConnection(settings), workspace=workspace)
+        except ValueError as error:
+            parser.error(str(error))
+        app = DatabaseReadApp(DeploymentReadService(reads), workspace=workspace,
+                              authenticator=authenticator)
+        server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
+        print(f"{product_name} (read-only): http://{args.host}:{args.port}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return
     if args.monitor_interval != 0 and not 60 <= args.monitor_interval <= 3600:
         parser.error('--monitor-interval must be 0 or 60–3600 seconds')
     if args.github_poll_interval != 0 and not 60 <= args.github_poll_interval <= 3600:
         parser.error('--github-poll-interval must be 0 or 60–3600 seconds')
     with StateDirectoryLock(args.state_dir) as state_dir:
         app = App(state_dir, monitor_interval=args.monitor_interval,
-                  github_poll_interval=args.github_poll_interval)
+                  github_poll_interval=args.github_poll_interval, authenticator=authenticator)
         server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
         stop_monitor = threading.Event()
         if app.monitor_interval:

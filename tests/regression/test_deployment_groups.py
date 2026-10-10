@@ -507,6 +507,9 @@ class DeploymentGroupTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.json_response.call_args.args[0], 202)
         self.assertEqual(len(self.app.jobs), 2)
+        self.assertTrue(all(job.get('organization_id') == 'local_workspace'
+                            and job.get('created_by') == 'local_operator'
+                            for job in self.app.jobs.values()))
         handler.headers['X-Postgres-Existing'] = 'true'
         handler.rfile = io.BytesIO(archive())
         handler.json_response.reset_mock()

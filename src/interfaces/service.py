@@ -4,7 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from adapters.state.service_volume import initialize_service_state, require_service_state
+from adapters.state.service_volume import (
+    initialize_service_state,
+    require_service_state,
+)
 
 
 def main():
@@ -17,7 +20,20 @@ def main():
     parser.add_argument(
         "--initialize-state", action="store_true", help="Initialize an empty mounted directory and exit"
     )
+    parser.add_argument(
+        "--read-only-database",
+        action="store_true",
+        help="Read PostgreSQL records without a persistent state directory",
+    )
     options, server_args = parser.parse_known_args()
+    if options.read_only_database:
+        if options.initialize_state:
+            parser.error("--read-only-database cannot initialize local state")
+        from interfaces.cli import main as run_platform
+
+        sys.argv = [sys.argv[0], *server_args, "--read-only-database"]
+        run_platform()
+        return
     if options.initialize_state and server_args:
         parser.error("--initialize-state accepts only --state-dir; it does not start the server")
     try:
