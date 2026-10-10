@@ -23,7 +23,7 @@ from application.source_transform import source_transform_record, verify_source_
 from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_async_database_callers, check_database_consistency, check_port_consistency,
-    check_postgres_node_dependency, check_source_change_scope,
+    check_postgres_node_dependency, check_postgres_numeric_parsers, PG_NUMERIC_PARSERS, check_source_change_scope,
     check_sqlite_migration_consistency, check_websocket_state_consistency,
     check_target_resource_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
@@ -73,6 +73,7 @@ Use tools to complete deployment; do not stop after analysis or advice. Use the 
 Cloud Run and AWS ECS Express require linux/amd64 images and listening on 0.0.0.0 with the configured PORT.
 The deployment adapter handles cloud infrastructure, credentials and resource limits; do not request cloud credentials.
 Read the entry point and its existing Dockerfile, package.json, or Python source. Repair deployment issues in the working copy, configure and deploy.
+Group related changes to the same file into one bounded patch when possible, including all async callers in that file. A successful patch invalidates the read snapshot: read the file again before any further patch to it. Avoid spending the tool budget on one-line patches and stale-read retries.
 For an existing Dockerfile, use its runtime and startup instructions. Without one, select Node.js by package.json or Python by an existing root server.py/app.py/main.py. Add an npm start script if a Node app needs one.
 Fix loopback-only binding to 0.0.0.0 and make the app use the configured PORT environment variable.
 Keep application behavior intact. Do not replace the application with a sample or fake health endpoint.
@@ -99,6 +100,16 @@ Only deploy_application returning a verified URL means success. Never claim succ
 Use concise Korean messages for explanations to the user. No arbitrary shell command tool exists.
 """
 
+INSTRUCTIONS = INSTRUCTIONS.replace(
+    "PostgreSQL client methods are asynchronous.",
+    "For SQLite-converted Node apps using pg, preserve existing numeric JSON fields through the driver, "
+    "not per-field Number() patches. In the module creating each pg Pool/Client, register these INT8 "
+    "and NUMERIC parsers once at module scope, before constructing the connection or making any query. "
+    "Keep unsafe large integers as strings. Do not narrow the migration's BIGINT columns. "
+    "Reuse or extend existing pg imports without duplicate declarations. "
+    "For ESM use import { types } from 'pg' instead of require. CV-04 rejects missing or late registration.\n"
+    + PG_NUMERIC_PARSERS + "\nPostgreSQL client methods are asynchronous.")
+
 # Cloud Run (GCP) additions. They are inserted only for that target, so other targets (AWS) keep the
 # instructions they were verified with. Promote a block to INSTRUCTIONS after verifying it on AWS too.
 CLOUD_SQL_TRANSPORT = """For managed Cloud SQL, PGHOST is a Unix socket directory and PGSSLMODE is disable: the Cloud SQL
@@ -108,8 +119,6 @@ DATABASE_URL from this socket path. Use the supplied PG environment directly.
 ASYNC_CALLER_GUIDANCE = """If a database factory becomes async, await its result before exposing the server; propagate async through
 the server factory and startup caller. Update every WebSocket payload, completed-round save and shutdown
 call, not only HTTP routes. For timer callbacks, keep state advancement ordered and handle async save failures.
-Convert PostgreSQL BIGINT strings to numbers for existing numeric JSON fields when safely representable;
-preserve the application's HTTP and WebSocket response schema.
 """
 _TRANSPORT_ANCHOR = "PostgreSQL client methods are asynchronous."
 _ASYNC_ANCHOR = "every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.\n"
@@ -459,7 +468,7 @@ class DeploymentTools:
             updates['npm_lock_sync'] = None
         self.checkpoint(**updates)
         return {"changed": path, "patch_sha256": hashlib.sha256(new_text.encode()).hexdigest(),
-                "next": "Reconfigure before deploying"}
+                "next": "Read this file again before another patch; configure deployment after all edits."}
 
     def configure_deployment(self, start_script, build_script, port, health_path, required_env):
         if not isinstance(required_env, list) or len(required_env) > 40:
@@ -508,6 +517,7 @@ class DeploymentTools:
             raise ValueError("Configure deployment after the most recent edit first")
         if self.sqlite_conversion is not None:
             check_postgres_node_dependency(self.work)
+            check_postgres_numeric_parsers(self.work)
             check_async_database_callers(self.original, self.work,
                                          include_factories=self.target == "cloud-run")
         if self.deployment_policy is not None:

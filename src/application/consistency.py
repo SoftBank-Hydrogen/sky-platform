@@ -29,6 +29,112 @@ _ASYNC_METHOD_EXTENDED = re.compile(
     r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+(?:function\s+)?([A-Za-z_$][\w$]*)\s*\(")
 _NODE_POSTGRES_IMPORT = re.compile(r"\b(?:require\s*\(\s*|from\s+)['\"](pg|postgres)['\"]")
 
+PG_NUMERIC_PARSERS = """const { types } = require('pg');
+const toNumber = v => { const n = Number(v); return Number.isSafeInteger(n) ? n : v; };
+types.setTypeParser(20, toNumber);    // BIGINT, COUNT(*)
+types.setTypeParser(1700, v => { const n = Number(v); return Number.isFinite(n) && (Number.isSafeInteger(n) || !Number.isInteger(n)) ? n : v; });  // SUM/AVG 등"""
+
+_JS_TRIVIA = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
+_JS_NAME = r"[A-Za-z_$][\w$]*"
+
+
+def _js_mask(source: str, *, strings: bool) -> str:
+    """Keep offsets/lines while excluding comments and, optionally, string contents."""
+    def mask(match):
+        text = match[0]
+        if not strings and not text.startswith(("//", "/*")):
+            return text
+        return re.sub(r"[^\n]", " ", text)
+    return _JS_TRIVIA.sub(mask, source)
+
+
+def _module_statement(code: str, offset: int) -> bool:
+    # Require eager, standalone module initialization, never a function/conditional callback.
+    prefix = code[:offset].rstrip()
+    return (all(prefix.count(a) == prefix.count(b) for a, b in (("{", "}"), ("(", ")"), ("[", "]")))
+            and (not prefix or prefix[-1] in ";}"))
+
+
+def check_postgres_numeric_parsers(work: Path) -> None:
+    """Conservative CV-04 guard for pg modules in approved SQLite conversions.
+
+    Require both registrations in each importing module, at module scope before Pool/Client
+    construction or queries. Cross-module initialization and deferred registration are not proven
+    by this check: use the supplied local initialization pattern instead. Callback semantics still
+    require runtime/API tests; this is not a general JavaScript execution analyser.
+    """
+    for source in sorted(work.rglob("*")):
+        if (source.suffix not in {".js", ".cjs", ".mjs"} or source.is_symlink() or not source.is_file()
+                or any(p in {"node_modules", "dist", "build", "vendor", "tests"}
+                       for p in source.relative_to(work).parts)):
+            continue
+        raw = source.read_text(encoding="utf-8", errors="replace")
+        imports = _js_mask(raw, strings=False)
+        if not re.search(r"\b(?:require\s*\(\s*|from\s+)['\"]pg['\"]", imports):
+            continue
+        code = _js_mask(raw, strings=True)
+        namespaces, types, constructors, ready = set(), set(), set(), {}
+        # const pg = require('pg'); import pg from 'pg'; import * as pg from 'pg';
+        for pattern in (
+            rf"\b(?:const|let|var)\s+({_JS_NAME})\s*=\s*require\s*\(\s*['\"]pg['\"]\s*\)",
+            rf"\bimport\s+({_JS_NAME})\s*(?:,\s*\{{[^}}]*\}}\s*)?from\s*['\"]pg['\"]",
+            rf"\bimport\s+\*\s+as\s+({_JS_NAME})\s+from\s*['\"]pg['\"]",
+        ):
+            for match in re.finditer(pattern, imports):
+                if _module_statement(code, match.start()):
+                    namespaces.add(match[1])
+                    ready[match[1] + '.types'] = match.end()
+        # Named CJS/ESM bindings, including renamed bindings.
+        bindings = list(re.finditer(r"\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\s*\(\s*['\"]pg['\"]", imports))
+        bindings += list(re.finditer(r"\bimport\s*(?:" + _JS_NAME + r"\s*,\s*)?\{([^}]+)\}\s*from\s*['\"]pg['\"]", imports))
+        for namespace in namespaces:
+            bindings += list(re.finditer(r"\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*" + re.escape(namespace) + r"\b", imports))
+        for binding in bindings:
+            if not _module_statement(code, binding.start()):
+                continue
+            for part in binding[1].split(","):
+                m = re.fullmatch(rf"\s*(types|Pool|Client)(?:\s*(?::|\bas\b)\s*({_JS_NAME}))?\s*", part)
+                if m:
+                    (types if m[1] == "types" else constructors).add(m[2] or m[1])
+                    if m[1] == "types":
+                        ready[m[2] or m[1]] = binding.end()
+        receivers = [re.escape(n) + r"\s*\.\s*types" for n in namespaces] + [re.escape(t) for t in types]
+        constructor_names = [re.escape(n) + r"\s*\.\s*(?:Pool|Client)" for n in namespaces]
+        constructor_names += list(map(re.escape, constructors))
+        uses = [m.start() for m in re.finditer(r"\.\s*(?:query|connect)\s*\(", code)]
+        if constructor_names:
+            uses += [m.start() for m in re.finditer(r"\bnew\s+(?:" + "|".join(constructor_names) + r")\s*\(", code)]
+        cutoff = min(uses, default=len(code))
+        registered = set()
+        if receivers:
+            receiver = r"(?:" + "|".join(receivers) + r")"
+            pattern = (r"(?<![\w$.])(?P<receiver>" + receiver + r")\s*\.\s*setTypeParser\s*\(\s*"
+                       r"(?P<oid>20|1700|" + receiver + r"\s*\.\s*builtins\s*\.\s*(?:INT8|NUMERIC))\s*,")
+            for match in re.finditer(pattern, code):
+                name = re.sub(r"\s", "", match['receiver'])
+                if not _module_statement(code, match.start()) or match.start() < ready[name]:
+                    continue
+                # Registration must finish before any connection/query. A parser registered after
+                # constructing a Pool is rejected even if a later query might happen to be safe.
+                depth, end = 1, match.end()
+                for end in range(match.end(), len(code)):
+                    if code[end] == "(":
+                        depth += 1
+                    elif code[end] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                if depth == 0 and end < cutoff and code[match.end():end].strip():
+                    oid = re.sub(r"\s", "", match['oid'])
+                    registered.add(20 if oid == "20" or oid.endswith(".INT8") else 1700)
+        if registered != {20, 1700}:
+            path = source.relative_to(work).as_posix()
+            raise ValueError(
+                f"CV-04: {path}: pg INT8(20) and NUMERIC(1700) parsers must be registered at module "
+                "scope before Pool/Client construction and the first query. Register once in each pg "
+                "connection module; do not patch individual JSON fields. Use this code (ESM: replace "
+                "the require line with import { types } from 'pg';):\n" + PG_NUMERIC_PARSERS)
+
 
 def check_postgres_node_dependency(work: Path) -> None:
     """Require the runtime manifest and existing lock to include imported PostgreSQL drivers."""
@@ -109,8 +215,10 @@ def check_async_database_callers(original: Path, work: Path, *, include_factorie
             if not updated.is_file() or updated.is_symlink():
                 continue
             source = updated.read_text(encoding="utf-8", errors="replace")
-            specifier = posixpath.relpath(relative.with_suffix("").as_posix(),
-                                          caller_relative.parent.as_posix())
+            # These are project-relative names, not paths relative to the server's process cwd.
+            # Anchor both in a virtual POSIX root so a detached/deleted cwd cannot break this check.
+            specifier = posixpath.relpath("/" + relative.with_suffix("").as_posix(),
+                                          "/" + caller_relative.parent.as_posix())
             if not specifier.startswith("."):
                 specifier = "./" + specifier
             import_pattern = (r"(?:require\s*\(\s*|from\s+)['\"]"

@@ -72,6 +72,10 @@ class AgentTests(unittest.TestCase):
             manifest = json.loads((self.tools.work / 'package.json').read_text())
             manifest['dependencies'] = {'pg': '^8.16.0'}
             (self.tools.work / 'package.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'CV-04.*INT8'):
+                self.tools.deploy_application()
+            from application.consistency import PG_NUMERIC_PARSERS
+            (self.tools.work / 'db.js').write_text(PG_NUMERIC_PARSERS + '\n' + converted_db)
             with self.assertRaisesRegex(ValueError, 'CV-04.*without awaiting'):
                 self.tools.deploy_application()
         self.assertEqual(self.tools.attempts, 0)
@@ -524,11 +528,16 @@ class AgentTests(unittest.TestCase):
 
     def test_cloud_sql_and_async_caller_instructions_are_only_for_cloud_run(self):
         from application.agent import ASYNC_CALLER_GUIDANCE, CLOUD_SQL_TRANSPORT, INSTRUCTIONS, instructions_for
+        from application.consistency import PG_NUMERIC_PARSERS
         for target in ('aws-ecs-express', 'local-docker', 'onprem-compose', None):
             self.assertEqual(instructions_for(target), INSTRUCTIONS)
+            self.assertEqual(instructions_for(target).count(PG_NUMERIC_PARSERS), 1)
+        self.assertIn('not per-field Number() patches', INSTRUCTIONS)
+        self.assertIn('A successful patch invalidates the read snapshot', INSTRUCTIONS)
         self.assertNotIn('Cloud SQL', INSTRUCTIONS)
         self.assertNotIn(ASYNC_CALLER_GUIDANCE, INSTRUCTIONS)
         cloud_run = instructions_for('cloud-run')
+        self.assertEqual(cloud_run.count(PG_NUMERIC_PARSERS), 1)
         self.assertEqual(cloud_run.count(CLOUD_SQL_TRANSPORT), 1)
         self.assertEqual(cloud_run.count(ASYNC_CALLER_GUIDANCE), 1)
         # Inserted in place: socket rule before the async rule, caller guidance right after it.
