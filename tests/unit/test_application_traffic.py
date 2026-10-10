@@ -232,3 +232,24 @@ def test_app_drain_timeout_keeps_gate_closed_without_switching_database():
     with gate.write(plan["source"]), pytest.raises(RuntimeError, match="reconciliation"):
         traffic.quiesce(plan["source"])
     assert gate.blocked and not changes
+
+
+@pytest.mark.parametrize("disable", ["hostname", "certificate"])
+def test_private_control_ca_cannot_disable_tls_verification(disable):
+    import ssl
+
+    _, plan, _, _, _ = setup()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    if disable == "certificate":
+        context.verify_mode = ssl.CERT_NONE
+    with pytest.raises(ValueError, match="TLS"):
+        RegisteredApplicationTraffic(
+            "https://private/control",
+            "token",
+            controller_id="test",
+            source=plan["source"],
+            target=plan["target"],
+            guard=lambda: None,
+            ssl_context=context,
+        )

@@ -7,10 +7,11 @@ an ECS service. Unknown remote effects stop this controller without retries.
 
 import json
 import secrets
+import ssl
 from dataclasses import asdict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from domain.database import DatabaseBinding
 
@@ -21,7 +22,9 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class RegisteredApplicationTraffic:
-    def __init__(self, endpoint, token, *, controller_id, source, target, guard, transport=None):
+    def __init__(
+        self, endpoint, token, *, controller_id, source, target, guard, transport=None, ssl_context=None
+    ):
         url = urlsplit(endpoint)
         if (
             url.scheme != "https"
@@ -48,6 +51,9 @@ class RegisteredApplicationTraffic:
         ):
             raise ValueError("Same-application promotion bindings required")
         self.endpoint, self._token, self.controller_id = endpoint, token, controller_id
+        self.ssl_context = ssl_context or ssl.create_default_context()
+        if self.ssl_context.verify_mode != ssl.CERT_REQUIRED or not self.ssl_context.check_hostname:
+            raise ValueError("Control TLS must verify certificate and hostname")
         self.bindings = [asdict(left), asdict(right)]
         self.guard, self.transport = guard, transport or self._post
         self.binding, self.generation, self.probed = None, None, False
@@ -61,7 +67,9 @@ class RegisteredApplicationTraffic:
             headers={"Authorization": "Bearer " + self._token, "Content-Type": "application/json"},
         )
         try:
-            with build_opener(_NoRedirect()).open(request, timeout=30) as response:
+            with build_opener(_NoRedirect(), HTTPSHandler(context=self.ssl_context)).open(
+                request, timeout=30
+            ) as response:
                 if response.status != 200:
                     raise ValueError("Invalid controller response")
                 body = response.read(16385)
