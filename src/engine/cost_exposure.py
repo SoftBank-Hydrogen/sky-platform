@@ -31,6 +31,8 @@ def cost_exposure(target: str, *, database_required: bool = False) -> dict:
         raise ValueError("지원하지 않는 비용 대상입니다.") from exc
     if target == "aws-ecs-express" and database_required:
         drivers.append("선택한 신규·기존 RDS의 실행·저장·백업")
+    if target == "cloud-run" and database_required:
+        drivers.extend(["기존 Cloud SQL의 실행·저장·백업", "SQL 이전 Job 실행 및 Secret Manager 사용"])
     return {
         "estimate": None,
         "drivers": drivers,

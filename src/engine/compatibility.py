@@ -156,7 +156,7 @@ TARGET_CAPABILITIES = {
         "access_modes": ["public"],
     },
     "cloud-run": {
-        "postgresql_binding": False,
+        "postgresql_binding": True,
         "existing_rds_binding": False,
         "new_rds_provisioning": False,
         "sqlite_volume": False,
@@ -356,7 +356,8 @@ def validate_infrastructure(
             " SQLite 앱은 Local Docker에서 DB 경로를 확인한 영속 볼륨을 명시하거나 "
             "AWS ECS Express를 선택하고 인터넷 공개를 허용한 뒤, "
             "'SQLite 파일을 PostgreSQL로 이전하기'와 기존 RDS 또는 신규 RDS 생성 계획을 선택하세요. "
-            "이전은 실험적이며 RDS 비용이 발생합니다."
+            "Cloud Run에서는 기존 Cloud SQL PostgreSQL 연결과 SQLite 이전을 함께 선택하세요. "
+            "이전은 실험적이며 선택한 DB 비용이 발생합니다."
             if "sqlite" in profile.requirements or profile.storage == "sqlite"
             else ""
         )
@@ -394,6 +395,31 @@ def explicit_infrastructure_plan(
             "planner": "user",
         }
     database_id = create_postgres_id or existing_postgres_id
+    if target == "cloud-run":
+        if (
+            create_postgres_id is not None
+            or profile.database_engines != ("postgresql",)
+            or "database" not in profile.requirements
+            or not re.fullmatch(
+                r"[a-z][a-z0-9-]{4,28}[a-z0-9]:[a-z]+-[a-z]+[0-9]+:[a-z][a-z0-9-]+/[a-z][a-z0-9_]{0,62}",
+                database_id or "",
+            )
+        ):
+            raise ValueError("Cloud SQL 기존 DB 연결 계획이 올바르지 않습니다.")
+        return {
+            "target": target,
+            "workload": "postgresql-http",
+            "planner": "user",
+            "rationale": "선택한 기존 Cloud SQL에 연결하고 SQL 이전 작업을 실행합니다. DB와 Secret은 생성하거나 삭제하지 않습니다.",
+            "evidence": [],
+            "detected_files": list(profile.evidence),
+            "resources": [
+                *TARGET_RESOURCES[target],
+                "existing Cloud SQL PostgreSQL",
+                "one-off SQL migration task",
+            ],
+            "database": {"binding": "existing", "database_id": database_id},
+        }
     if (
         target != "aws-ecs-express"
         or profile.database_engines != ("postgresql",)

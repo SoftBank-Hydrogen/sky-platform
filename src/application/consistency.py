@@ -24,7 +24,116 @@ class HealthResultMismatch(ValueError):
 
 
 _ASYNC_METHOD = re.compile(r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+([A-Za-z_$][\w$]*)\s*\(")
+# Extended form used by the Cloud Run path: also `async function name(` and async database factories.
+_ASYNC_METHOD_EXTENDED = re.compile(
+    r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+(?:function\s+)?([A-Za-z_$][\w$]*)\s*\(")
 _NODE_POSTGRES_IMPORT = re.compile(r"\b(?:require\s*\(\s*|from\s+)['\"](pg|postgres)['\"]")
+
+PG_NUMERIC_PARSERS = """const { types } = require('pg');
+const toNumber = v => { const n = Number(v); return Number.isSafeInteger(n) ? n : v; };
+types.setTypeParser(20, toNumber);    // BIGINT, COUNT(*)
+types.setTypeParser(1700, v => { const n = Number(v); return Number.isFinite(n) && (Number.isSafeInteger(n) || !Number.isInteger(n)) ? n : v; });  // SUM/AVG 등"""
+
+_JS_TRIVIA = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`")
+_JS_NAME = r"[A-Za-z_$][\w$]*"
+
+
+def _js_mask(source: str, *, strings: bool) -> str:
+    """Keep offsets/lines while excluding comments and, optionally, string contents."""
+    def mask(match):
+        text = match[0]
+        if not strings and not text.startswith(("//", "/*")):
+            return text
+        return re.sub(r"[^\n]", " ", text)
+    return _JS_TRIVIA.sub(mask, source)
+
+
+def _module_statement(code: str, offset: int) -> bool:
+    # Require eager, standalone module initialization, never a function/conditional callback.
+    prefix = code[:offset].rstrip()
+    return (all(prefix.count(a) == prefix.count(b) for a, b in (("{", "}"), ("(", ")"), ("[", "]")))
+            and (not prefix or prefix[-1] in ";}"))
+
+
+def check_postgres_numeric_parsers(work: Path) -> None:
+    """Conservative CV-04 guard for pg modules in approved SQLite conversions.
+
+    Require both registrations in each importing module, at module scope before Pool/Client
+    construction or queries. Cross-module initialization and deferred registration are not proven
+    by this check: use the supplied local initialization pattern instead. Callback semantics still
+    require runtime/API tests; this is not a general JavaScript execution analyser.
+    """
+    for source in sorted(work.rglob("*")):
+        if (source.suffix not in {".js", ".cjs", ".mjs"} or source.is_symlink() or not source.is_file()
+                or any(p in {"node_modules", "dist", "build", "vendor", "tests"}
+                       for p in source.relative_to(work).parts)):
+            continue
+        raw = source.read_text(encoding="utf-8", errors="replace")
+        imports = _js_mask(raw, strings=False)
+        if not re.search(r"\b(?:require\s*\(\s*|from\s+)['\"]pg['\"]", imports):
+            continue
+        code = _js_mask(raw, strings=True)
+        namespaces, types, constructors, ready = set(), set(), set(), {}
+        # const pg = require('pg'); import pg from 'pg'; import * as pg from 'pg';
+        for pattern in (
+            rf"\b(?:const|let|var)\s+({_JS_NAME})\s*=\s*require\s*\(\s*['\"]pg['\"]\s*\)",
+            rf"\bimport\s+({_JS_NAME})\s*(?:,\s*\{{[^}}]*\}}\s*)?from\s*['\"]pg['\"]",
+            rf"\bimport\s+\*\s+as\s+({_JS_NAME})\s+from\s*['\"]pg['\"]",
+        ):
+            for match in re.finditer(pattern, imports):
+                if _module_statement(code, match.start()):
+                    namespaces.add(match[1])
+                    ready[match[1] + '.types'] = match.end()
+        # Named CJS/ESM bindings, including renamed bindings.
+        bindings = list(re.finditer(r"\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*require\s*\(\s*['\"]pg['\"]", imports))
+        bindings += list(re.finditer(r"\bimport\s*(?:" + _JS_NAME + r"\s*,\s*)?\{([^}]+)\}\s*from\s*['\"]pg['\"]", imports))
+        for namespace in namespaces:
+            bindings += list(re.finditer(r"\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*" + re.escape(namespace) + r"\b", imports))
+        for binding in bindings:
+            if not _module_statement(code, binding.start()):
+                continue
+            for part in binding[1].split(","):
+                m = re.fullmatch(rf"\s*(types|Pool|Client)(?:\s*(?::|\bas\b)\s*({_JS_NAME}))?\s*", part)
+                if m:
+                    (types if m[1] == "types" else constructors).add(m[2] or m[1])
+                    if m[1] == "types":
+                        ready[m[2] or m[1]] = binding.end()
+        receivers = [re.escape(n) + r"\s*\.\s*types" for n in namespaces] + [re.escape(t) for t in types]
+        constructor_names = [re.escape(n) + r"\s*\.\s*(?:Pool|Client)" for n in namespaces]
+        constructor_names += list(map(re.escape, constructors))
+        uses = [m.start() for m in re.finditer(r"\.\s*(?:query|connect)\s*\(", code)]
+        if constructor_names:
+            uses += [m.start() for m in re.finditer(r"\bnew\s+(?:" + "|".join(constructor_names) + r")\s*\(", code)]
+        cutoff = min(uses, default=len(code))
+        registered = set()
+        if receivers:
+            receiver = r"(?:" + "|".join(receivers) + r")"
+            pattern = (r"(?<![\w$.])(?P<receiver>" + receiver + r")\s*\.\s*setTypeParser\s*\(\s*"
+                       r"(?P<oid>20|1700|" + receiver + r"\s*\.\s*builtins\s*\.\s*(?:INT8|NUMERIC))\s*,")
+            for match in re.finditer(pattern, code):
+                name = re.sub(r"\s", "", match['receiver'])
+                if not _module_statement(code, match.start()) or match.start() < ready[name]:
+                    continue
+                # Registration must finish before any connection/query. A parser registered after
+                # constructing a Pool is rejected even if a later query might happen to be safe.
+                depth, end = 1, match.end()
+                for end in range(match.end(), len(code)):
+                    if code[end] == "(":
+                        depth += 1
+                    elif code[end] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                if depth == 0 and end < cutoff and code[match.end():end].strip():
+                    oid = re.sub(r"\s", "", match['oid'])
+                    registered.add(20 if oid == "20" or oid.endswith(".INT8") else 1700)
+        if registered != {20, 1700}:
+            path = source.relative_to(work).as_posix()
+            raise ValueError(
+                f"CV-04: {path}: pg INT8(20) and NUMERIC(1700) parsers must be registered at module "
+                "scope before Pool/Client construction and the first query. Register once in each pg "
+                "connection module; do not patch individual JSON fields. Use this code (ESM: replace "
+                "the require line with import { types } from 'pg';):\n" + PG_NUMERIC_PARSERS)
 
 
 def check_postgres_node_dependency(work: Path) -> None:
@@ -62,11 +171,14 @@ def check_postgres_node_dependency(work: Path) -> None:
             raise ValueError("CV-04: npm lockfile does not match the PostgreSQL runtime dependencies")
 
 
-def check_async_database_callers(original: Path, work: Path) -> None:
+def check_async_database_callers(original: Path, work: Path, *, include_factories: bool = False) -> None:
     """Reject directly unhandled JS calls when SQLite methods become async.
 
     This is a narrow safety check, not proof that all runtime paths work.
+    include_factories adds the Cloud Run checks: `async function` declarations, database factory calls
+    that became async, and source excerpts in the error. The default keeps the AWS-verified behaviour.
     """
+    async_method = _ASYNC_METHOD_EXTENDED if include_factories else _ASYNC_METHOD
     for module in original.rglob("*.js"):
         if (module.is_symlink() or not module.is_file()
                 or any(part in {"node_modules", "dist", "build", "vendor", "tests"}
@@ -80,8 +192,8 @@ def check_async_database_callers(original: Path, work: Path) -> None:
         new = converted.read_text(encoding="utf-8", errors="replace")
         if not SQLITE_SOURCE.search(old) or not DATABASE_ENGINE_SOURCE["postgresql"].search(new):
             continue
-        old_async = {name for match in _ASYNC_METHOD.finditer(old) for name in match.groups() if name}
-        new_async = {name for match in _ASYNC_METHOD.finditer(new) for name in match.groups() if name}
+        old_async = {name for match in async_method.finditer(old) for name in match.groups() if name}
+        new_async = {name for match in async_method.finditer(new) for name in match.groups() if name}
         gained = new_async - old_async
         if not gained:
             continue
@@ -103,8 +215,10 @@ def check_async_database_callers(original: Path, work: Path) -> None:
             if not updated.is_file() or updated.is_symlink():
                 continue
             source = updated.read_text(encoding="utf-8", errors="replace")
-            specifier = posixpath.relpath(relative.with_suffix("").as_posix(),
-                                          caller_relative.parent.as_posix())
+            # These are project-relative names, not paths relative to the server's process cwd.
+            # Anchor both in a virtual POSIX root so a detached/deleted cwd cannot break this check.
+            specifier = posixpath.relpath("/" + relative.with_suffix("").as_posix(),
+                                          "/" + caller_relative.parent.as_posix())
             if not specifier.startswith("."):
                 specifier = "./" + specifier
             import_pattern = (r"(?:require\s*\(\s*|from\s+)['\"]"
@@ -117,13 +231,19 @@ def check_async_database_callers(original: Path, work: Path) -> None:
                 + factory_pattern + r")\s*\(",
                 original_source,
             ))
-            if not receivers:
+            if not receivers and not (include_factories and gained.intersection(factories)):
                 continue
             unhandled = []
+            excerpts = []
             lines = source.splitlines()
             for name in sorted(gained):
-                call = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(receivers)))
-                                  + r")\." + re.escape(name) + r"\s*\(")
+                if include_factories and name in factories:
+                    call = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+                elif receivers:
+                    call = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(receivers)))
+                                      + r")\." + re.escape(name) + r"\s*\(")
+                else:
+                    continue
                 for line_number, line in enumerate(lines, 1):
                     match = call.search(line)
                     if match is None:
@@ -136,11 +256,14 @@ def check_async_database_callers(original: Path, work: Path) -> None:
                                    or re.search(r"\.then\s*\(.*=>\s*$", before))
                     if not handled:
                         unhandled.append(f"{name}@{line_number}")
+                        excerpts.append(f"{line_number}: {line.strip()[:240]}")
             if unhandled:
-                raise ValueError(
-                    f"CV-04: {caller_relative.as_posix()} calls async PostgreSQL methods without "
-                    f"awaiting or handling promises: {', '.join(unhandled[:8])}"
-                )
+                message = (f"CV-04: {caller_relative.as_posix()} calls async PostgreSQL methods without "
+                           f"awaiting or handling promises: {', '.join(unhandled[:8])}")
+                if include_factories:
+                    message += (". Update each call and its enclosing callback/startup path, then read back "
+                                "the file. Remaining source: " + " | ".join(excerpts[:8]))
+                raise ValueError(message)
 
 
 def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None,
@@ -238,14 +361,15 @@ def check_sqlite_migration_consistency(
     resources = plan.get("resources") if isinstance(plan, dict) else None
     if (not isinstance(plan, dict)
             or plan.get("conversion_pending") != "sqlite-to-postgresql"
-            or plan.get("target") != "aws-ecs-express"
+            or plan.get("target") not in {"aws-ecs-express", "cloud-run"}
             or not isinstance(database, dict)
             or database.get("binding") not in {"create", "existing"}
             or postgres_request is None
             or database.get("database_id") != postgres_request.database_id
             or not isinstance(resources, list)
             or "one-off SQL migration task" not in resources
-            or ("new RDS PostgreSQL" if database.get("binding") == "create" else "existing RDS PostgreSQL")
+            or ("existing Cloud SQL PostgreSQL" if plan.get('target') == 'cloud-run' else
+                "new RDS PostgreSQL" if database.get("binding") == "create" else "existing RDS PostgreSQL")
             not in resources
             or final_profile.database_engines != ("postgresql",)
             or "sqlite" in final_profile.requirements):
@@ -454,6 +578,10 @@ def check_database_consistency(
         if postgres_request is None or database.get("database_id") != postgres_request.database_id:
             raise ValueError("CV-03: Target database identity differs from execution binding")
         resource = "new RDS PostgreSQL" if database["binding"] == "create" else "existing RDS PostgreSQL"
+        if plan.get('target') == 'cloud-run':
+            if database['binding'] != 'existing':
+                raise ValueError('CV-03: Cloud SQL creation is not implemented')
+            resource = 'existing Cloud SQL PostgreSQL'
         if resource not in resources or final_profile.database_engines != ("postgresql",):
             raise ValueError("CV-03: PostgreSQL resource or final source requirement is missing")
 

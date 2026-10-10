@@ -20,6 +20,9 @@ from application.deployment_core import validate_environment
 from application.execution import ExecutionCapabilities
 from application.source_secrets import reject_plaintext_cloud_secrets, reject_supplied_secrets_in_source
 from adapters.build.image import ImageBuilder
+from adapters.gcp.postgres import CloudSqlRequest
+from application.infrastructure import inspect_infrastructure
+from adapters.database.migrations import collect_sql_migrations, stage_migrator_context
 from engine.compatibility import TARGET_CAPABILITIES
 
 
@@ -33,11 +36,15 @@ class CloudRunSettings:
     region: str = ""
     repository: str = "sky"
     service_account: str = ""
+    # 1 keeps one instance warm (no cold start during a demo) and is billed while idle; 0 scales to zero.
+    min_instances: int = 0
 
     @classmethod
     def from_environment(cls):
+        warm = os.getenv('SKY_GCP_MIN_INSTANCES', '0').strip() or '0'
         return cls(os.getenv('SKY_GCP_PROJECT', ''), os.getenv('SKY_GCP_REGION', ''),
-                   os.getenv('SKY_GCP_REPOSITORY', 'sky'), os.getenv('SKY_GCP_SERVICE_ACCOUNT', ''))
+                   os.getenv('SKY_GCP_REPOSITORY', 'sky'), os.getenv('SKY_GCP_SERVICE_ACCOUNT', ''),
+                   int(warm) if warm.isdigit() else -1)
 
     @property
     def runtime_identity(self):
@@ -50,6 +57,8 @@ class CloudRunSettings:
             raise CloudConfigurationError('SKY_GCP_REGION에 리전을 설정하세요.')
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', self.repository):
             raise CloudConfigurationError('Invalid Artifact Registry repository name')
+        if self.min_instances not in {0, 1}:
+            raise CloudConfigurationError('SKY_GCP_MIN_INSTANCES는 0 또는 1이어야 합니다.')
         if not re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]@' + re.escape(self.project) + r'\.iam\.gserviceaccount\.com', self.runtime_identity):
             raise CloudConfigurationError('Runtime service account must belong to the configured project')
 
@@ -61,6 +70,20 @@ class CloudRunSettings:
         except CloudConfigurationError as exc:
             return str(exc)
         return None
+
+
+WEBSOCKET_TIMEOUT_SECONDS = 3600   # Cloud Run maximum; an open WebSocket counts as one long request
+WEBSOCKET_CONCURRENCY = 250        # open sockets on the single instance (in-memory app state stays on one)
+
+
+def service_limits(project, min_instances=0):
+    """Scaling and request limits. WebSocket apps keep connections open, so they get the longest timeout,
+    room for many sockets on one instance and session affinity for reconnects; other apps keep 60s / 20."""
+    limits = [f'--min-instances={min_instances}', '--max-instances=1']
+    if 'websocket' in dict(inspect_infrastructure(project).source_signals):
+        return limits + [f'--concurrency={WEBSOCKET_CONCURRENCY}', f'--timeout={WEBSOCKET_TIMEOUT_SECONDS}s',
+                         '--session-affinity']
+    return limits + ['--concurrency=20', '--timeout=60s']
 
 
 class CloudRunAdapter:
@@ -133,16 +156,34 @@ class CloudRunAdapter:
         except Exception as exc:
             raise CloudConfigurationError('클라우드 기반 리소스 준비 실패: ' + str(exc)) from None
 
-    def deploy(self, project, plan, attempt_id, environment=None):
+    def deploy(self, project, plan, attempt_id, environment=None, *, postgres=None, migrations=None):
         if not re.fullmatch(r'[a-f0-9]{16}-a[1-3]', attempt_id):
             raise ValueError('Invalid deployment attempt ID')
         if plan.target != 'cloud-run':
             raise ValueError('Cloud Run adapter requires a cloud-run plan')
-        environment = validate_environment(environment, plan.required_env)
+        managed = {'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE', 'PGSSLROOTCERT'}
+        database = None
+        if postgres is not None:
+            if (not isinstance(postgres, CloudSqlRequest) or postgres.project != self.settings.project
+                    or postgres.region != self.settings.region):
+                raise CloudConfigurationError('Cloud SQL 연결과 배포 프로젝트·리전이 다릅니다.')
+            if managed.intersection(environment or {}) or 'DATABASE_URL' in (environment or {}):
+                raise ValueError('관리되는 PostgreSQL 접속값을 덮어쓸 수 없습니다.')
+            if 'DATABASE_URL' in plan.required_env or 'PGSSLROOTCERT' in plan.required_env:
+                raise ValueError('Cloud SQL은 PG 환경변수와 관리형 Unix 소켓 연결을 사용합니다.')
+            if migrations is None or collect_sql_migrations(project).digest != migrations.digest:
+                raise ValueError('검증된 SQL 마이그레이션 묶음이 필요합니다.')
+            database = postgres.inspect(self.gcloud)
+        elif migrations is not None:
+            raise ValueError('SQL 이전에는 Cloud SQL 연결이 필요합니다.')
+        environment = validate_environment(environment, [name for name in plan.required_env
+                                                        if postgres is None or name not in managed])
         reject_supplied_secrets_in_source(project, environment)
         reject_plaintext_cloud_secrets(environment, 'cloud-run')
         check_browser_client_urls(environment, 'cloud-run')
         self.sensitive.extend(environment.values())
+        if postgres is not None:
+            environment.update(postgres.environment())
         self.prepare_infrastructure()
         service = f'sky-{attempt_id}'
         registry = f'{self.settings.region}-docker.pkg.dev'
@@ -169,16 +210,21 @@ class CloudRunAdapter:
                 self.command(docker + ['push', self.image])
         except Exception as exc:
             raise CloudConfigurationError('이미지 업로드 실패: ' + str(exc)) from None
+        migration_result = None
+        if postgres is not None:
+            migration_result = self.run_migrations(postgres, migrations, attempt_id)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', prefix='sky-cloud-env-', encoding='utf-8') as env_file:
             # JSON is also valid YAML; all values remain strings, including commas and equals signs.
             json.dump(environment, env_file)
             env_file.flush()
             args = ['run', 'deploy', service, '--image', self.image, '--region', self.settings.region,
                     '--port', str(plan.port), '--service-account', self.settings.runtime_identity,
-                    '--cpu=1', '--memory=512Mi', '--min-instances=0', '--max-instances=1',
-                    '--concurrency=20', '--timeout=60s', '--env-vars-file', env_file.name,
+                    '--cpu=1', '--memory=512Mi', *service_limits(project, self.settings.min_instances),
+                    '--env-vars-file', env_file.name,
                     '--labels', f'sky-managed=true,sky-attempt={attempt_id}', '--format=json',
                     '--allow-unauthenticated' if self.public else '--no-allow-unauthenticated']
+            if postgres is not None:
+                args.extend(['--execution-environment=gen2', *postgres.flags()])
             self.service_attempted = True
             self.event('deploying', 'Cloud Run 서비스를 배포합니다.')
             try:
@@ -203,10 +249,88 @@ class CloudRunAdapter:
         except Exception:
             self.read_logs(service)
             raise
-        return {'url': url, 'health_url': url + plan.health_path, 'service': service,
+        result = {'url': url, 'health_url': url + plan.health_path, 'service': service,
                 'image': self.image, 'target': 'cloud-run', 'public': self.public,
                 'project': self.settings.project, 'region': self.settings.region,
                 'revision': deployed.get('status', {}).get('latestReadyRevisionName')}
+        if database is not None:
+            result.update(database=database, migration=migration_result)
+        return result
+
+    def run_migrations(self, request, bundle, attempt_id):
+        """Run checked SQL once before serving traffic; retain resources if completion is uncertain."""
+        name = f'sky-{attempt_id}-migrate'
+        image = f'{self.settings.region}-docker.pkg.dev/{self.settings.project}/{self.settings.repository}/{name}:latest'
+        rows = json.loads(self.gcloud(['run', 'jobs', 'list', '--region', self.settings.region,
+                                      '--filter', f'metadata.name={name}', '--format=json'], private=True))
+        if rows:
+            raise CloudConfigurationError('Migration job already exists; inspect it before retrying.')
+        self.event('migrating', 'Cloud SQL 이전 작업: ' + name)
+        created = completed = pushed = False
+        try:
+            with tempfile.TemporaryDirectory(prefix='sky-cloud-sql-') as folder:
+                context = stage_migrator_context(bundle, Path(folder) / 'build', cloud_sql=True)
+                self.command(['docker', 'build', '--platform', 'linux/amd64', '-t', image, str(context)], timeout=600)
+                registry = f'{self.settings.region}-docker.pkg.dev'
+                token = self.gcloud(['auth', 'print-access-token'], private=True)
+                if not token:
+                    raise CloudConfigurationError('No Google Cloud access token is available')
+                self.sensitive.append(token)
+                endpoint = os.getenv('DOCKER_HOST') or self.command(
+                    ['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], private=True)
+                with tempfile.TemporaryDirectory(prefix='sky-migration-auth-') as config:
+                    docker = ['docker', '--config', config, '--host', endpoint]
+                    self.command(docker + ['login', '-u', 'oauth2accesstoken', '--password-stdin',
+                                          'https://' + registry], stdin=token, private=True)
+                    pushed = True
+                    self.command(docker + ['push', image])
+                env_path = Path(folder) / 'env.json'
+                env_path.write_text(json.dumps(request.environment()), encoding='utf-8')
+                # Mark the attempt before the API call: a timeout can still create the job.
+                created = True
+                self.gcloud(['run', 'jobs', 'create', name, '--image', image,
+                             '--region', self.settings.region, '--service-account', self.settings.runtime_identity,
+                             '--tasks=1', '--parallelism=1', '--max-retries=0', '--task-timeout=600s',
+                             '--cpu=1', '--memory=512Mi', '--env-vars-file', str(env_path),
+                             '--labels', f'sky-managed=true,sky-attempt={attempt_id}',
+                             *request.flags(), '--format=json'], timeout=180, private=True)
+                execution = json.loads(self.gcloud(['run', 'jobs', 'execute', name,
+                    '--region', self.settings.region, '--wait', '--format=json'], timeout=660, private=True))
+                status = execution.get('status', {})
+                if (status.get('succeededCount') != 1 or status.get('failedCount', 0) != 0
+                        or not any(c.get('type') == 'Completed' and c.get('status') == 'True'
+                                   for c in status.get('conditions', []))):
+                    raise CloudConfigurationError('SQL migration completion was not verified: ' + name)
+                completed = True
+                return {'status': 'succeeded', 'digest': bundle.digest, 'job': name,
+                        'execution': execution.get('metadata', {}).get('name')}
+        except Exception:
+            # Do not retry ambiguous executions as an application-code repair.
+            raise CloudConfigurationError('Cloud SQL 이전 실패 또는 결과 미확인. 작업을 확인하세요: ' + name) from None
+        finally:
+            if created and completed:
+                try:
+                    detail = json.loads(self.gcloud(['run', 'jobs', 'describe', name,
+                        '--region', self.settings.region, '--format=json'], private=True))
+                    labels = detail.get('metadata', {}).get('labels', {})
+                    if (detail.get('metadata', {}).get('name') != name or labels.get('sky-managed') != 'true'
+                            or labels.get('sky-attempt') != attempt_id):
+                        raise ValueError('Migration job ownership changed')
+                    self.gcloud(['run', 'jobs', 'delete', name, '--region', self.settings.region], timeout=180)
+                    created = False
+                except Exception:
+                    self.event('cleanup', 'SQL 이전 작업 정리 확인 필요: ' + name)
+            if pushed and not created:
+                try:
+                    self.gcloud(['artifacts', 'docker', 'images', 'delete', image], timeout=120)
+                except Exception:
+                    self.event('cleanup', 'SQL 이전 이미지 정리 확인 필요: ' + image)
+            elif pushed:
+                self.event('cleanup', '실행 결과를 확인할 때까지 SQL 이전 작업과 이미지를 보존합니다: ' + name)
+            try:
+                self.command(['docker', 'image', 'rm', image], timeout=30)
+            except Exception:
+                self.event('cleanup', '로컬 SQL 이전 이미지 정리 확인 필요: ' + image)
 
     @staticmethod
     def validate_url(url):

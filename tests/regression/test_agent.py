@@ -72,6 +72,10 @@ class AgentTests(unittest.TestCase):
             manifest = json.loads((self.tools.work / 'package.json').read_text())
             manifest['dependencies'] = {'pg': '^8.16.0'}
             (self.tools.work / 'package.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'CV-04.*INT8'):
+                self.tools.deploy_application()
+            from application.consistency import PG_NUMERIC_PARSERS
+            (self.tools.work / 'db.js').write_text(PG_NUMERIC_PARSERS + '\n' + converted_db)
             with self.assertRaisesRegex(ValueError, 'CV-04.*without awaiting'):
                 self.tools.deploy_application()
         self.assertEqual(self.tools.attempts, 0)
@@ -489,6 +493,67 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(payload['parallel_tool_calls'])
         self.assertFalse(payload['store'])
         self.assertIn('reasoning.encrypted_content', payload['include'])
+
+    def test_deployment_reasoning_is_opt_in_per_target_and_validated_before_request(self):
+        response = json.dumps({'status': 'completed', 'output': call('read_runtime_logs', {})}).encode()
+
+        def request(target, environment):
+            agent = OpenAIDeployAgent(AISettings('fake', 'model'))
+            agent.use_target(target)
+            with patch.dict('os.environ', environment), \
+                    patch('application.agent.read_response', return_value=response) as transport:
+                agent.next([])
+            return json.loads(transport.call_args.args[0].data)
+
+        for effort in ('', 'medium'):
+            payload = request('cloud-run', {'SKY_DEPLOY_REASONING_EFFORT_CLOUD_RUN': effort})
+            if effort:
+                self.assertEqual(payload['reasoning'], {'effort': 'medium'})
+                self.assertEqual(payload['max_output_tokens'], 10000)
+            else:
+                self.assertNotIn('reasoning', payload)
+                self.assertEqual(payload['max_output_tokens'], 6000)
+        # A setting for one target, or the old shared name, never changes another target's request.
+        aws = request('aws-ecs-express', {'SKY_DEPLOY_REASONING_EFFORT_CLOUD_RUN': 'high',
+                                          'SKY_DEPLOY_REASONING_EFFORT': 'high'})
+        self.assertNotIn('reasoning', aws)
+        self.assertEqual(aws['max_output_tokens'], 6000)
+        agent = OpenAIDeployAgent(AISettings('fake', 'model'))
+        agent.use_target('cloud-run')
+        with patch.dict('os.environ', {'SKY_DEPLOY_REASONING_EFFORT_CLOUD_RUN': 'invalid'}), \
+                patch('application.agent.read_response') as transport:
+            with self.assertRaisesRegex(AgentError, 'SKY_DEPLOY_REASONING_EFFORT_CLOUD_RUN'):
+                agent.next([])
+            transport.assert_not_called()
+
+    def test_cloud_sql_and_async_caller_instructions_are_only_for_cloud_run(self):
+        from application.agent import ASYNC_CALLER_GUIDANCE, CLOUD_SQL_TRANSPORT, INSTRUCTIONS, instructions_for
+        from application.consistency import PG_NUMERIC_PARSERS
+        for target in ('aws-ecs-express', 'local-docker', 'onprem-compose', None):
+            self.assertEqual(instructions_for(target), INSTRUCTIONS)
+            self.assertEqual(instructions_for(target).count(PG_NUMERIC_PARSERS), 1)
+        self.assertIn('not per-field Number() patches', INSTRUCTIONS)
+        self.assertIn('A successful patch invalidates the read snapshot', INSTRUCTIONS)
+        self.assertNotIn('Cloud SQL', INSTRUCTIONS)
+        self.assertNotIn(ASYNC_CALLER_GUIDANCE, INSTRUCTIONS)
+        cloud_run = instructions_for('cloud-run')
+        self.assertEqual(cloud_run.count(PG_NUMERIC_PARSERS), 1)
+        self.assertEqual(cloud_run.count(CLOUD_SQL_TRANSPORT), 1)
+        self.assertEqual(cloud_run.count(ASYNC_CALLER_GUIDANCE), 1)
+        # Inserted in place: socket rule before the async rule, caller guidance right after it.
+        self.assertLess(cloud_run.index(CLOUD_SQL_TRANSPORT),
+                        cloud_run.index('PostgreSQL client methods are asynchronous'))
+        self.assertLess(cloud_run.index('to await or handle returned promises.'),
+                        cloud_run.index(ASYNC_CALLER_GUIDANCE))
+        self.assertEqual(len(cloud_run), len(INSTRUCTIONS) + len(CLOUD_SQL_TRANSPORT) + len(ASYNC_CALLER_GUIDANCE))
+
+        response = json.dumps({'status': 'completed', 'output': call('read_runtime_logs', {})}).encode()
+        for target, expected in (('aws-ecs-express', INSTRUCTIONS), ('cloud-run', cloud_run)):
+            agent = OpenAIDeployAgent(AISettings('fake', 'model'))
+            agent.use_target(target)
+            with patch('application.agent.read_response', return_value=response) as transport:
+                agent.next([])
+            self.assertEqual(json.loads(transport.call_args.args[0].data)['instructions'], expected)
 
     def test_deployment_records_completed_model_response_before_tool_execution(self):
         response = {'id': 'resp_123abc', 'model': 'gpt-5.4-mini',

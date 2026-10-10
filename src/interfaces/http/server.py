@@ -34,6 +34,7 @@ from application.certificate import deployment_certificate
 from application.diagnosis import deployment_diagnosis
 from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
+from adapters.gcp.postgres import CloudSqlRequest
 from application.deployment_core import MAX_UPLOAD, DeploymentPlan, extract_project, folder_upload_to_zip, source_digest, validate_environment
 from application.source_transform import source_transform_record, verify_source_transform
 from application.client_urls import check_browser_client_urls
@@ -2163,7 +2164,7 @@ def handler_for(app: App):
                     public_flag = self.headers.get('X-Public-Access', 'false')
                     if public_flag not in {'true', 'false'}:
                         raise ValueError('공개 접근 선택이 올바르지 않습니다.')
-                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-', 'x-local-sqlite-'))
+                    if any(name.lower().startswith(('x-postgres-', 'x-sqlite-', 'x-local-sqlite-', 'x-gcp-postgres'))
                            for name in self.headers):
                         raise ValueError('다중 대상 배포는 현재 데이터베이스 연결·이전을 지원하지 않습니다.')
                     if 'aws-ecs-express' in targets and public_flag != 'true':
@@ -2306,6 +2307,7 @@ def handler_for(app: App):
                         if len(local_sqlite_mount) > 200 or not local_sqlite_mount.startswith('/'):
                             raise ValueError('Local SQLite 볼륨 경로는 컨테이너 내부의 절대 경로여야 합니다.')
                     create_plan_id = self.headers.get('X-Postgres-Create-Plan')
+                    cloud_sql_header = self.headers.get('X-GCP-Postgres')
                     if create_plan_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{24,64}', create_plan_id):
                         raise ValueError('유효한 PostgreSQL 생성 계획 ID가 필요합니다.')
                     if create_plan_id is not None and postgres_flag == 'true':
@@ -2322,6 +2324,19 @@ def handler_for(app: App):
                         raise ValueError('PostgreSQL 연결 정보에는 기존 DB 명시적 선택이 필요합니다.')
                     postgres_request = None
                     aws_settings_for_job = app.aws_settings
+                    if cloud_sql_header is not None:
+                        if (target != 'cloud-run' or postgres_flag == 'true' or create_plan_id is not None
+                                or local_sqlite_mount is not None or len(cloud_sql_header) > 2048):
+                            raise ValueError('Cloud SQL은 Cloud Run 단일 배포에서 기존 DB만 연결합니다.')
+                        try:
+                            binding = json.loads(cloud_sql_header)
+                        except (ValueError, TypeError):
+                            raise ValueError('Cloud SQL 연결 정보가 올바른 JSON이 아닙니다.') from None
+                        if not isinstance(binding, dict) or set(binding) != {'instance', 'database', 'user', 'password_secret'}:
+                            raise ValueError('Cloud SQL 인스턴스·DB·사용자·비밀번호 Secret 버전을 지정하세요.')
+                        postgres_request = CloudSqlRequest(application_id, app.cloud_settings.project,
+                                                           app.cloud_settings.region, **binding)
+                        postgres_request.validate()
                     if postgres_flag == 'true' or create_plan_id is not None:
                         settings = app.aws_settings
                         if (target not in {'auto', 'aws-ecs-express'} or public_flag != 'true'
@@ -2403,7 +2418,7 @@ def handler_for(app: App):
                                 target = 'local-docker'
                         if sqlite_flag == 'true':
                             if postgres_request is None:
-                                raise ValueError('SQLite 자동 이전은 PostgreSQL RDS 선택이 필요합니다.')
+                                raise ValueError('SQLite 자동 이전은 RDS 또는 Cloud SQL PostgreSQL 연결 선택이 필요합니다.')
                             sqlite_conversion, deployment_profile = preflight_sqlite_conversion(
                                 project, infrastructure_profile)
                         validate_infrastructure(deployment_profile, target,
@@ -2413,9 +2428,13 @@ def handler_for(app: App):
                             if sqlite_conversion is None:
                                 collect_sql_migrations(project)
                             if create_plan_id is None:
-                                database = AwsPostgresProvisioner(postgres_request).inspect_current()
-                                app.postgres_operations.require_deployable(
-                                    application_id, database['database_id'])
+                                if isinstance(postgres_request, CloudSqlRequest):
+                                    database = postgres_request.inspect(CloudRunAdapter(
+                                        lambda *_: None, app.cloud_settings).gcloud)
+                                else:
+                                    database = AwsPostgresProvisioner(postgres_request).inspect_current()
+                                    app.postgres_operations.require_deployable(
+                                        application_id, database['database_id'])
                         if target == 'auto':
                             availability = {'local-docker': None,
                                             'aws-ecs-express': app.aws_settings.unavailable_reason(),
@@ -2519,6 +2538,8 @@ def handler_for(app: App):
                             app.jobs[job_id]['source_digest'] = digest
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
+                                if postgres_request is not None:
+                                    app.jobs[job_id]['cloud_sql'] = asdict(postgres_request)
                             elif target == "onprem-vm":
                                 app.jobs[job_id]["vm"] = asdict(VmSettings.from_environment())
                             elif target == "aws-ecs-express":

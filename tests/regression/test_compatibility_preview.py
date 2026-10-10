@@ -192,7 +192,7 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(candidates['aws-ecs-express']['status'], 'requires_setup')
         self.assertEqual(candidates['aws-ecs-express']['violated_rule_ids'], [])
 
-    def test_postgres_binding_is_conditional_only_on_supported_aws_target(self):
+    def test_postgres_binding_is_conditional_only_on_targets_with_a_database_binding(self):
         status, payload = self.preview(archive({
             'package.json': '{"dependencies":{"pg":"8.0.0"}}',
             'server.js': 'const database = require("pg");',
@@ -202,7 +202,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(candidates['aws-ecs-express']['status'], 'requires_database_binding')
         self.assertEqual(candidates['aws-ecs-express']['violated_rule_ids'], ['DATA-BINDING-01'])
         self.assertEqual(candidates['local-docker']['status'], 'rejected')
-        self.assertEqual(candidates['cloud-run']['status'], 'rejected')
+        # Cloud Run binds an existing Cloud SQL database (feat/gcp-postgresql).
+        self.assertEqual(candidates['cloud-run']['status'], 'requires_database_binding')
+        self.assertEqual(candidates['cloud-run']['violated_rule_ids'], ['DATA-BINDING-01'])
 
     def test_static_bundle_is_aws_candidate_for_upload_auto_selection(self):
         with patch('interfaces.http.server.AwsStaticSiteAdapter.unavailable_reason', return_value=None):
