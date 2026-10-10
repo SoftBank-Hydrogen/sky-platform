@@ -227,49 +227,58 @@ class PostgresOperationStore:
         if not isinstance(kind, str) or kind not in KINDS:
             raise ValueError("Unsupported operation kind")
         command = self._document(command)
+        with self.records._connection() as connection:
+            return self._admit_in_transaction(connection, application_id, kind, request_key, command)
+
+    def _admit_in_transaction(self, connection, application_id, kind, request_key, command):
+        """Internal composition boundary; caller owns commit/rollback, never commits here."""
+        application_id = self._text(application_id, "application identity")
+        request_key = self._text(request_key, "request key")
+        if not isinstance(kind, str) or kind not in KINDS:
+            raise ValueError("Unsupported operation kind")
+        command = self._document(command)
         request_hash = hashlib.sha256(
             json.dumps(
                 [application_id, kind, command], ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
         identity, attempt = str(uuid4()), str(uuid4())
-        with self.records._connection() as connection:
-            created = connection.execute(
-                """INSERT INTO sky_state.operations
-                (workspace,id,application_id,kind,request_key,request_hash,command,status,attempt_id)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,'queued',%s)
-                ON CONFLICT (workspace,request_key) DO NOTHING RETURNING id""",
-                (
-                    self.workspace,
-                    identity,
-                    application_id,
-                    kind,
-                    request_key,
-                    request_hash,
-                    self._json(command),
-                    attempt,
-                ),
+        created = connection.execute(
+            """INSERT INTO sky_state.operations
+            (workspace,id,application_id,kind,request_key,request_hash,command,status,attempt_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,'queued',%s)
+            ON CONFLICT (workspace,request_key) DO NOTHING RETURNING id""",
+            (
+                self.workspace,
+                identity,
+                application_id,
+                kind,
+                request_key,
+                request_hash,
+                self._json(command),
+                attempt,
+            ),
+        ).fetchone()
+        if created is None:
+            existing = connection.execute(
+                """SELECT id,request_hash FROM sky_state.operations
+                WHERE workspace=%s AND request_key=%s""",
+                (self.workspace, request_key),
             ).fetchone()
-            if created is None:
-                existing = connection.execute(
-                    """SELECT id,request_hash FROM sky_state.operations
-                    WHERE workspace=%s AND request_key=%s""",
-                    (self.workspace, request_key),
-                ).fetchone()
-                if existing[1] != request_hash:
-                    raise IdempotencyConflict("Request key belongs to a different operation")
-                return self._select(connection, existing[0])
-            reserved = connection.execute(
-                """INSERT INTO sky_state.mutation_scopes
-                (workspace,application_id,operation_id) VALUES (%s,%s,%s)
-                ON CONFLICT DO NOTHING RETURNING operation_id""",
-                (self.workspace, application_id, identity),
-            ).fetchone()
-            if reserved is None:
-                raise ApplicationBusy("Application has an unfinished operation")
-            self._event(connection, identity, "queued")
-            self._outbox(connection, identity)
-            return self._select(connection, identity)
+            if existing[1] != request_hash:
+                raise IdempotencyConflict("Request key belongs to a different operation")
+            return self._select(connection, existing[0])
+        reserved = connection.execute(
+            """INSERT INTO sky_state.mutation_scopes
+            (workspace,application_id,operation_id) VALUES (%s,%s,%s)
+            ON CONFLICT DO NOTHING RETURNING operation_id""",
+            (self.workspace, application_id, identity),
+        ).fetchone()
+        if reserved is None:
+            raise ApplicationBusy("Application has an unfinished operation")
+        self._event(connection, identity, "queued")
+        self._outbox(connection, identity)
+        return self._select(connection, identity)
 
     def claim(self, operation_id, attempt_id, owner, *, seconds=90):
         operation_id, attempt_id = self._uuid(operation_id), self._uuid(attempt_id)

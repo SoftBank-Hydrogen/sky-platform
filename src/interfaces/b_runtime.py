@@ -1,4 +1,4 @@
-"""Explicit B modes: read-only API, outbox publisher, one shared DB allocation."""
+"""Explicit B modes: API, outbox, state migration and one shared DB allocation."""
 
 import argparse
 import os
@@ -14,6 +14,48 @@ def run_outbox(publisher, stop, *, interval=5, once=False):
         print(f"Outbox confirmed={report.confirmed} deferred={report.deferred}", flush=True)
         if once or stop.wait(interval):
             return
+
+
+_LEDGERS = (
+    ("metadata", "sky_state.schema_versions"),
+    ("operation", "sky_state.operation_schema_versions"),
+)
+
+
+def schema_versions(connection_factory):
+    """Read both migration ledgers without DDL; a missing ledger reports no versions."""
+    import psycopg
+
+    try:
+        with connection_factory() as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            versions = {}
+            for name, table in _LEDGERS:
+                if connection.execute("SELECT to_regclass(%s)", (table,)).fetchone()[0] is None:
+                    versions[name] = ()
+                else:
+                    # Identifiers come from the fixed ledger list above, never from input.
+                    rows = connection.execute(f"SELECT version FROM {table} ORDER BY version").fetchall()
+                    versions[name] = tuple(row[0] for row in rows)
+            return versions
+    except psycopg.Error:
+        raise OSError("State database schema versions are unavailable") from None
+
+
+def run_migrations(connection_factory, workspace):
+    """Apply metadata then operation migrations under the existing advisory lock."""
+    from adapters.state.operations import PostgresOperationStore
+    from adapters.state.postgres import PostgresDeploymentRecordStore
+
+    before = schema_versions(connection_factory)
+    PostgresDeploymentRecordStore(connection_factory, workspace=workspace).initialize()
+    PostgresOperationStore(connection_factory, workspace=workspace).initialize()
+    after = schema_versions(connection_factory)
+    for name, _ in _LEDGERS:
+        applied = [version for version in after[name] if version not in before[name]]
+        current = ",".join(map(str, after[name]))
+        state = "applied " + ",".join(map(str, applied)) if applied else "up to date"
+        print(f"{name} schema: {state} (now {current})", flush=True)
 
 
 def main(argv):
@@ -45,7 +87,35 @@ def main(argv):
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
     worker.add_argument("--interval", type=int, default=5)
+    modes.add_parser(
+        "migrate",
+        help="Apply pending PostgreSQL state migrations once and exit; safe to repeat",
+        allow_abbrev=False,
+    )
     args = parser.parse_args(argv)
+    if args.mode == "migrate":
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from adapters.state.postgres import (
+            PostgresDeploymentRecordStore,
+            PostgresStateSettings,
+            RotatingDatabaseConnection,
+        )
+
+        try:
+            settings = PostgresStateSettings.from_environment()
+            workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
+            PostgresDeploymentRecordStore(None, workspace=workspace)
+        except ValueError:
+            parser.error("Invalid B migration database or workspace configuration")
+        try:
+            run_migrations(RotatingDatabaseConnection(settings), workspace)
+        except (OSError, ValueError, BotoCoreError, ClientError):
+            # Do not log query diagnostics, credentials or DDL.
+            parser.exit(
+                1, "B state migration failed; check database access, schema version and configuration.\n"
+            )
+        return
     if args.mode == "api":
         from interfaces.http.server import serve
 
