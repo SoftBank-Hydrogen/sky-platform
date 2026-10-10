@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from adapters.local.docker import LocalDockerAdapter
+from application.session_evidence import bind_session_rehearsal, session_binding
 from tests.live.smoke_sqlite_migration import docker
 
 WATCH = r"""
@@ -160,7 +161,7 @@ def measure(image):
                 'recovery_seconds': round(time.monotonic() - started, 3)})
             observer = None
         return {'protocol': 'sky-game-session-drill-v1', 'checked_at': datetime.now(UTC).isoformat(),
-                'scope': 'disposable-local-docker', 'image_id': image_id,
+                'scope': 'disposable-local-docker', 'image': image, 'image_id': image_id,
                 'room_fixture': {'minPlayers': 1, 'countdownMs': 100, 'roundMs': 30000},
                 'drill_status': 'passed', 'session_continuity': 'lost',
                 'seed_rounds': initial, 'persisted_rounds': expected['rounds'],
@@ -180,8 +181,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
     parser.add_argument('--receipt', type=Path)
+    parser.add_argument('--job-file', type=Path, help='Optional matching completed local job; read only')
     args = parser.parse_args()
+    job = json.loads(args.job_file.read_text()) if args.job_file else None
+    if job is not None:
+        binding = session_binding(job)
+        if binding['image'] != args.image:
+            parser.error('Selected image must match the job image')
     result = measure(args.image)
+    if job is not None:
+        result = bind_session_rehearsal(job, result)
     if args.receipt:
         args.receipt.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
     print(json.dumps(result, ensure_ascii=False))

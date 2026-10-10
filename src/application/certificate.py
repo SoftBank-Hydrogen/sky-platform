@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from application.consistency import health_result_matches_plan
 from application.deployment_core import DeploymentPlan
+from application.session_evidence import recorded_session_rehearsal
 from application.source_transform import executable_plan_digest, resolved_target_plan
 from application.verification_gates import static_consistency_gate, target_verification_obligations
 from engine.architecture_decision import verify_architecture_decision
@@ -554,6 +555,13 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         checks.append({'name': 'websocket_session_continuity', 'status': 'unverified',
                        'detail': '새 연결의 메시지 왕복은 기존 플레이어 연결·진행 중인 게임 상태의 유지를 증명하지 않습니다. '
                                  '이 배포 리비전에 연결된 갱신·재시작·롤백 세션 증거가 필요합니다.'})
+        session_rehearsal = recorded_session_rehearsal(job) if completed else None
+        checks.append({'name': 'websocket_session_rehearsal',
+                       'status': 'passed' if session_rehearsal else 'unverified',
+                       'evidence': session_rehearsal,
+                       'detail': ('같은 이미지의 격리 복제본에서 연결 종료·재접속·메모리 상태 초기화·점수 유지를 관측했습니다. '
+                                  '실제 배포 대상의 갱신·롤백이나 세션 유지 성공을 뜻하지 않습니다.' if session_rehearsal else
+                                  '이 앱·소스 리비전·이미지에 연결된 세션 리허설 기록이 없습니다.')})
 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes
