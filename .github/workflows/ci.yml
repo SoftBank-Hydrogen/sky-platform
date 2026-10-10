@@ -116,7 +116,10 @@ jobs:
           ECR_REPOSITORY: ${{ vars.SKY_SERVICE_ECR_REPOSITORY }}
           IMAGE_SHA: ${{ github.sha }}
         run: |
-          image="$REGISTRY/$ECR_REPOSITORY:$IMAGE_SHA"
+          # Infra deployment accepts the first 7 characters of the commit SHA.
+          image_tag="${IMAGE_SHA:0:7}"
+          [[ "$image_tag" =~ ^[0-9a-f]{7}$ ]]
+          image="$REGISTRY/$ECR_REPOSITORY:$image_tag"
           docker tag "sky-platform:$IMAGE_SHA" "$image"
           docker push "$image"
           printf 'Sky service image: `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"
