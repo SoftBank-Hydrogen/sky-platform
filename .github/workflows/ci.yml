@@ -62,10 +62,15 @@ jobs:
       - run: sky-platform --help
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install observer for actual HTTP integration tests
+        working-directory: ops/monitoring/exporter
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: pytest
+        env:
+          SKY_TEST_K6_IMAGE: grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34
       - name: UI and PostgreSQL JavaScript tests
         run: |
           node tests/regression/test_postgres_ui.mjs
