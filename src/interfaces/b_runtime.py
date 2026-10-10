@@ -93,6 +93,11 @@ def main(argv):
         help="Select outbox or shared DB allocation execution; no app deployment consumer",
     )
     worker.add_argument("--pool-config")
+    worker.add_argument(
+        "--initialize-pool",
+        action="store_true",
+        help="Explicitly initialize an audited dedicated workload pool; no app allocation or deployment",
+    )
     worker.add_argument("--alb-trusts-file")
     worker.add_argument("--memberships-file")
     worker.add_argument("--operation-id")
@@ -210,7 +215,14 @@ def main(argv):
         run_shared_database(args, parser)
         return
     if any(
-        (args.pool_config, args.alb_trusts_file, args.memberships_file, args.operation_id, args.attempt_id)
+        (
+            args.pool_config,
+            args.alb_trusts_file,
+            args.memberships_file,
+            args.operation_id,
+            args.attempt_id,
+            args.initialize_pool,
+        )
     ):
         parser.error("Shared database options require --mode shared-database")
     from botocore.exceptions import BotoCoreError, ClientError

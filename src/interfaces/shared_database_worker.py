@@ -98,6 +98,8 @@ def run_shared_database(args, parser):
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
         queued = args.worker_mode == "shared-database-queue"
+        if args.initialize_pool and (queued or args.operation_id or args.attempt_id):
+            raise ValueError("Pool initialization must be explicit and separate from queued allocations")
         if queued:
             from adapters.aws.job_queue import SqsOperationQueue
 
@@ -111,7 +113,7 @@ def run_shared_database(args, parser):
                 raise ValueError(
                     "Queue mode requires a dedicated queue and positive interval, not operation IDs"
                 )
-        if not args.check_config and not queued:
+        if not args.check_config and not queued and not args.initialize_pool:
             if not args.operation_id or not args.attempt_id:
                 raise ValueError("One operation and attempt ID are required")
             UUID(args.operation_id)
@@ -129,6 +131,10 @@ def run_shared_database(args, parser):
         records = PostgresDeploymentRecordStore(connection, workspace=workspace)
         operations = PostgresOperationStore(connection, workspace=workspace)
         allocator = AwsSharedDatabaseAllocator(settings)
+        if args.initialize_pool:
+            allocator.initialize()
+            print("Dedicated workload pool registered; no app allocation or deployment", flush=True)
+            return
         worker = SharedDatabaseWorker(
             records,
             operations,

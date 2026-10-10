@@ -301,3 +301,46 @@ def test_queue_config_is_explicit_and_requires_separate_queue(configuration, mon
         with patch("boto3.client", side_effect=AssertionError("AWS call")):
             main([*args, "--check-config"])
         assert "no AWS/DB calls" in capsys.readouterr().out
+
+
+def test_pool_initialization_is_explicit_and_never_allocates_an_app(configuration, capsys):
+    path, _ = configuration
+    allocator = Mock()
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch("interfaces.shared_database_worker.RotatingDatabaseConnection", return_value=Mock()),
+        patch("interfaces.shared_database_worker.check_database_ready"),
+        patch("interfaces.shared_database_worker.AwsSharedDatabaseAllocator", return_value=allocator),
+        patch("interfaces.shared_database_worker.SharedDatabaseWorker") as worker,
+    ):
+        main([*arguments(path), "--initialize-pool"])
+    allocator.initialize.assert_called_once_with()
+    allocator.allocate.assert_not_called()
+    worker.assert_not_called()
+    assert "no app allocation or deployment" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("extra", [["--operation-id", "test"], ["--attempt-id", "test"]])
+def test_initialization_cannot_be_combined_with_allocation_ids(configuration, extra):
+    path, _ = configuration
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch("interfaces.shared_database_worker.AwsSharedDatabaseAllocator") as allocator,
+        pytest.raises(SystemExit),
+    ):
+        main([*arguments(path), "--initialize-pool", *extra])
+    allocator.assert_not_called()
+
+
+def test_initialization_check_config_has_no_external_effects(configuration):
+    path, _ = configuration
+    with (
+        patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()),
+        patch(
+            "interfaces.shared_database_worker.AwsSharedDatabaseAllocator", side_effect=AssertionError("AWS")
+        ),
+        patch(
+            "interfaces.shared_database_worker.RotatingDatabaseConnection", side_effect=AssertionError("DB")
+        ),
+    ):
+        main([*arguments(path), "--initialize-pool", "--check-config"])
