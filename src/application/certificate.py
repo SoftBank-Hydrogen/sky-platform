@@ -290,6 +290,52 @@ def _sqlite_integrity_evidence(job: dict, result: dict) -> dict | None:
         'sql_sha256', 'schema_sha256', 'bundle_digest', 'row_counts')}
 
 
+def _runtime_identity_verified(job: dict, result: dict) -> bool:
+    evidence = result.get('image_identity')
+    origin = result.get('rehearsal') or result.get('promotion')
+    if (job.get('target') != 'aws-ecs-express' or not isinstance(evidence, dict)
+            or not isinstance(origin, dict) or origin.get('platform') != 'linux/amd64'
+            or evidence.get('protocol') != 'ecs-image-identity-v1' or evidence.get('status') != 'passed'):
+        return False
+    account, region, service = result.get('account'), result.get('region'), result.get('service')
+    if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+            or not isinstance(region, str) or not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', region)
+            or not isinstance(service, str) or not re.fullmatch(r'sky-[a-f0-9]{16}-a[1-3]', service)):
+        return False
+    arn = f'arn:aws:ecs:{region}:{account}:service/default/{service}'
+    prefix = f'arn:aws:ecs:{region}:{account}:task/default/'
+    tasks = evidence.get('task_arns')
+    definition = evidence.get('task_definition_arn')
+    definition_prefix = f'arn:aws:ecs:{region}:{account}:task-definition/'
+    return bool(
+        isinstance(tasks, list) and 1 <= len(tasks) <= 100
+        and all(isinstance(task, str) and task.startswith(prefix)
+                and re.fullmatch(r'[a-f0-9]{32}', task.removeprefix(prefix)) for task in tasks)
+        and len(set(tasks)) == len(tasks)
+        and isinstance(definition, str) and definition.startswith(definition_prefix)
+        and re.fullmatch(r'[A-Za-z0-9_-]+:\d+', definition.removeprefix(definition_prefix))
+        and definition == result.get('task_definition_arn')
+        and evidence.get('service_arn') == result.get('service_arn') == arn
+        and isinstance(evidence.get('checked_at'), str)
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('local_image_id')))
+        and evidence['local_image_id'] == origin.get('image_id')
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('manifest_digest')))
+        and evidence['manifest_digest'] == result.get('image_digest')
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('platform_manifest_digest')))
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('config_digest')))
+        and evidence['local_image_id'] in {evidence['manifest_digest'],
+                                          evidence['platform_manifest_digest'], evidence['config_digest']}
+        and isinstance(evidence.get('runtime_digests'), list)
+        and 1 <= len(evidence['runtime_digests']) <= 2
+        and all(isinstance(digest, str) and digest in {evidence['manifest_digest'],
+                                                     evidence['platform_manifest_digest']}
+                for digest in evidence['runtime_digests'])
+        and evidence.get('image') == result.get('image')
+        and isinstance(result.get('image'), str)
+        and result['image'].startswith(f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed:')
+    )
+
+
 def _release_rollback_verified(job: dict, result: dict) -> bool:
     """Check the saved result of restoring a prior ECS release, not a rehearsal."""
     record = job.get('release_rollback_verification')
@@ -435,8 +481,12 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         {'name': 'registry_manifest', 'status': 'passed' if completed and registry_digest else 'unverified',
          'detail': ('ECR 이미지 태그의 매니페스트 다이제스트를 업로드 후와 배포 후에 확인했습니다.'
                     if completed and registry_digest else '레지스트리 매니페스트 다이제스트 확인 기록이 없습니다.')},
-        {'name': 'image_identity', 'status': 'unverified',
-         'detail': '실행 중인 ECS 태스크의 이미지 다이제스트는 아직 대조하지 않았습니다.'},
+        {'name': 'image_identity',
+         'status': 'passed' if completed and _runtime_identity_verified(job, result) else 'unverified',
+         'detail': ('리허설 이미지 config → ECR 매니페스트 → 실행 ECS 태스크 다이제스트의 일치를 확인했습니다. '
+                    '배포 당시의 기록이며 현재 태스크 재조회는 아닙니다.'
+                    if completed and _runtime_identity_verified(job, result) else
+                    '리허설 이미지부터 실행 중인 ECS 태스크까지 연결한 확인 기록이 없습니다.')},
         {'name': 'ai_model_execution', 'status': 'passed' if ai_recorded else 'unverified',
          'detail': ('Sky가 OpenAI Responses API의 완료 응답 ID와 모델명을 작업에 기록했습니다. 독립 서명 검증은 아닙니다.'
                     if ai_recorded else '실제 모델 호출과 고정 응답을 구분하는 출처 기록이 없습니다.')},
