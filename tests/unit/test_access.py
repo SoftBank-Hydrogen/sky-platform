@@ -37,7 +37,8 @@ def test_unowned_legacy_record_cannot_be_claimed_by_a_logged_in_user():
     assert not permitted(admin, Action.READ, owner_from_record({"id": "legacy"}))
     assert not permitted(None, Action.READ, ResourceOwner("team_a", "creator_1"))
     assert owner_from_record({"organization_id": "team_a", "created_by": "creator_1"}) == ResourceOwner(
-        "team_a", "creator_1")
+        "team_a", "creator_1"
+    )
 
 
 def test_local_token_authentication_is_single_workspace_and_rejects_other_tokens():
@@ -45,4 +46,5 @@ def test_local_token_authentication_is_single_workspace_and_rejects_other_tokens
     assert authenticator.authenticate(None) is None
     assert authenticator.authenticate("other-value") is None
     assert authenticator.authenticate("secret-value") == Principal(
-        "local_operator", "local_workspace", Role.ADMIN, LoginSource.LOCAL)
+        "local_operator", "local_workspace", Role.ADMIN, LoginSource.LOCAL
+    )

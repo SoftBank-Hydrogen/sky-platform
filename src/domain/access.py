@@ -86,5 +86,4 @@ def owner_from_record(record: Mapping[str, object]) -> ResourceOwner | None:
 def permitted(principal: Principal, action: Action, owner: ResourceOwner | None) -> bool:
     if not isinstance(principal, Principal) or not isinstance(action, Action) or owner is None:
         return False
-    return (principal.organization_id == owner.organization_id
-            and action in _GRANTS[principal.role])
+    return principal.organization_id == owner.organization_id and action in _GRANTS[principal.role]
