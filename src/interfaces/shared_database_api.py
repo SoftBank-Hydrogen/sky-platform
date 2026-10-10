@@ -36,7 +36,8 @@ def run_shared_database_api(args, parser):
         PostgresOperationStore(None, workspace=workspace)
         policy_path = getattr(args, "operating_review_policy_config", None)
         policies = (load_operating_policies(policy_path, account_id=settings.pool.account_id,
-                                           region=state.region) if policy_path else None)
+                                           region=state.region)
+                    if policy_path or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ else None)
     except (ValueError, TypeError, KeyError, OSError):
         parser.error("Invalid shared database API configuration or identity settings")
     if args.check_config:

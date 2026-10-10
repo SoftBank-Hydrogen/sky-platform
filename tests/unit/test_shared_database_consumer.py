@@ -171,3 +171,14 @@ def test_task_protection_is_enabled_and_released(consumer):
     service.protection = Mock()
     service.consume_once()
     assert [call.args for call in service.protection.set.call_args_list] == [(True,), (False,)]
+
+
+def test_dedicated_consumer_cannot_acknowledge_allocation_but_accepts_its_own_kind(consumer):
+    _, store, queue, worker, operation = consumer
+    service = SharedDatabaseConsumer(store, queue, worker, kind="db_dedicated_prepare")
+    assert service.consume_once() == "other_kind"
+    worker.execute.assert_not_called()
+    queue.delete.assert_not_called()
+    operation.kind = "db_dedicated_prepare"
+    assert service.consume_once() == "succeeded"
+    worker.execute.assert_called_once_with("op", "attempt")

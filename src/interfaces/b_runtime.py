@@ -109,11 +109,14 @@ def main(argv):
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "build", "shared-database", "shared-database-queue"),
+        choices=("outbox", "build", "shared-database", "shared-database-queue",
+                 "dedicated-database", "dedicated-database-queue"),
         required=True,
         help="Select outbox or shared DB allocation execution; no app deployment consumer",
     )
     worker.add_argument("--pool-config")
+    worker.add_argument("--dedicated-config")
+    worker.add_argument("--operating-review-policy-config")
     worker.add_argument(
         "--initialize-pool",
         action="store_true",
@@ -173,7 +176,7 @@ def main(argv):
             )
         return
     if args.mode == "api":
-        if args.operating_review_policy_config and not args.shared_database_pool_config:
+        if (args.operating_review_policy_config or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ) and not args.shared_database_pool_config:
             parser.error("Operating reviews require hosted shared database intake")
         if args.shared_database_pool_config:
             from interfaces.shared_database_api import run_shared_database_api
@@ -234,6 +237,13 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.worker_mode in {"dedicated-database", "dedicated-database-queue"}:
+        from interfaces.dedicated_database_worker import run_dedicated_database
+
+        run_dedicated_database(args, parser)
+        return
+    if args.dedicated_config or args.operating_review_policy_config:
+        parser.error("Dedicated database options require dedicated database mode")
     if args.worker_mode in {"shared-database", "shared-database-queue"}:
         from interfaces.shared_database_worker import run_shared_database
 
@@ -285,6 +295,11 @@ def main(argv):
             if allocation_url == url:
                 raise ValueError("Allocation queue must be separate from the build queue")
             SqsOperationQueue(allocation_url, region=settings.region, account_id=account, client=object())
+        dedicated_url = os.environ.get("SKY_DEDICATED_DATABASE_QUEUE_URL", "")
+        if dedicated_url:
+            if dedicated_url in {url, allocation_url}:
+                raise ValueError("Dedicated preparation queue must be separate")
+            SqsOperationQueue(dedicated_url, region=settings.region, account_id=account, client=object())
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
     except ValueError:
@@ -305,6 +320,8 @@ def main(argv):
             SqsOperationQueue(allocation_url, region=settings.region, account_id=account)
             if allocation_url
             else None,
+            promotion_queue=SqsOperationQueue(dedicated_url, region=settings.region, account_id=account)
+            if dedicated_url else None,
         )
         publisher = OutboxPublisher(store, queue, "outbox-" + uuid4().hex)
         stop = threading.Event()

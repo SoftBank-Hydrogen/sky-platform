@@ -33,7 +33,10 @@ class AllocationQueueRouter:
 
 
 class SharedDatabaseConsumer:
-    def __init__(self, operations, queue, worker, *, heartbeat_seconds=30, protection=None):
+    def __init__(self, operations, queue, worker, *, heartbeat_seconds=30, protection=None, kind=KIND):
+        if kind not in {KIND, PROMOTION_KIND}:
+            raise ValueError("Unsupported database consumer kind")
+        self.kind = kind
         self.operations, self.queue, self.worker = operations, queue, worker
         self.heartbeat_seconds = heartbeat_seconds
         self.protection = protection
@@ -96,7 +99,7 @@ class SharedDatabaseConsumer:
             self.queue.extend(delivery, seconds=60)
             return "invalid"
         # A shared queue must not let this consumer acknowledge another worker's job.
-        if operation.kind != KIND:
+        if operation.kind != self.kind:
             self.queue.extend(delivery, seconds=30)
             return "other_kind"
         if operation.attempt_id != message["attempt_id"] or operation.status in {

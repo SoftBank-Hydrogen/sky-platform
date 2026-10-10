@@ -1,6 +1,7 @@
 """Operator-configured policies; browser requests cannot choose a DB target."""
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,8 +12,16 @@ from domain.database import DatabaseBinding
 
 
 def load_operating_policies(path, *, account_id, region):
-    with Path(path).open("rb") as source:
-        raw = source.read(16385)
+    environment = os.environ.get("SKY_OPERATING_REVIEW_POLICIES_JSON")
+    if environment is not None:
+        if path:
+            raise ValueError("Use policy file or environment, not both")
+        raw = environment.encode()
+    elif path:
+        with Path(path).open("rb") as source:
+            raw = source.read(16385)
+    else:
+        raise ValueError("Explicit operating policies required")
     if len(raw) > 16384:
         raise ValueError("Operating policies exceed the size limit")
 
