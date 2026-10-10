@@ -27,7 +27,16 @@ from interfaces.http.alb_identity import AlbRequestAuthenticator
 
 
 def load_pool_configuration(path):
-    data = Path(path).read_bytes()
+    env = os.environ.get("SKY_SHARED_DATABASE_POOL_JSON")
+    if env is not None:
+        if path:
+            raise ValueError("Use pool file or environment registration, not both")
+        data = env.encode()
+    elif path:
+        with Path(path).open("rb") as source:
+            data = source.read(65537)
+    else:
+        raise ValueError("Explicit pool registration required")
     if len(data) > 65536:
         raise ValueError("Pool configuration exceeds 64 KiB")
     value = json.loads(data)
@@ -84,7 +93,7 @@ def load_hosted_identity(args):
 
 def run_shared_database(args, parser):
     try:
-        if not args.pool_config:
+        if not args.pool_config and "SKY_SHARED_DATABASE_POOL_JSON" not in os.environ:
             raise ValueError("Explicit registered pool and current membership configuration are required")
         state = PostgresStateSettings.from_environment()
         settings, digest = load_pool_configuration(args.pool_config)
@@ -100,8 +109,17 @@ def run_shared_database(args, parser):
         queued = args.worker_mode == "shared-database-queue"
         if args.initialize_pool and (queued or args.operation_id or args.attempt_id):
             raise ValueError("Pool initialization must be explicit and separate from queued allocations")
+        protection = None
         if queued:
             from adapters.aws.job_queue import SqsOperationQueue
+
+            protection_mode = os.environ.get("SKY_ALLOCATION_TASK_PROTECTION", "disabled")
+            if protection_mode not in {"required", "disabled"}:
+                raise ValueError("Invalid allocation protection mode")
+            if protection_mode == "required":
+                from adapters.aws.task_protection import EcsTaskProtection
+
+                protection = EcsTaskProtection()
 
             queue_url = os.environ.get("SKY_SHARED_DATABASE_QUEUE_URL", "")
             SqsOperationQueue(
@@ -151,6 +169,7 @@ def run_shared_database(args, parser):
                 operations,
                 SqsOperationQueue(queue_url, region=state.region, account_id=settings.pool.account_id),
                 worker,
+                protection=protection,
             )
             stop = threading.Event()
             previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}

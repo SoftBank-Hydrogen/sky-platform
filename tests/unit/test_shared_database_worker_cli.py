@@ -344,3 +344,15 @@ def test_initialization_check_config_has_no_external_effects(configuration):
         ),
     ):
         main([*arguments(path), "--initialize-pool", "--check-config"])
+
+
+def test_pool_registration_can_arrive_as_ecs_environment(configuration, monkeypatch):
+    path, _ = configuration
+    expected = load_pool_configuration(path)
+    monkeypatch.setenv("SKY_SHARED_DATABASE_POOL_JSON", path.read_text())
+    assert load_pool_configuration(None) == expected
+    with pytest.raises(ValueError):
+        load_pool_configuration(path)
+    monkeypatch.setenv("SKY_SHARED_DATABASE_POOL_JSON", " " * 65537)
+    with pytest.raises(ValueError):
+        load_pool_configuration(None)

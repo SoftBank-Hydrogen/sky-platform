@@ -27,9 +27,10 @@ class AllocationQueueRouter:
 
 
 class SharedDatabaseConsumer:
-    def __init__(self, operations, queue, worker, *, heartbeat_seconds=30):
+    def __init__(self, operations, queue, worker, *, heartbeat_seconds=30, protection=None):
         self.operations, self.queue, self.worker = operations, queue, worker
         self.heartbeat_seconds = heartbeat_seconds
+        self.protection = protection
 
     @contextmanager
     def ownership(self, lease, delivery):
@@ -40,6 +41,8 @@ class SharedDatabaseConsumer:
                 lost.set()
                 raise AllocationOwnershipLost("Allocation execution ownership lost")
             self.queue.extend(delivery, seconds=300)
+            if self.protection is not None and not stop.is_set():
+                self.protection.set(True)
 
         def heartbeat():
             while not stop.wait(self.heartbeat_seconds):
@@ -88,6 +91,8 @@ class SharedDatabaseConsumer:
             return "busy"
         self.worker.ownership = lambda lease: self.ownership(lease, delivery)
         try:
+            if self.protection is not None:
+                self.protection.set(True)
             result = self.worker.execute(operation.id, operation.attempt_id)
             # Only durable terminal states can acknowledge a delivery. An uncertain
             # commit/lease loss must remain observable for expiry recovery.
@@ -101,3 +106,8 @@ class SharedDatabaseConsumer:
             return "unavailable"
         finally:
             self.worker.ownership = None
+            if self.protection is not None:
+                try:
+                    self.protection.set(False)
+                except OSError:
+                    pass

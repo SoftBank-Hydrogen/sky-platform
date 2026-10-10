@@ -121,3 +121,18 @@ def test_missing_allocation_queue_never_sends_allocation_to_builder(consumer):
     with pytest.raises(OSError):
         router.publish(delivery)
     default.publish.assert_not_called()
+
+
+def test_task_protection_failure_prevents_allocation(consumer):
+    service, _store, queue, worker, _operation = consumer
+    service.protection = Mock(set=Mock(side_effect=OSError()))
+    assert service.consume_once() == "unavailable"
+    worker.execute.assert_not_called()
+    queue.delete.assert_not_called()
+
+
+def test_task_protection_is_enabled_and_released(consumer):
+    service, _store, _queue, _worker, _operation = consumer
+    service.protection = Mock()
+    service.consume_once()
+    assert [call.args for call in service.protection.set.call_args_list] == [(True,), (False,)]
