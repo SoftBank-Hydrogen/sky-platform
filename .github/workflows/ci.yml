@@ -55,6 +55,7 @@ jobs:
               'adapters/aws/job_queue.py', 'application/outbox.py',
               'ports/deployment_reads.py', 'adapters/state/deployment_reads.py',
               'application/deployment_reads.py', 'interfaces/http/deployment_reads.py',
+              'application/deployment_writes.py',
           }
           assert required <= files, sorted(required - files)
           PY
