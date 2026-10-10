@@ -53,6 +53,8 @@ jobs:
               'ports/state.py', 'adapters/state/records.py', 'adapters/state/postgres.py',
               'ports/operations.py', 'ports/queue.py', 'adapters/state/operations.py',
               'adapters/aws/job_queue.py', 'application/outbox.py',
+              'ports/deployment_reads.py', 'adapters/state/deployment_reads.py',
+              'application/deployment_reads.py',
           }
           assert required <= files, sorted(required - files)
           PY
