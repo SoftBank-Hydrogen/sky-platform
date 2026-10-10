@@ -1,12 +1,17 @@
 [
   {
-    "name":"sky-service",
-    "kind":"sky",
-    "httpUrl":"https://YOUR-SKY-HOST",
-    "cookieFile":"/run/secrets/sky_cookie",
-    "discovery":{
-      "allowedHosts":["*.ecs.ap-northeast-2.on.aws"],
-      "applicationIds":["YOUR-GAME-APPLICATION-ID"]
-    }
+    "name": "sky-service",
+    "kind": "sky",
+    "httpUrl": "https://YOUR-SKY-HOST",
+    "cookieFile": "/run/secrets/sky_cookie",
+    "discovery": {
+      "allowedHosts": [
+        "*.ecs.ap-northeast-2.on.aws"
+      ],
+      "applicationIds": [
+        "YOUR-GAME-APPLICATION-ID"
+      ]
+    },
+    "authMode": "hosted"
   }
 ]

@@ -25,6 +25,8 @@ function validateTargets(targets) {
     if (!target || !/^[a-zA-Z0-9_-]{1,48}$/.test(target.name) || names.has(target.name)) throw new Error('Invalid/duplicate target name');
     names.add(target.name);
     if (!['sky', 'game'].includes(target.kind)) throw new Error('Target kind must be sky or game');
+    if (target.authMode !== undefined && (target.kind !== 'sky' || !['local', 'hosted'].includes(target.authMode))) throw new Error('Invalid authMode');
+    if (target.authMode === 'hosted' && !target.cookieFile) throw new Error('Hosted targets require cookieFile');
     validateDiscovery(target);
     const url = new URL(target.httpUrl);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
@@ -49,9 +51,11 @@ function credentials(target) {
   }
   return headers;
 }
-async function get(target, path, headers = {}) {
+async function get(target, path, headers = {}, deadline = Infinity) {
+  const remaining = Math.min(5000, deadline - Date.now());
+  if (remaining <= 0) throw new ObservationError('timeout');
   const response = await fetch(new URL(path, target.httpUrl), {
-    headers: { ...credentials(target), ...headers }, redirect: 'manual', signal: AbortSignal.timeout(5000),
+    headers: { ...credentials(target), ...headers }, redirect: 'manual', signal: AbortSignal.timeout(Math.ceil(remaining)),
   });
   if (response.status !== 200) {
     await response.body?.cancel();
@@ -66,6 +70,53 @@ async function get(target, path, headers = {}) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+async function loadJobs(target, headers) {
+  const deadline = Date.now() + 30000;
+  const jobs = [], seen = new Set(), ids = new Set();
+  let path = '/api/jobs', bytes = 0;
+  for (let page = 0; page < 100; page++) {
+    const raw = await get(target, path, headers, deadline);
+    bytes += Buffer.byteLength(raw);
+    if (bytes > 16 * 1024 * 1024) throw new ObservationError('schema');
+    const body = JSON.parse(raw);
+    const items = Array.isArray(body) ? body : body?.items;
+    const cursor = Array.isArray(body) ? null : body?.next_cursor;
+    if (!Array.isArray(items) || items.some(job => !job || typeof job.status !== 'string') ||
+        !(cursor === null || (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 1024))) {
+      throw new ObservationError('schema');
+    }
+    for (const job of items) {
+      if (job.id !== undefined) {
+        if (typeof job.id !== 'string' || !job.id || ids.has(job.id)) throw new ObservationError('schema');
+        ids.add(job.id);
+      }
+    }
+    jobs.push(...items);
+    if (jobs.length > 10000) throw new ObservationError('schema');
+    if (cursor === null) return jobs;
+    if (seen.has(cursor)) throw new ObservationError('schema');
+    seen.add(cursor);
+    path = '/api/jobs?cursor=' + encodeURIComponent(cursor);
+  }
+  throw new ObservationError('schema');
+}
+async function collectSource(target, discovered, capacity) {
+  const snapshot = await collect(target);
+  if (target.discovery) {
+    try {
+      if (!snapshot[JOBS]) throw new Error();
+      const { jobs, headers } = snapshot[JOBS];
+      const deadline = Date.now() + 30000;
+      const result = await discover(target, jobs, async id =>
+        JSON.parse(await get(target, '/api/jobs/' + id, headers, deadline)));
+      discovered.set(target.name, result.targets.slice(0, capacity));
+      snapshot.sky_discovery_up = 1;
+      snapshot.sky_discovery_rejected = result.rejected + Math.max(0, result.targets.length - capacity);
+    } catch { snapshot.sky_discovery_up = 0; }
+  }
+  delete snapshot[JOBS];
+  return snapshot;
 }
 function probe(target) {
   return new Promise(resolve => {
@@ -103,15 +154,21 @@ async function collect(target) {
       const health = JSON.parse(await get(target, '/health'));
       if (health?.status !== 'ok') throw new ObservationError('schema');
       observations.sky_observed_http_up = 1;
-      const page = await get(target, '/');
-      const token = page.match(/const token='([A-Za-z0-9_-]{32,128})';/)?.[1];
-      if (!token) throw new ObservationError('schema');
-      const jobs = JSON.parse(await get(target, '/api/jobs', { 'X-Sky-Token': token }));
-      if (!Array.isArray(jobs) || jobs.some(job => !job || typeof job.status !== 'string')) throw new ObservationError('schema');
+      const headers = {};
+      if (target.authMode === 'hosted') {
+        const config = JSON.parse(await get(target, '/api/config'));
+        if (typeof config?.ai_available !== 'boolean' || !Array.isArray(config.targets)) throw new ObservationError('schema');
+      } else {
+        const page = await get(target, '/');
+        const token = page.match(/const token='([A-Za-z0-9_-]{32,128})';/)?.[1];
+        if (!token) throw new ObservationError('schema');
+        headers['X-Sky-Token'] = token;
+      }
+      const jobs = await loadJobs(target, headers);
       const counts = { succeeded: 0, failed: 0, other: 0 };
       for (const job of jobs) counts[Object.hasOwn(counts, job.status) ? job.status : 'other']++;
       observations.sky_observed_jobs = counts;
-      if (target.discovery) observations[JOBS] = { jobs, token };
+      if (target.discovery) observations[JOBS] = { jobs, headers };
     } else {
       // One failed endpoint must not prevent observing the other protocols.
       try {
@@ -200,19 +257,8 @@ function main() {
     active = true;
     try {
       await Promise.all(targets.map(async target => {
-        const snapshot = await collect(target);
-        if (target.discovery) {
-          try {
-            if (!snapshot[JOBS]) throw new Error();
-            const { jobs, token } = snapshot[JOBS];
-            const result = await discover(target, jobs, async id => JSON.parse(await get(target, `/api/jobs/${id}`, { 'X-Sky-Token': token })));
-            const capacity = Math.floor(Math.max(0,20-targets.length) / targets.filter(item => item.discovery).length);
-            discovered.set(target.name, result.targets.slice(0, capacity));
-            snapshot.sky_discovery_up = 1;
-            snapshot.sky_discovery_rejected = result.rejected + Math.max(0, result.targets.length - capacity);
-          } catch { snapshot.sky_discovery_up = 0; }
-        }
-        delete snapshot[JOBS];
+        const capacity = Math.floor(Math.max(0, 20 - targets.length) / (targets.filter(item => item.discovery).length || 1));
+        const snapshot = await collectSource(target, discovered, capacity);
         snapshots.set(target.name, snapshot);
       }));
       const dynamic = [...discovered.values()].flat().filter(item => !targets.some(target => target.name === item.name)).slice(0, Math.max(0,20-targets.length));
@@ -237,4 +283,4 @@ function main() {
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); server.close(); });
 }
 if (require.main === module) main();
-module.exports = { validateTargets, collect, render };
+module.exports = { validateTargets, collect, collectSource, render };
