@@ -9,7 +9,13 @@ from ports.deployment_reads import DeploymentSnapshot, SnapshotPage
 
 
 def _job(**changes):
-    return {"id": "job-1", "status": "succeeded", "deployment_state": "active", "result": {"url": "https://example.test"}, **changes}
+    return {
+        "id": "job-1",
+        "status": "succeeded",
+        "deployment_state": "active",
+        "result": {"url": "https://example.test"},
+        **changes,
+    }
 
 
 def _history(*health):
@@ -35,7 +41,10 @@ def test_recovery_and_non_active_deployments_have_no_proposal():
     assert runtime_proposal(_job(), _history(False, False, True)) is None
     assert runtime_proposal(_job(), _history(False, False)) is None
     assert runtime_proposal(_job(deployment_state="superseded"), _history(False, False, False)) is None
-    assert runtime_proposal(_job(release_rollback_state="needs_attention"), _history(False, False, False)) is None
+    assert (
+        runtime_proposal(_job(release_rollback_state="needs_attention"), _history(False, False, False))
+        is None
+    )
 
 
 def test_hosted_read_exposes_proposal_only_to_owning_organization():
