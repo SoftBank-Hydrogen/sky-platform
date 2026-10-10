@@ -9,6 +9,7 @@ import pytest
 psycopg = pytest.importorskip("psycopg")
 
 from adapters.state.postgres import PostgresDeploymentRecordStore
+from ports.state import RecordConflict
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +36,9 @@ def test_replicas_initialize_concurrently_without_duplicate_migrations(database)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda _: PostgresDeploymentRecordStore(database).initialize(), range(4)))
     with database() as connection:
-        assert connection.execute("SELECT version FROM sky_state.schema_versions").fetchall() == [(1,)]
+        assert connection.execute(
+            "SELECT version FROM sky_state.schema_versions ORDER BY version"
+        ).fetchall() == [(1,), (2,)]
 
 
 def test_job_health_and_github_survive_new_adapter_and_are_detached(store, database):
@@ -97,8 +100,9 @@ def test_failed_upsert_rolls_back_and_keeps_committed_record(store, database):
 
     failing = PostgresDeploymentRecordStore(RollbackConnection, workspace=store.workspace)
     with pytest.raises(OSError):
-        failing.save_job("job1", {"value": "uncommitted"})
+        failing.save_job("job1", {"value": "uncommitted"}, expected_revision=1)
     assert store.load_job("job1").record == {"value": "committed"}
+    assert store.load_job("job1").revision == 1
 
 
 def test_newer_schema_refuses_startup_and_preserves_records(store, database):
@@ -112,3 +116,147 @@ def test_newer_schema_refuses_startup_and_preserves_records(store, database):
     finally:
         with database() as connection:
             connection.execute("DELETE FROM sky_state.schema_versions WHERE version = 999")
+
+
+def test_stale_snapshot_cannot_overwrite_another_replica(store, database):
+    store.save_job("job1", {"events": []})
+    other = PostgresDeploymentRecordStore(database, workspace=store.workspace)
+    first, stale = store.load_job("job1"), other.load_job("job1")
+    assert store.save_job("job1", {"events": ["A"]}, expected_revision=first.revision) == 2
+    committed = store.load_job("job1")
+    with pytest.raises(RecordConflict):
+        other.save_job("job1", {"events": ["B"]}, expected_revision=stale.revision)
+    assert store.load_job("job1") == committed
+
+
+def test_simultaneous_updates_have_exactly_one_winner(store, database):
+    from threading import Barrier
+
+    store.save_job("job1", {"winner": None})
+    barrier = Barrier(8)
+
+    def update(index):
+        replica = PostgresDeploymentRecordStore(database, workspace=store.workspace)
+        revision = replica.load_job("job1").revision
+        barrier.wait(timeout=10)
+        try:
+            replica.save_job("job1", {"winner": index}, expected_revision=revision)
+            return index
+        except RecordConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        winners = [index for index in pool.map(update, range(8)) if index is not None]
+    assert len(winners) == 1
+    assert store.load_job("job1").record == {"winner": winners[0]}
+    assert store.load_job("job1").revision == 2
+
+
+def test_duplicate_create_and_missing_update_are_conflicts(store):
+    store.save_job("job1", {"value": "original"})
+    before = store.load_job("job1")
+    with pytest.raises(RecordConflict):
+        store.save_job("job1", {"value": "overwrite"})
+    with pytest.raises(RecordConflict):
+        store.save_job("missing", {}, expected_revision=1)
+    assert store.load_job("job1") == before
+    assert store.list_job_ids() == ("job1",)
+
+
+@pytest.mark.parametrize("kind", ["health", "github_sources"])
+def test_optional_records_also_reject_stale_writes(store, kind):
+    if kind == "health":
+        load = lambda: store.load_health_record("job1")
+        save = lambda value, **kwargs: store.save_health("job1", value, **kwargs)
+    else:
+        load = store.load_github_sources_record
+        save = store.save_github_sources
+    assert load() is None
+    assert save([{"value": "original"}]) == 1
+    stale = load()
+    assert save([{"value": "current"}], expected_revision=stale.revision) == 2
+    committed = load()
+    with pytest.raises(RecordConflict):
+        save([{"value": "stale"}], expected_revision=stale.revision)
+    with pytest.raises(RecordConflict):
+        save([])
+    assert load() == committed
+
+
+def test_version_one_migration_preserves_documents_and_timestamps(database):
+    # Isolated schema in a rolled-back transaction: never alter the shared test ledger.
+    with database() as connection:
+        connection.execute("BEGIN")
+        connection.execute("DROP SCHEMA sky_state CASCADE")
+        connection.execute("CREATE SCHEMA sky_state")
+        connection.execute("CREATE TABLE sky_state.schema_versions (version integer PRIMARY KEY)")
+        connection.execute("INSERT INTO sky_state.schema_versions VALUES (1)")
+        connection.execute("""CREATE TABLE sky_state.metadata_records (
+            workspace text, kind text, record_id text, document jsonb NOT NULL,
+            modified_at timestamptz NOT NULL, PRIMARY KEY(workspace,kind,record_id))""")
+        connection.execute("""INSERT INTO sky_state.metadata_records VALUES
+            ('legacy','job','job1','{"value":"retained"}', '2026-01-01T00:00:00Z')""")
+
+        class BorrowedConnection:
+            def __enter__(self):
+                return connection
+
+            def __exit__(self, *args):
+                pass
+
+        migrated = PostgresDeploymentRecordStore(BorrowedConnection, workspace="legacy")
+        migrated.initialize()
+        migrated.initialize()
+        snapshot = migrated.load_job("job1")
+        assert snapshot.record == {"value": "retained"}
+        assert snapshot.revision == 1
+        assert snapshot.modified_at == "2026-01-01T00:00:00+00:00"
+        assert migrated.save_job("job1", {}, expected_revision=1) == 2
+        connection.rollback()
+
+
+def test_concurrent_creates_have_exactly_one_winner(store, database):
+    from threading import Barrier
+
+    barrier = Barrier(8)
+
+    def create(index):
+        replica = PostgresDeploymentRecordStore(database, workspace=store.workspace)
+        barrier.wait(timeout=10)
+        try:
+            replica.save_job("job1", {"winner": index})
+            return index
+        except RecordConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        winners = [index for index in pool.map(create, range(8)) if index is not None]
+    assert len(winners) == 1
+    snapshot = store.load_job("job1")
+    assert snapshot.record == {"winner": winners[0]}
+    assert snapshot.revision == 1
+
+
+def test_failed_migration_rolls_back_schema_and_ledger(database):
+    with database() as connection:
+        connection.execute("BEGIN")
+        connection.execute("DROP SCHEMA sky_state CASCADE")
+        connection.execute("CREATE SCHEMA sky_state")
+        connection.execute("CREATE TABLE sky_state.schema_versions (version integer PRIMARY KEY)")
+        connection.execute("INSERT INTO sky_state.schema_versions VALUES (1)")
+        connection.execute("CREATE TABLE sky_state.metadata_records (revision integer)")
+        connection.execute("SAVEPOINT before_migration")
+
+        class BorrowedConnection:
+            def __enter__(self):
+                return connection
+
+            def __exit__(self, *args):
+                pass
+
+        with pytest.raises(OSError):
+            PostgresDeploymentRecordStore(BorrowedConnection).initialize()
+        connection.execute("ROLLBACK TO SAVEPOINT before_migration")
+        assert connection.execute("SELECT version FROM sky_state.schema_versions").fetchall() == [(1,)]
+        assert connection.execute("SELECT count(*) FROM sky_state.metadata_records").fetchone() == (0,)
+        connection.rollback()

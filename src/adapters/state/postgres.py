@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from ports.state import StoredJob
+from ports.state import RecordConflict, StoredJob, StoredRecord
 
 
 @dataclass(frozen=True)
@@ -127,11 +127,11 @@ class PostgresDeploymentRecordStore:
 
     Each operation opens a short transaction; SQL errors are mapped to the port's
     OSError contract. initialize() is explicit, transactional, and serialized across
-    replicas. This compatibility projection does not supply optimistic updates or
-    leases and must not be enabled on the legacy multi-replica App yet.
+    replicas. Writes require explicit snapshot revisions; missing revisions are
+    create-only. It supplies no leases and cannot activate the legacy App.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     MIGRATION_LOCK = 1936419188
 
     def __init__(self, connection_factory, *, workspace="team"):
@@ -163,20 +163,21 @@ class PostgresDeploymentRecordStore:
                     "SELECT version FROM sky_state.schema_versions ORDER BY version"
                 ).fetchall()
             )
-            if versions and versions != (self.SCHEMA_VERSION,):
+            if versions not in ((), (1,), (1, 2)):
                 raise ValueError("Unsupported state database schema version")
-            if versions:
-                return
-            connection.execute("""CREATE TABLE sky_state.metadata_records (
-                workspace text NOT NULL,
-                kind text NOT NULL CHECK (kind IN ('job', 'health', 'github_sources')),
-                record_id text NOT NULL,
-                document jsonb NOT NULL CHECK (document <> 'null'::jsonb),
-                modified_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-                PRIMARY KEY (workspace, kind, record_id))""")
-            connection.execute(
-                "INSERT INTO sky_state.schema_versions (version) VALUES (%s)", (self.SCHEMA_VERSION,)
-            )
+            if not versions:
+                connection.execute("""CREATE TABLE sky_state.metadata_records (
+                    workspace text NOT NULL,
+                    kind text NOT NULL CHECK (kind IN ('job', 'health', 'github_sources')),
+                    record_id text NOT NULL,
+                    document jsonb NOT NULL CHECK (document <> 'null'::jsonb),
+                    modified_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+                    PRIMARY KEY (workspace, kind, record_id))""")
+                connection.execute("INSERT INTO sky_state.schema_versions (version) VALUES (1)")
+            if 2 not in versions:
+                connection.execute("""ALTER TABLE sky_state.metadata_records
+                    ADD COLUMN revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0)""")
+                connection.execute("INSERT INTO sky_state.schema_versions (version) VALUES (2)")
 
     @staticmethod
     def _identity(job_id):
@@ -187,26 +188,42 @@ class PostgresDeploymentRecordStore:
     def _load(self, kind, identity):
         with self._connection() as connection:
             return connection.execute(
-                """SELECT document, modified_at FROM sky_state.metadata_records
+                """SELECT document, modified_at, revision FROM sky_state.metadata_records
                 WHERE workspace = %s AND kind = %s AND record_id = %s""",
                 (self.workspace, kind, identity),
             ).fetchone()
 
-    def _save(self, kind, identity, document):
+    def _save(self, kind, identity, document, *, expected_revision=None):
         from psycopg.types.json import Jsonb
 
-        # Validate before opening a connection; reject non-JSON and NaN values.
+        if expected_revision is not None and (
+            type(expected_revision) is not int
+            or expected_revision <= 0
+            or expected_revision >= 9223372036854775807
+        ):
+            raise ValueError("Invalid expected record revision")
         detached = json.loads(json.dumps(document, ensure_ascii=False, allow_nan=False))
         if detached is None:
             raise ValueError("Invalid null record")
         with self._connection() as connection:
-            connection.execute(
-                """INSERT INTO sky_state.metadata_records
-                (workspace, kind, record_id, document) VALUES (%s, %s, %s, %s)
-                ON CONFLICT (workspace, kind, record_id) DO UPDATE
-                SET document = EXCLUDED.document, modified_at = clock_timestamp()""",
-                (self.workspace, kind, identity, Jsonb(detached)),
-            )
+            if expected_revision is None:
+                row = connection.execute(
+                    """INSERT INTO sky_state.metadata_records
+                    (workspace, kind, record_id, document) VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (workspace, kind, record_id) DO NOTHING RETURNING revision""",
+                    (self.workspace, kind, identity, Jsonb(detached)),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """UPDATE sky_state.metadata_records
+                    SET document = %s, modified_at = clock_timestamp(), revision = revision + 1
+                    WHERE workspace = %s AND kind = %s AND record_id = %s AND revision = %s
+                    RETURNING revision""",
+                    (Jsonb(detached), self.workspace, kind, identity, expected_revision),
+                ).fetchone()
+            if row is None:
+                raise RecordConflict("Record changed or no longer matches the expected revision")
+            return row[0]
 
     def list_job_ids(self):
         with self._connection() as connection:
@@ -221,21 +238,29 @@ class PostgresDeploymentRecordStore:
         row = self._load("job", self._identity(job_id))
         if row is None:
             raise FileNotFoundError("Job record not found")
-        return StoredJob(row[0], row[1].isoformat())
+        return StoredJob(row[0], row[1].isoformat(), row[2])
 
-    def save_job(self, job_id, record):
-        self._save("job", self._identity(job_id), record)
+    def save_job(self, job_id, record, *, expected_revision=None):
+        return self._save("job", self._identity(job_id), record, expected_revision=expected_revision)
+
+    def load_health_record(self, job_id):
+        row = self._load("health", self._identity(job_id))
+        return StoredRecord(row[0], row[1].isoformat(), row[2]) if row else None
 
     def load_health(self, job_id):
-        row = self._load("health", self._identity(job_id))
-        return row[0] if row else None
+        snapshot = self.load_health_record(job_id)
+        return snapshot.record if snapshot else None
 
-    def save_health(self, job_id, history):
-        self._save("health", self._identity(job_id), history)
+    def save_health(self, job_id, history, *, expected_revision=None):
+        return self._save("health", self._identity(job_id), history, expected_revision=expected_revision)
+
+    def load_github_sources_record(self):
+        row = self._load("github_sources", "settings")
+        return StoredRecord(row[0], row[1].isoformat(), row[2]) if row else None
 
     def load_github_sources(self):
-        row = self._load("github_sources", "settings")
-        return row[0] if row else None
+        snapshot = self.load_github_sources_record()
+        return snapshot.record if snapshot else None
 
-    def save_github_sources(self, records):
-        self._save("github_sources", "settings", records)
+    def save_github_sources(self, records, *, expected_revision=None):
+        return self._save("github_sources", "settings", records, expected_revision=expected_revision)
