@@ -77,7 +77,10 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
     if request.compiled_target is not None:
         config = request.compiled_target.get("execution_configuration")
         if request.postgresql_binding:
-            database_mode = "create_rds" if request.new_managed_database else "existing_rds"
+            if request.target == 'cloud-run' and request.new_managed_database:
+                raise ValueError('Cloud SQL 자동 생성은 지원하지 않습니다.')
+            database_mode = ('existing_cloud_sql' if request.target == 'cloud-run' else
+                             'create_rds' if request.new_managed_database else 'existing_rds')
         elif request.sqlite_binding:
             database_mode = "sqlite_volume"
         else:
@@ -112,7 +115,7 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
             raise ValueError("CV-06: Resolved target and execution request disagree")
     if request.target == "cloud-run" and state.adapter.public is not (request.access_mode == "public"):
         raise ValueError("Cloud Run 어댑터의 공개 범위가 실행 요청과 다릅니다.")
-    if request.target == "aws-ecs-express":
+    if request.target == "aws-ecs-express" or (request.target == 'cloud-run' and request.postgresql_binding):
         result = state.adapter.deploy(
             request.project, request.plan, request.attempt_id, request.environment,
             postgres=request.postgres_request, migrations=request.migrations,

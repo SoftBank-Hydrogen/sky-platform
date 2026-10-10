@@ -12,13 +12,24 @@ from pathlib import Path
 
 from application.deployment_core import DeploymentPlan
 from adapters.aws.postgres import PostgresRequest
+from adapters.gcp.postgres import CloudSqlRequest
 from engine.deployment_policy import policy_from_record
 
 
 JOB_RECORD_VERSION = 1
 
 
-def postgres_request_from_job(job: dict) -> PostgresRequest | None:
+def postgres_request_from_job(job: dict) -> PostgresRequest | CloudSqlRequest | None:
+    if job.get('cloud_sql') is not None:
+        if job.get('postgres') is not None or job.get('target') != 'cloud-run':
+            raise ValueError('저장된 Cloud SQL 대상이 올바르지 않습니다.')
+        request = CloudSqlRequest(**job['cloud_sql'])
+        request.validate()
+        cloud = job.get('cloud') or {}
+        if (request.application_id != job.get('application_id')
+                or request.project != cloud.get('project') or request.region != cloud.get('region')):
+            raise ValueError('저장된 Cloud SQL 프로젝트·리전이 배포 대상과 다릅니다.')
+        return request
     configuration = job.get('postgres')
     if configuration is None:
         return None

@@ -22,6 +22,7 @@ RESOURCE_CAPABILITY_IDS = {
     "ECS Express service": "ecs_express_service",
     "new RDS PostgreSQL": "new_rds_provisioning",
     "existing RDS PostgreSQL": "existing_rds_binding",
+    "existing Cloud SQL PostgreSQL": "existing_cloud_sql_binding",
     "one-off SQL migration task": "sql_migration_task",
     "private S3 bucket": "private_s3_bucket",
     "CloudFront distribution": "cloudfront_distribution",
@@ -31,7 +32,8 @@ _IMPLEMENTED_RESOURCE_CAPABILITIES = {
     "local-docker": {"docker_image", "local_container"},
     "onprem-compose": {"docker_image", "compose_service", "sqlite_volume"},
     "onprem-vm": {"docker_image", "compose_service"},
-    "cloud-run": {"artifact_registry_repository", "runtime_service_account", "cloud_run_service"},
+    "cloud-run": {"artifact_registry_repository", "runtime_service_account", "cloud_run_service",
+                  "existing_cloud_sql_binding", "sql_migration_task"},
     "aws-ecs-express": {
         "cloudformation_base_stack",
         "ecr_repository",

@@ -24,6 +24,9 @@ class HealthResultMismatch(ValueError):
 
 
 _ASYNC_METHOD = re.compile(r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+([A-Za-z_$][\w$]*)\s*\(")
+# Extended form used by the Cloud Run path: also `async function name(` and async database factories.
+_ASYNC_METHOD_EXTENDED = re.compile(
+    r"\b([A-Za-z_$][\w$]*)\s*:\s*async\b|\basync\s+(?:function\s+)?([A-Za-z_$][\w$]*)\s*\(")
 _NODE_POSTGRES_IMPORT = re.compile(r"\b(?:require\s*\(\s*|from\s+)['\"](pg|postgres)['\"]")
 
 
@@ -62,11 +65,14 @@ def check_postgres_node_dependency(work: Path) -> None:
             raise ValueError("CV-04: npm lockfile does not match the PostgreSQL runtime dependencies")
 
 
-def check_async_database_callers(original: Path, work: Path) -> None:
+def check_async_database_callers(original: Path, work: Path, *, include_factories: bool = False) -> None:
     """Reject directly unhandled JS calls when SQLite methods become async.
 
     This is a narrow safety check, not proof that all runtime paths work.
+    include_factories adds the Cloud Run checks: `async function` declarations, database factory calls
+    that became async, and source excerpts in the error. The default keeps the AWS-verified behaviour.
     """
+    async_method = _ASYNC_METHOD_EXTENDED if include_factories else _ASYNC_METHOD
     for module in original.rglob("*.js"):
         if (module.is_symlink() or not module.is_file()
                 or any(part in {"node_modules", "dist", "build", "vendor", "tests"}
@@ -80,8 +86,8 @@ def check_async_database_callers(original: Path, work: Path) -> None:
         new = converted.read_text(encoding="utf-8", errors="replace")
         if not SQLITE_SOURCE.search(old) or not DATABASE_ENGINE_SOURCE["postgresql"].search(new):
             continue
-        old_async = {name for match in _ASYNC_METHOD.finditer(old) for name in match.groups() if name}
-        new_async = {name for match in _ASYNC_METHOD.finditer(new) for name in match.groups() if name}
+        old_async = {name for match in async_method.finditer(old) for name in match.groups() if name}
+        new_async = {name for match in async_method.finditer(new) for name in match.groups() if name}
         gained = new_async - old_async
         if not gained:
             continue
@@ -117,13 +123,19 @@ def check_async_database_callers(original: Path, work: Path) -> None:
                 + factory_pattern + r")\s*\(",
                 original_source,
             ))
-            if not receivers:
+            if not receivers and not (include_factories and gained.intersection(factories)):
                 continue
             unhandled = []
+            excerpts = []
             lines = source.splitlines()
             for name in sorted(gained):
-                call = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(receivers)))
-                                  + r")\." + re.escape(name) + r"\s*\(")
+                if include_factories and name in factories:
+                    call = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+                elif receivers:
+                    call = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(receivers)))
+                                      + r")\." + re.escape(name) + r"\s*\(")
+                else:
+                    continue
                 for line_number, line in enumerate(lines, 1):
                     match = call.search(line)
                     if match is None:
@@ -136,11 +148,14 @@ def check_async_database_callers(original: Path, work: Path) -> None:
                                    or re.search(r"\.then\s*\(.*=>\s*$", before))
                     if not handled:
                         unhandled.append(f"{name}@{line_number}")
+                        excerpts.append(f"{line_number}: {line.strip()[:240]}")
             if unhandled:
-                raise ValueError(
-                    f"CV-04: {caller_relative.as_posix()} calls async PostgreSQL methods without "
-                    f"awaiting or handling promises: {', '.join(unhandled[:8])}"
-                )
+                message = (f"CV-04: {caller_relative.as_posix()} calls async PostgreSQL methods without "
+                           f"awaiting or handling promises: {', '.join(unhandled[:8])}")
+                if include_factories:
+                    message += (". Update each call and its enclosing callback/startup path, then read back "
+                                "the file. Remaining source: " + " | ".join(excerpts[:8]))
+                raise ValueError(message)
 
 
 def check_source_change_scope(record: dict, original: Path, sqlite_conversion: dict | None = None,
@@ -238,14 +253,15 @@ def check_sqlite_migration_consistency(
     resources = plan.get("resources") if isinstance(plan, dict) else None
     if (not isinstance(plan, dict)
             or plan.get("conversion_pending") != "sqlite-to-postgresql"
-            or plan.get("target") != "aws-ecs-express"
+            or plan.get("target") not in {"aws-ecs-express", "cloud-run"}
             or not isinstance(database, dict)
             or database.get("binding") not in {"create", "existing"}
             or postgres_request is None
             or database.get("database_id") != postgres_request.database_id
             or not isinstance(resources, list)
             or "one-off SQL migration task" not in resources
-            or ("new RDS PostgreSQL" if database.get("binding") == "create" else "existing RDS PostgreSQL")
+            or ("existing Cloud SQL PostgreSQL" if plan.get('target') == 'cloud-run' else
+                "new RDS PostgreSQL" if database.get("binding") == "create" else "existing RDS PostgreSQL")
             not in resources
             or final_profile.database_engines != ("postgresql",)
             or "sqlite" in final_profile.requirements):
@@ -454,6 +470,10 @@ def check_database_consistency(
         if postgres_request is None or database.get("database_id") != postgres_request.database_id:
             raise ValueError("CV-03: Target database identity differs from execution binding")
         resource = "new RDS PostgreSQL" if database["binding"] == "create" else "existing RDS PostgreSQL"
+        if plan.get('target') == 'cloud-run':
+            if database['binding'] != 'existing':
+                raise ValueError('CV-03: Cloud SQL creation is not implemented')
+            resource = 'existing Cloud SQL PostgreSQL'
         if resource not in resources or final_profile.database_engines != ("postgresql",):
             raise ValueError("CV-03: PostgreSQL resource or final source requirement is missing")
 

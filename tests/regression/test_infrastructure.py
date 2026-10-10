@@ -47,10 +47,10 @@ class InfrastructureTests(unittest.TestCase):
         other_target = infrastructure_compatibility(profile, 'cloud-run', postgres=True)
         self.assertFalse(missing['compatible'])
         self.assertTrue(supported['compatible'])
-        self.assertFalse(other_target['compatible'])
+        self.assertTrue(other_target['compatible'])
         self.assertEqual(supported['database_engines'], ['postgresql'])
         self.assertTrue(supported['evidence'])
-        self.assertFalse(other_target['adapter_capabilities']['postgresql_binding'])
+        self.assertTrue(other_target['adapter_capabilities']['postgresql_binding'])
 
     def test_final_dockerfile_platform_is_checked_for_cloud_targets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -149,7 +149,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual(plan['workload'], 'postgresql-http')
         self.assertEqual(plan['database']['binding'], 'existing')
         self.assertIn('existing RDS PostgreSQL', plan['resources'])
-        with self.assertRaisesRegex(ValueError, '다릅니다'):
+        with self.assertRaisesRegex(ValueError, 'Cloud SQL'):
             explicit_infrastructure_plan('cloud-run', profile,
                                          existing_postgres_id='sky-demo-app')
         with self.assertRaisesRegex(ValueError, '다릅니다'):
@@ -184,7 +184,7 @@ class InfrastructureTests(unittest.TestCase):
         self.assertEqual([item['sky_deployment']['maximum_instances'] for item in candidates], [1, 1])
         self.assertEqual([item['access_mode'] for item in candidates], ['public', 'public'])
         self.assertTrue(all(not item['automatic_path_supports_database'] for item in candidates))
-        self.assertEqual([item['explicit_postgresql_binding'] for item in candidates], [False, True])
+        self.assertEqual([item['explicit_postgresql_binding'] for item in candidates], [True, True])
         self.assertTrue(all(item['monthly_cost_estimate_usd'] is None for item in candidates))
         self.assertEqual(automatic_target_context(['cloud-run'], False)[0]['access_mode'], 'authenticated')
 

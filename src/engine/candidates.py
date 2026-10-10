@@ -70,7 +70,7 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
         violations = [result for result in report["constraint_results"] if result["status"] == "violated"]
         unknown_rules = [result for result in report["constraint_results"] if result["status"] == "unknown"]
         database_binding_only = (
-            report["target"] == "aws-ecs-express"
+            report["target"] in {"aws-ecs-express", "cloud-run"}
             and report["database_engines"] == ["postgresql"]
             and [item["rule_id"] for item in violations] == ["DATA-BINDING-01"]
         )

@@ -80,7 +80,7 @@ def collect_sql_migrations(project: Path) -> MigrationBundle:
     return MigrationBundle(directory, tuple(migrations), digest.hexdigest())
 
 
-def stage_migrator_context(bundle: MigrationBundle, destination: Path) -> Path:
+def stage_migrator_context(bundle: MigrationBundle, destination: Path, *, cloud_sql=False) -> Path:
     """Copy a checked bundle into a dedicated Docker build context without app source."""
     fresh = collect_sql_migrations(bundle.directory.parent)
     if fresh.digest != bundle.digest:
@@ -93,7 +93,12 @@ def stage_migrator_context(bundle: MigrationBundle, destination: Path) -> Path:
     shutil.copyfile(source / 'postgres-migrator-package.json', destination / 'package.json')
     shutil.copyfile(source / 'postgres-migrator-package-lock.json', destination / 'package-lock.json')
     shutil.copyfile(source / 'postgres-migrator.js', destination / 'postgres-migrator.js')
-    shutil.copyfile(trusted_rds_ca_bundle(), destination / 'rds-global-bundle.pem')
+    if cloud_sql:
+        dockerfile = destination / 'Dockerfile'
+        dockerfile.write_text('\n'.join(line for line in dockerfile.read_text().splitlines()
+                                       if 'rds-global-bundle.pem' not in line) + '\n')
+    else:
+        shutil.copyfile(trusted_rds_ca_bundle(), destination / 'rds-global-bundle.pem')
     migration_dir = destination / 'migrations'
     migration_dir.mkdir(mode=0o700)
     for item in fresh.migrations:

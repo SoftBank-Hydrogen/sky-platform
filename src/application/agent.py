@@ -36,6 +36,7 @@ from adapters.database.migrations import collect_sql_migrations
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.aws.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
+from adapters.gcp.postgres import CloudSqlRequest
 
 MAX_AGENT_REQUEST_BYTES = 1024 * 1024
 COMPACT_AGENT_REQUEST_BYTES = 768 * 1024
@@ -98,6 +99,44 @@ Only deploy_application returning a verified URL means success. Never claim succ
 Use concise Korean messages for explanations to the user. No arbitrary shell command tool exists.
 """
 
+# Cloud Run (GCP) additions. They are inserted only for that target, so other targets (AWS) keep the
+# instructions they were verified with. Promote a block to INSTRUCTIONS after verifying it on AWS too.
+CLOUD_SQL_TRANSPORT = """For managed Cloud SQL, PGHOST is a Unix socket directory and PGSSLMODE is disable: the Cloud SQL
+connector handles encryption to the database. Do not force client TLS, request an RDS CA, or build a
+DATABASE_URL from this socket path. Use the supplied PG environment directly.
+"""
+ASYNC_CALLER_GUIDANCE = """If a database factory becomes async, await its result before exposing the server; propagate async through
+the server factory and startup caller. Update every WebSocket payload, completed-round save and shutdown
+call, not only HTTP routes. For timer callbacks, keep state advancement ordered and handle async save failures.
+Convert PostgreSQL BIGINT strings to numbers for existing numeric JSON fields when safely representable;
+preserve the application's HTTP and WebSocket response schema.
+"""
+_TRANSPORT_ANCHOR = "PostgreSQL client methods are asynchronous."
+_ASYNC_ANCHOR = "every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.\n"
+REASONING_EFFORTS = {'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'}
+
+
+def instructions_for(target: str | None) -> str:
+    """Model instructions for the selected deployment target."""
+    if target != 'cloud-run':
+        return INSTRUCTIONS
+    return (INSTRUCTIONS.replace(_TRANSPORT_ANCHOR, CLOUD_SQL_TRANSPORT + _TRANSPORT_ANCHOR, 1)
+            .replace(_ASYNC_ANCHOR, _ASYNC_ANCHOR + ASYNC_CALLER_GUIDANCE, 1))
+
+
+def reasoning_effort_for(target: str | None) -> str | None:
+    """Optional per-target setting, e.g. SKY_DEPLOY_REASONING_EFFORT_CLOUD_RUN=medium.
+    A target without its own setting keeps the default request."""
+    if not target:
+        return None
+    name = 'SKY_DEPLOY_REASONING_EFFORT_' + re.sub(r'[^A-Z0-9]', '_', target.upper())
+    effort = os.getenv(name, '').strip()
+    if not effort:
+        return None
+    if effort not in REASONING_EFFORTS:
+        raise AgentError(f'{name} 설정이 올바르지 않습니다.')
+    return effort
+
 
 class AgentError(RuntimeError):
     pass
@@ -119,9 +158,13 @@ class OpenAIDeployAgent:
         self.compact_at = COMPACT_AGENT_REQUEST_BYTES
         self.response_count = 0
         self.response_evidence = None
+        self.target = None   # set by DeploymentAgent; selects target-specific instructions and settings
+
+    def use_target(self, target):
+        self.target = target
 
     def compact_history(self, history):
-        payload = {"model": self.settings.model, "instructions": INSTRUCTIONS, "input": history}
+        payload = {"model": self.settings.model, "instructions": instructions_for(self.target), "input": history}
         request_body = json.dumps(payload).encode()
         if len(request_body) > MAX_AGENT_REQUEST_BYTES:
             raise AgentError('AI 작업 이력이 1 MiB를 넘어 압축 요청을 중단했습니다.')
@@ -148,10 +191,14 @@ class OpenAIDeployAgent:
     def next(self, history):
         if not self.settings.available:
             raise AgentError("서버에 OPENAI_API_KEY를 설정하세요.")
-        payload = {"model": self.settings.model, "store": False, "instructions": INSTRUCTIONS,
+        payload = {"model": self.settings.model, "store": False, "instructions": instructions_for(self.target),
                    "input": history, "tools": TOOLS, "tool_choice": "required",
                    "parallel_tool_calls": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": 6000}
+        effort = reasoning_effort_for(self.target)
+        if effort:
+            payload['reasoning'] = {'effort': effort}
+            payload['max_output_tokens'] = 10000
         request_body = json.dumps(payload).encode()
         if len(request_body) >= self.compact_at:
             try:
@@ -209,7 +256,7 @@ class OpenAIDeployAgent:
 class DeploymentTools:
     def __init__(self, original: Path, work: Path, job_id: str, environment, event, checkpoint,
                  *, adapter_factory, attempts=0, target="local-docker",
-                 infrastructure_plan=None, postgres_request: PostgresRequest | None = None,
+                 infrastructure_plan=None, postgres_request: PostgresRequest | CloudSqlRequest | None = None,
                  sqlite_conversion: dict | None = None,
                  local_sqlite_binding: dict | None = None,
                  deployment_policy: DeploymentPolicy | None = None,
@@ -227,8 +274,9 @@ class DeploymentTools:
             raise ValueError("Unsupported deployment target")
         self.target = target
         if postgres_request is not None:
-            if target != 'aws-ecs-express' or not isinstance(postgres_request, PostgresRequest):
-                raise ValueError('PostgreSQL 연결은 AWS ECS Express 대상에서만 사용할 수 있습니다.')
+            expected_type = {'aws-ecs-express': PostgresRequest, 'cloud-run': CloudSqlRequest}.get(target)
+            if expected_type is None or not isinstance(postgres_request, expected_type):
+                raise ValueError('PostgreSQL 연결 요청과 배포 대상이 다릅니다.')
             postgres_request.validate()
             if MANAGED_POSTGRES_ENV.intersection(self.environment) or 'DATABASE_URL' in self.environment:
                 raise ValueError('PostgreSQL 연결값은 사용자가 직접 덮어쓸 수 없습니다.')
@@ -460,7 +508,8 @@ class DeploymentTools:
             raise ValueError("Configure deployment after the most recent edit first")
         if self.sqlite_conversion is not None:
             check_postgres_node_dependency(self.work)
-            check_async_database_callers(self.original, self.work)
+            check_async_database_callers(self.original, self.work,
+                                         include_factories=self.target == "cloud-run")
         if self.deployment_policy is not None:
             access_mode = (self.infrastructure_plan or {}).get('compatibility', {}).get('access_mode')
             self.deployment_policy.require(
@@ -562,6 +611,8 @@ class DeploymentTools:
                 self.result = execute(ExecutionRequest(
                     target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
                     environment=self.environment, access_mode=access_mode,
+                    postgresql_binding=self.postgres_request is not None,
+                    postgres_request=self.postgres_request, migrations=migrations,
                     compiled_target=compiled_target,
                     source_transform=resolved_source_transform,
                 ), ExecutionState(adapter))
@@ -589,6 +640,8 @@ class DeploymentTools:
 class DeploymentAgent:
     def __init__(self, provider, tools: DeploymentTools, steps=0, max_steps=24):
         self.provider, self.tools, self.steps, self.max_steps = provider, tools, steps, max_steps
+        if isinstance(provider, OpenAIDeployAgent):
+            provider.use_target(tools.target)
 
     def run(self):
         inventory = []
@@ -608,6 +661,9 @@ class DeploymentAgent:
                 set(self.tools.environment) |
                 (MANAGED_POSTGRES_ENV if self.tools.postgres_request else set())),
             "managed_postgres_connection": self.tools.postgres_request is not None,
+            "managed_postgres_transport": ('cloud_sql_unix_socket'
+                if isinstance(self.tools.postgres_request, CloudSqlRequest) else
+                'rds_tls' if self.tools.postgres_request is not None else None),
             "sqlite_conversion": self.tools.sqlite_conversion,
             "local_sqlite_binding": self.tools.local_sqlite_binding,
             "attempts_used": self.tools.attempts}, ensure_ascii=False)}]
