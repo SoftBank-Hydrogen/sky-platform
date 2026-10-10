@@ -2729,11 +2729,21 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     parser.add_argument("--github-poll-interval", type=int, default=60,
                         help="Seconds between public GitHub branch checks (60–3600; 0 disables checks)")
     parser.add_argument("--read-only-database", action="store_true",
-                        help="Read persisted PostgreSQL deployments without local writers (loopback only)")
+                        help="Read persisted PostgreSQL deployments without local writers")
     args = parser.parse_args()
+    if args.auth_mode == 'local' and (args.alb_trusts_file or args.memberships_file):
+        parser.error('ALB trust and membership files require --auth-mode alb')
+    if args.auth_mode == 'alb' and (not args.alb_trusts_file or not args.memberships_file):
+        parser.error('--auth-mode alb requires both trust and membership files')
+    authenticator = None
+    if args.auth_mode == 'alb':
+        try:
+            authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            parser.error(f'Invalid hosted identity configuration: {exc}')
     if args.read_only_database:
-        if args.host not in {'127.0.0.1', 'localhost'}:
-            parser.error('--read-only-database requires loopback until hosted authentication is implemented')
+        if authenticator is None and args.host not in {'127.0.0.1', 'localhost'}:
+            parser.error('--read-only-database requires loopback or --auth-mode alb')
         from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
         from adapters.state.deployment_reads import PostgresDeploymentReads
         from application.deployment_reads import DeploymentReadService
@@ -2744,7 +2754,8 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
             reads = PostgresDeploymentReads(RotatingDatabaseConnection(settings), workspace=workspace)
         except ValueError as error:
             parser.error(str(error))
-        app = DatabaseReadApp(DeploymentReadService(reads), workspace=workspace)
+        app = DatabaseReadApp(DeploymentReadService(reads), workspace=workspace,
+                              authenticator=authenticator)
         server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
         print(f"{product_name} (read-only): http://{args.host}:{args.port}", flush=True)
         try:
@@ -2758,16 +2769,6 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
         parser.error('--monitor-interval must be 0 or 60–3600 seconds')
     if args.github_poll_interval != 0 and not 60 <= args.github_poll_interval <= 3600:
         parser.error('--github-poll-interval must be 0 or 60–3600 seconds')
-    if args.auth_mode == 'local' and (args.alb_trusts_file or args.memberships_file):
-        parser.error('ALB trust and membership files require --auth-mode alb')
-    if args.auth_mode == 'alb' and (not args.alb_trusts_file or not args.memberships_file):
-        parser.error('--auth-mode alb requires both trust and membership files')
-    authenticator = None
-    if args.auth_mode == 'alb':
-        try:
-            authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
-        except (OSError, ValueError, TypeError, UnicodeError) as exc:
-            parser.error(f'Invalid hosted identity configuration: {exc}')
     with StateDirectoryLock(args.state_dir) as state_dir:
         app = App(state_dir, monitor_interval=args.monitor_interval,
                   github_poll_interval=args.github_poll_interval, authenticator=authenticator)

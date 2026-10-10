@@ -1,6 +1,7 @@
 """Actual HTTP requests to the read-only boundary, backed by disposable PostgreSQL."""
 
 import base64
+import io
 import json
 import threading
 from http.client import HTTPConnection
@@ -23,7 +24,9 @@ pytest_plugins = ["tests.contract.test_deployment_reads"]
 def http(setup):
     store, _connect, service = setup
     app = DatabaseReadApp(service, workspace=store.workspace)
-    app.authenticator = Mock(authenticate=lambda token: principal() if token == app.token else None)
+    app.authenticator = Mock(
+        authenticate_request=lambda headers: principal() if headers.get("X-Sky-Token") == app.token else None
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(app))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -149,6 +152,67 @@ def test_read_only_cli_bypasses_local_app_lock_and_background_workers():
 def test_read_only_cli_rejects_public_bind():
     with (
         patch("sys.argv", ["sky-platform", "--read-only-database", "--host", "0.0.0.0"]),
+        pytest.raises(SystemExit),
+    ):
+        serve()
+
+
+def test_read_only_cli_accepts_public_bind_only_with_verified_alb_configuration():
+    fake_server = Mock()
+    authenticator = Mock(authenticate_request=Mock(return_value=None))
+    with (
+        patch(
+            "sys.argv",
+            [
+                "sky-platform",
+                "--read-only-database",
+                "--host",
+                "0.0.0.0",
+                "--auth-mode",
+                "alb",
+                "--alb-trusts-file",
+                "trusts.json",
+                "--memberships-file",
+                "memberships.json",
+            ],
+        ),
+        patch("interfaces.http.server.AlbRequestAuthenticator.from_files", return_value=authenticator),
+        patch("adapters.state.postgres.PostgresStateSettings.from_environment", return_value=Mock()),
+        patch("adapters.state.postgres.RotatingDatabaseConnection"),
+        patch("interfaces.http.server.ThreadingHTTPServer", return_value=fake_server) as server_class,
+        patch("interfaces.http.server.App", side_effect=AssertionError("Legacy App constructed")),
+    ):
+        serve()
+    assert server_class.call_args.args[0] == ("0.0.0.0", 8080)
+    fake_server.serve_forever.assert_called_once()
+    handler_type = server_class.call_args.args[1]
+    handler = handler_type.__new__(handler_type)
+    handler.path = "/"
+    handler.headers = {}
+    handler.json_response = Mock()
+    handler.send_response = Mock()
+    handler.wfile = io.BytesIO()
+    handler.do_GET()
+    authenticator.authenticate_request.assert_called_once_with(handler.headers)
+    handler.json_response.assert_called_once_with(403, {"error": "Invalid session token"})
+    handler.send_response.assert_not_called()
+
+
+def test_read_only_cli_rejects_incomplete_alb_configuration():
+    with (
+        patch(
+            "sys.argv",
+            [
+                "sky-platform",
+                "--read-only-database",
+                "--host",
+                "0.0.0.0",
+                "--auth-mode",
+                "alb",
+                "--alb-trusts-file",
+                "trusts.json",
+            ],
+        ),
         pytest.raises(SystemExit),
     ):
         serve()

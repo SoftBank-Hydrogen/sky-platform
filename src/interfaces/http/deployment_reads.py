@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from application.certificate import deployment_certificate
 from application.deployment_reads import DeploymentReadService
 from assets import ASSET_ROOT
+from domain.access import LoginSource
 from interfaces.http.auth import LocalTokenAuthenticator
 from ports.deployment_reads import ReadCursor
 
@@ -21,8 +22,12 @@ class DatabaseReadApp:
     def __init__(self, service: DeploymentReadService, *, workspace="team", authenticator=None):
         self.service = service
         self.workspace = workspace
-        self.token = secrets.token_urlsafe(32)
-        self.authenticator = authenticator or LocalTokenAuthenticator(self.token)
+        self.hosted = authenticator is not None
+        if self.hosted and (isinstance(authenticator, LocalTokenAuthenticator)
+                            or not callable(getattr(authenticator, "authenticate_request", None))):
+            raise ValueError("Hosted reads require a request authenticator")
+        self.token = None if self.hosted else secrets.token_urlsafe(32)
+        self.authenticator = authenticator if self.hosted else LocalTokenAuthenticator(self.token)
 
     def cursor_token(self, cursor):
         if cursor is None:
@@ -74,7 +79,12 @@ def handler_for_reads(app: DatabaseReadApp):
             self.wfile.write(payload)
 
         def authenticate_api(self):
-            self.principal = app.authenticator.authenticate(self.headers.get("X-Sky-Token"))
+            if app.hosted and self.headers.get("X-Sky-Token") is not None:
+                self.json_response(403, {"error": "Local session token is unavailable in hosted mode"})
+                return False
+            self.principal = app.authenticator.authenticate_request(self.headers)
+            if app.hosted and self.principal is not None and self.principal.login_source is LoginSource.LOCAL:
+                self.principal = None
             if self.principal is None:
                 self.json_response(403, {"error": "Invalid session token"})
                 return False
@@ -85,8 +95,10 @@ def handler_for_reads(app: DatabaseReadApp):
                 self.json_response(200, {"status": "ok"})
                 return
             if self.path == "/":
+                if app.hosted and not self.authenticate_api():
+                    return
                 payload = (
-                    (ASSET_ROOT / "static/index.html").read_text().replace("__TOKEN__", app.token).encode()
+                    (ASSET_ROOT / "static/index.html").read_text().replace("__TOKEN__", app.token or "").encode()
                 )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")

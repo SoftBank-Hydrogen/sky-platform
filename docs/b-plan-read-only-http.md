@@ -14,12 +14,13 @@ and SKY_DATABASE_SSLROOTCERT. TLS verification and rotating Secrets Manager
 credentials reuse PR #7. The CA bundle and previously initialized schema are required.
 SKY_STATE_WORKSPACE defaults to team. Reading records does not migrate legacy owners.
 
-The CLI currently permits loopback only because auth remains LocalTokenAuthenticator
+By default, the CLI permits loopback only and uses LocalTokenAuthenticator
 (local_operator, local_workspace, admin). This mode reads records owned by that
-organization; it does not impersonate production organizations. It is a local integration
-preview, not the hosted Fargate API. A composition root may inject a verified identity
-provider into DatabaseReadApp; no ALB JWT verifier or organization membership lookup
-is implemented in this PR. Do not expose this token-based mode over the public ALB.
+organization; it does not impersonate production organizations. With `--auth-mode alb`,
+`--alb-trusts-file` and `--memberships-file`, the read app uses verified ALB identity
+and may bind behind an ALB. It rejects the local token header and local principals.
+The API ingress must be restricted to the configured ALB; do not expose the token-based
+mode or accept identity headers from a direct public connection.
 
 ## HTTP contract
 
@@ -53,7 +54,7 @@ controls and shows that health results are persisted observations. Metrics count
 currently displayed records, not all DB records. Automatic refresh does not reset DB
 pages; explicit refresh reloads the first page and selected detail refreshes periodically.
 
-Hosted authentication, DB readiness, shared writes/CAS integration, monitor-error
+DB readiness, shared writes/CAS integration, monitor-error
 persistence, S3 context storage and distributed workers remain separate work. Do not
 use this read-mode API alongside the legacy write API as one production service.
 Depends on PR #9, transitively #6/#7/#8; no dependency PR is modified or merged here.
