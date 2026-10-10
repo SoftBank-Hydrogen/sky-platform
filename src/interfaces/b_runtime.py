@@ -101,9 +101,9 @@ def main(argv):
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox",),
+        choices=("outbox", "build"),
         required=True,
-        help="Explicitly select outbox; deployment consumption is not implemented",
+        help="Select outbox publisher or remote build consumer; neither executes ECS deployment",
     )
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
@@ -192,6 +192,19 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.worker_mode == "build":
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from interfaces.b_build_runtime import run_build_consumer
+
+        try:
+            run_build_consumer(args)
+        except (OSError, ValueError, TypeError, KeyError, BotoCoreError, ClientError):
+            parser.exit(
+                1,
+                "Build consumer unavailable; check schemas, pinned builder configuration and credentials.\n",
+            )
+        return
     from botocore.exceptions import BotoCoreError, ClientError
 
     from adapters.aws.job_queue import SqsOperationQueue
