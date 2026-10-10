@@ -1,7 +1,8 @@
-"""Evaluate only implemented deployment targets; never invent a recommendation."""
+"""Separate executable target evaluation from unimplemented architecture options."""
 
 from __future__ import annotations
 
+from engine.aws_backend_assessment import aws_backend_assessments
 from engine.backend_identity import backend_identity
 from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
 from engine.cost_exposure import cost_exposure
@@ -60,7 +61,7 @@ def compare_targets(
                 "cost": cost_exposure(target, database_required=bool(profile.database_engines)),
             }
         )
-    return reports, evaluate_candidates(reports)
+    return reports, [*evaluate_candidates(reports), *aws_backend_assessments(profile)]
 
 
 def evaluate_candidates(reports: list[dict]) -> list[dict]:

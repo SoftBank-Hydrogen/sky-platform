@@ -22,6 +22,7 @@ from engine.architecture_decision import architecture_decision, verify_architect
 from engine.compilation import compile_decision, verify_compilation
 from engine.capability_registry import target_capability_model
 from engine.candidates import compare_targets, static_hosting_candidate
+from engine.aws_backend_assessment import with_aws_backend_options
 from engine.static_site import assess_static_site
 from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
@@ -2136,7 +2137,8 @@ def handler_for(app: App):
                                              'deployment_policy': policy.as_dict(),
                                              'capability_models': {
                                                  target: target_capability_model(target).as_dict()
-                                                 for target in (*availability, 'aws-s3-cloudfront', 'aws-ecs-standard')
+                                                 for target in (*availability, 'aws-s3-cloudfront', 'aws-ecs-standard',
+                                                                'aws-lambda', 'aws-ec2')
                                              },
                                              'inspection': {
                                                  'requirements': list(profile.requirements),
@@ -2475,6 +2477,7 @@ def handler_for(app: App):
                             deployment_profile, target, postgres=postgres_request is not None,
                             local_sqlite=local_sqlite_binding is not None,
                             public_access=public_flag == 'true')
+                        infrastructure_plan = with_aws_backend_options(deployment_profile, infrastructure_plan)
                         if sqlite_conversion is not None:
                             infrastructure_plan['conversion_pending'] = 'sqlite-to-postgresql'
                         access_mode = infrastructure_plan['compatibility']['access_mode']

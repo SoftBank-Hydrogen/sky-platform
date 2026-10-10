@@ -108,6 +108,35 @@ class TargetCapabilityModel:
 def target_capability_model(target: str) -> TargetCapabilityModel:
     """Report implemented paths conservatively; validation refs are added only with scoped proof."""
     backend_identity(target)
+    if target in {"aws-lambda", "aws-ec2"}:
+        # Provider primitives are separate from an app-specific integration.
+        # HTTP ingress, database wiring and device compatibility stay unknown.
+        primitives = (
+            {
+                "request_handler": "supported",
+                "http_event_contract": "unknown",
+                "invocation_duration_fit": "unknown",
+                "process_state_independence": "unknown",
+                "host_kernel_control": "unsupported",
+                "host_device_access": "unsupported",
+                "database_binding": "unknown",
+            }
+            if target == "aws-lambda"
+            else {
+                "host_runtime": "supported",
+                "host_kernel_control": "supported",
+                "host_device_access": "unknown",
+                "http_ingress": "unknown",
+                "database_binding": "unknown",
+                "host_operations": "unknown",
+            }
+        )
+        return TargetCapabilityModel(
+            1,
+            target,
+            1,
+            tuple(Capability(name, support, "unimplemented") for name, support in primitives.items()),
+        )
     if target in {"aws-s3-cloudfront", "aws-ecs-standard"}:
         implemented = target == "aws-s3-cloudfront"
         static_capabilities = {
