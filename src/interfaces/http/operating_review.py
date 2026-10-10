@@ -17,7 +17,10 @@ def handler_for_operating_review(app, controller):
             super().do_GET()
 
         def do_POST(self):
-            route = re.fullmatch(r"/api/jobs/([a-f0-9]{16})/operating-review/(review|approve)", self.path)
+            route = re.fullmatch(
+                r"/api/jobs/([a-f0-9]{16})/operating-review/(review|approve|grant-automation|revoke-automation)",
+                self.path,
+            )
             if not route:
                 super().do_POST()
                 return
@@ -29,21 +32,49 @@ def handler_for_operating_review(app, controller):
                 return
             try:
                 body = read_json_object(self)
-                expected = set() if route[2] == "review" else {"proposal_id", "confirm_review"}
+                expected = {
+                    "review": set(),
+                    "approve": {"proposal_id", "confirm_review"},
+                    "grant-automation": {"confirm_automation", "max_incremental_monthly_cents", "expires_at"},
+                    "revoke-automation": {"confirm_revoke"},
+                }[route[2]]
                 if set(body) != expected:
                     raise ValueError()
                 if route[2] == "approve" and (
-                    body["confirm_review"] is not True or not isinstance(body["proposal_id"], str)
+                    body["confirm_review"] is not True
+                    or not isinstance(body["proposal_id"], str)
                     or not re.fullmatch(r"OPR-[a-f0-9]{24}", body["proposal_id"])
                 ):
+                    raise ValueError()
+                if route[2] == "grant-automation" and (
+                    body["confirm_automation"] is not True
+                    or type(body["max_incremental_monthly_cents"]) is not int
+                    or not isinstance(body["expires_at"], str)
+                ):
+                    raise ValueError()
+                if route[2] == "revoke-automation" and body["confirm_revoke"] is not True:
                     raise ValueError()
             except (ValueError, UnicodeError, TimeoutError, OSError):
                 self.json_response(400, {"error": "Invalid operating review request"})
                 return
 
             def execute():
-                proposal = (controller.review(self.principal, route[1]) if route[2] == "review"
-                            else controller.approve(self.principal, route[1], body["proposal_id"]))
+                if route[2] == "grant-automation":
+                    consent = controller.grant_automation(
+                        self.principal,
+                        route[1],
+                        max_incremental_monthly_cents=body["max_incremental_monthly_cents"],
+                        expires_at=body["expires_at"],
+                    )
+                    return 200, {"automation_consent": consent, "execution_enabled": False}
+                if route[2] == "revoke-automation":
+                    controller.revoke_automation(self.principal, route[1])
+                    return 200, {"automation_consent": None, "execution_enabled": False}
+                proposal = (
+                    controller.review(self.principal, route[1])
+                    if route[2] == "review"
+                    else controller.approve(self.principal, route[1], body["proposal_id"])
+                )
                 return 200, {"proposal": proposal, "execution_enabled": False}
 
             self.respond(execute)

@@ -20,11 +20,19 @@ pytest_plugins = ["tests.unit.test_operating_review"]
 
 
 @pytest.fixture
-def web(setup):
+def web(setup, request):
     records, policy, _ = setup
+    if getattr(request, "param", None) == "capacity":
+        from tests.unit.test_promotion_policy import policy_with_criteria, samples
+
+        policy = policy_with_criteria(policy)
+        samples(records)
     actor = replace(principal(), login_source=LoginSource.EXTERNAL_IDP)
-    identities = {"deployer": actor, "viewer": replace(actor, role=Role.VIEWER),
-                  "foreign": replace(actor, organization_id="foreign")}
+    identities = {
+        "deployer": actor,
+        "viewer": replace(actor, role=Role.VIEWER),
+        "foreign": replace(actor, organization_id="foreign"),
+    }
     auth = Mock(authenticate_request=lambda headers: identities.get(headers.get("Authorization")))
     app = SharedDatabaseApp(Mock(), Mock(check_ready=Mock()), authenticator=auth, origin="http://127.0.0.1")
     controller = OperatingReviewController(records, {ID: policy}, clock=lambda: NOW)
@@ -65,20 +73,32 @@ def test_review_get_approve_and_viewer_read_are_bound_and_execution_disabled(web
     assert records.job["status"] == "succeeded" and records.save_calls == 2
 
 
-@pytest.mark.parametrize("headers,status", [
-    ({"Authorization": "viewer"}, 403), ({"Authorization": "foreign"}, 404),
-    ({"Authorization": "invalid"}, 403), ({"Origin": "https://foreign.example"}, 403),
-    ({"X-Sky-Token": "legacy"}, 403), ({"Content-Type": "text/plain"}, 400)])
+@pytest.mark.parametrize(
+    "headers,status",
+    [
+        ({"Authorization": "viewer"}, 403),
+        ({"Authorization": "foreign"}, 404),
+        ({"Authorization": "invalid"}, 403),
+        ({"Origin": "https://foreign.example"}, 403),
+        ({"X-Sky-Token": "legacy"}, 403),
+        ({"Content-Type": "text/plain"}, 400),
+    ],
+)
 def test_invalid_auth_origin_or_framing_does_not_persist(web, headers, status):
     request, records = web
     assert request(headers=headers)[0] == status
     assert records.save_calls == 0
 
 
-@pytest.mark.parametrize("action,body", [
-    ("review", {"target": {}}), ("review", {"now": NOW}),
-    ("approve", {"proposal_id": "OPR-" + "a" * 24, "confirm_review": 1}),
-    ("approve", {"proposal_id": "OPR-" + "a" * 24})])
+@pytest.mark.parametrize(
+    "action,body",
+    [
+        ("review", {"target": {}}),
+        ("review", {"now": NOW}),
+        ("approve", {"proposal_id": "OPR-" + "a" * 24, "confirm_review": 1}),
+        ("approve", {"proposal_id": "OPR-" + "a" * 24}),
+    ],
+)
 def test_browser_cannot_choose_time_target_or_implicit_consent(web, action, body):
     request, records = web
     assert request(action, body)[0] == 400
@@ -102,8 +122,9 @@ def test_policy_file_pins_account_and_rejects_duplicates(setup, tmp_path):
     path = tmp_path / "policies.json"
     document = {"schema_version": 1, "policies": [item]}
     path.write_text(json.dumps(document))
-    assert load_operating_policies(path, account_id=policy.target.account_id,
-                                   region=policy.target.region) == {ID: policy}
+    assert load_operating_policies(
+        path, account_id=policy.target.account_id, region=policy.target.region
+    ) == {ID: policy}
     with pytest.raises(ValueError, match="account"):
         load_operating_policies(path, account_id="222222222222", region=policy.target.region)
     document["policies"].append(item)
@@ -113,3 +134,24 @@ def test_policy_file_pins_account_and_rejects_duplicates(setup, tmp_path):
     path.write_text('{"schema_version":1,"schema_version":1,"policies":[]}')
     with pytest.raises(ValueError, match="Duplicate"):
         load_operating_policies(path, account_id=policy.target.account_id, region=policy.target.region)
+
+
+@pytest.mark.parametrize("web", ["capacity"], indirect=True)
+def test_explicit_automation_consent_http_and_revocation(web):
+    request, records = web
+    payload = {
+        "confirm_automation": True,
+        "max_incremental_monthly_cents": 3000,
+        "expires_at": "2026-10-12T00:00:00+00:00",
+    }
+    assert request("grant-automation", payload, headers={"Authorization": "viewer"})[0] == 403
+    assert request("grant-automation", {**payload, "confirm_automation": 1})[0] == 400
+    assert request("grant-automation", {**payload, "target": {}})[0] == 400
+    status, result = request("grant-automation", payload)
+    assert status == 200 and result["execution_enabled"] is False
+    assert result["automation_consent"]["user_id"] == "user1"
+    proposal = request()[1]["proposal"]
+    assert proposal["status"] == "approved" and proposal["decision"]["capacity"]["eligible"]
+    assert request("revoke-automation", {"confirm_revoke": True})[0] == 200
+    assert records.job["promotion_automation_consent"] is None
+    assert request()[1]["proposal"]["status"] == "pending_approval"
