@@ -128,6 +128,7 @@ def test_foreign_organization_cannot_modify(records, role):
         "source_ref",
         "project",
         "operation_id",
+        "approval_id",
         "group_id",
         "group_order",
     ],
