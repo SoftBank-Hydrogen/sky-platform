@@ -96,7 +96,7 @@ class LocalDockerAdapter:
         name = f"sky-{job_id}"
         image = f"sky/{job_id}:latest"
         ImageBuilder(self.command, self.event).build(project, plan, image, platform=self.platform)
-        image_id = inspect_image_id(self.command, image) if self.platform else None
+        image_id = inspect_image_id(self.command, image)
         created = False
         try:
             self.prepare_sqlite_volume()
@@ -157,7 +157,8 @@ class LocalDockerAdapter:
                                     **({"sqlite_volume": self.sqlite_binding["volume_name"],
                                         "sqlite_mount": self.sqlite_binding["mount_path"]}
                                        if self.sqlite_binding else {}),
-                                    **({"image_id": image_id, "platform": self.platform} if image_id else {})}
+                                    "image_id": image_id,
+                                    **({"platform": self.platform} if self.platform else {})}
                 except (OSError, urllib.error.URLError):
                     pass
                 time.sleep(1)
