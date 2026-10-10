@@ -150,9 +150,11 @@ jobs:
           printf 'Sky service image: `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"
 
   propose-infra-image:
-    # This job cannot run unless the verified image was successfully pushed.
+    # Explicit opt-in: the published ECR account must match the infra deployment account.
     needs: publish-service
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      vars.SKY_INFRA_IMAGE_PR_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: dev

@@ -3,6 +3,8 @@
 main CI: 테스트 → 서비스 이미지 빌드·ZIP smoke → ECR push → 인프라 이미지 태그 변경 PR.
 PR 실행은 이미지를 publish하거나 인프라 PR을 만들지 않는다.
 ECR 업로드 실패·미설정으로 publish-service가 생략되면 다음 작업도 실행하지 않는다.
+인프라 PR 단계는 `SKY_INFRA_IMAGE_PR_ENABLED=true`가 명시적으로 설정됐을 때만 실행한다.
+계정과 ECR 접근 경로가 아직 다르면 이 값을 설정하지 않는다.
 
 propose-infra-image는 sky-infra의 terraform/envs/dev/platform-image.auto.tfvars에서
 platform_image_tag 한 줄만 7자리 SHA로 바꾼다. 원본 전체 SHA는 PR 본문과 브랜치에 남는다.
@@ -13,6 +15,9 @@ platform_image_tag 한 줄만 7자리 SHA로 바꾼다. 원본 전체 SHA는 PR 
 
 sky-platform → Settings → Environments → dev → Environment secrets에
 SKY_INFRA_PR_TOKEN을 등록한다. 저장소 Actions secret으로 등록해도 사용할 수 있다.
+그다음 이미지가 게시되는 AWS 계정에서 sky-infra 배포 계정이 해당 ECR 이미지를
+읽을 수 있는지 확인하고, 저장소 Actions variable `SKY_INFRA_IMAGE_PR_ENABLED`를
+`true`로 설정한다. 토큰만 등록하거나 ECR 게시만 성공했다고 자동으로 켜지지 않는다.
 
 Fine-grained PAT 설정:
 - Resource owner: SoftBank-Hydrogen
@@ -25,7 +30,7 @@ Fine-grained PAT 설정:
 플랫폼 main 조회는 별도의 읽기 전용 GITHUB_TOKEN을 사용한다.
 PAT 값은 채팅·Git·PR 본문에 남기지 않는다.
 향후 동일 권한의 GitHub App 설치 토큰으로 교체할 수 있다.
-토큰이 없거나 유효하지 않으면 ECR 업로드 다음 PR 생성 작업이 명확히 실패한다.
+옵트인 후 토큰이 없거나 유효하지 않으면 ECR 업로드 다음 PR 생성 작업이 명확히 실패한다.
 
 ## 재실행·동시 변경
 
