@@ -76,6 +76,8 @@ def fixture():
         entrypoint_probe=probe,
         client=client,
         sts=Mock(get_caller_identity=Mock(return_value={"Account": "111111111111"})),
+        wait=Mock(),
+        probe_attempts=10,
     )
     return router, client, current, plan, probe
 
@@ -99,7 +101,8 @@ def test_owned_listener_switches_exactly_one_group_and_verifies_stable_read():
     assert receipt["binding"] == plan["target"]
     assert router.probe(plan["target"])["http_status"] == 200
     client.modify_listener.assert_called_once()
-    probe.assert_called_once_with(plan["target"])
+    assert probe.call_count == 3
+    probe.assert_called_with(plan["target"])
 
 
 @pytest.mark.parametrize("failure", ["tags", "rules", "health", "route", "account", "weighted"])
@@ -144,3 +147,40 @@ def test_wrong_revision_at_stable_address_is_not_a_successful_probe():
     probe.return_value = {"http_status": 200, "binding": plan["target"], "revision": "sha256:" + "b" * 64}
     with pytest.raises(ValueError, match="revision"):
         router.probe(plan["target"])
+
+
+def test_data_plane_previous_revision_must_settle_before_success():
+    router, client, _, plan, probe = fixture()
+    router.switch(plan["source"], plan["target"])
+    old = {"http_status": 200, "binding": plan["source"], "revision": router.revisions[0]}
+    new = {"http_status": 200, "binding": plan["target"], "revision": router.revisions[1]}
+    probe.side_effect = [old, new, old, new, new, new]
+    assert router.probe(plan["target"]) == new
+    assert probe.call_count == 6
+    client.modify_listener.assert_called_once()
+
+
+def test_persistently_old_data_plane_never_succeeds_or_repeats_mutation():
+    router, client, _, plan, probe = fixture()
+    router.switch(plan["source"], plan["target"])
+    probe.side_effect = None
+    probe.return_value = {"http_status": 200, "binding": plan["source"], "revision": router.revisions[0]}
+    with pytest.raises(ValueError, match="probe limit"):
+        router.probe(plan["target"])
+    assert probe.call_count == 10
+    client.modify_listener.assert_called_once()
+
+
+def test_route_ownership_changed_while_waiting_never_reports_success():
+    router, client, current, plan, probe = fixture()
+    router.switch(plan["source"], plan["target"])
+
+    def changed_during_read(binding):
+        current["DefaultActions"] = [{"Type": "forward", "TargetGroupArn": router.groups[0]}]
+        return {"http_status": 200, "binding": binding, "revision": router.revisions[1]}
+
+    probe.side_effect = changed_during_read
+    with pytest.raises(ValueError, match="Confirmed listener"):
+        router.probe(plan["target"])
+    client.modify_listener.assert_called_once()
+    assert probe.call_count == 1

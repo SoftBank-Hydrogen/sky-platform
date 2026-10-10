@@ -8,6 +8,7 @@ must be reconciled; never retry a listener mutation automatically.
 
 import re
 from copy import deepcopy
+import time
 
 
 class AwsAlbBlueGreenRouter:
@@ -30,7 +31,12 @@ class AwsAlbBlueGreenRouter:
         entrypoint_probe,
         client=None,
         sts=None,
+        probe_attempts=30,
+        wait=None,
     ):
+        if type(probe_attempts) is not int or not 3 <= probe_attempts <= 30:
+            raise ValueError("Bounded route settlement probes required")
+        self.probe_attempts, self.wait = probe_attempts, wait or time.sleep
         self.account, self.region = account_id, region
         prefix = f"arn:aws:elasticloadbalancing:{region}:{account_id}:"
         if (
@@ -204,19 +210,28 @@ class AwsAlbBlueGreenRouter:
         }
 
     def probe(self, expected_binding):
-        if self.uncertain or self._audit() != expected_binding:
-            raise ValueError("Confirmed listener route required")
-        receipt = self.entrypoint_probe(expected_binding)
-        if (
-            not isinstance(receipt, dict)
-            or set(receipt) != {"http_status", "binding", "revision"}
-            or type(receipt["http_status"]) is not int
-            or receipt["http_status"] != 200
-            or receipt["binding"] != expected_binding
-            or not isinstance(receipt["revision"], str)
-            or not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt["revision"])
-            or receipt["revision"] != self.revisions[self.bindings.index(expected_binding)]
-        ):
-            raise ValueError("Actual stable-entrypoint revision and binding read required")
-        self.guard()
-        return receipt
+        # ModifyListener control-plane confirmation is not data-plane readiness.
+        # Only safe reads repeat, never the mutation. A known previous revision
+        # can briefly serve while ALB propagates its configuration. Unknown
+        # bindings/revisions and failed reads remain errors, not transient facts.
+        confirmed = 0
+        for attempt in range(self.probe_attempts):
+            if self.uncertain or self._audit() != expected_binding:
+                raise ValueError("Confirmed listener route required")
+            receipt = self.entrypoint_probe(expected_binding)
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt) != {"http_status", "binding", "revision"}
+                or type(receipt["http_status"]) is not int
+                or receipt["http_status"] != 200
+                or receipt["binding"] not in self.bindings
+                or receipt["revision"] != self.revisions[self.bindings.index(receipt["binding"])]
+            ):
+                raise ValueError("Actual stable-entrypoint revision and binding read required")
+            self.guard()
+            confirmed = confirmed + 1 if receipt["binding"] == expected_binding else 0
+            if confirmed == 3:
+                return receipt
+            if attempt + 1 < self.probe_attempts:
+                self.wait(1)
+        raise ValueError("Stable-entrypoint revision did not settle before the probe limit")
