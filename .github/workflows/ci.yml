@@ -51,6 +51,8 @@ jobs:
               'assets/static/index.html', 'assets/infra/postgres-migrator.js',
               'interfaces/service.py', 'adapters/state/service_volume.py',
               'ports/state.py', 'adapters/state/records.py', 'adapters/state/postgres.py',
+              'ports/operations.py', 'ports/queue.py', 'adapters/state/operations.py',
+              'adapters/aws/job_queue.py', 'application/outbox.py',
           }
           assert required <= files, sorted(required - files)
           PY
