@@ -63,9 +63,9 @@ def test_failed_send_releases_outbox_without_confirming_it():
     message = delivery()
     store.claim_outbox.return_value = (message,)
     queue.publish.side_effect = OSError("uncertain send")
-    result = OutboxPublisher(store, queue, "publisher", retry_delay=7).dispatch_once()
+    result = OutboxPublisher(store, queue, "publisher").dispatch_once()
     assert result.confirmed == 0 and result.deferred == 1
-    store.release_outbox.assert_called_once_with(message, delay=7)
+    store.release_outbox.assert_called_once_with(message)
     store.confirm_outbox.assert_not_called()
 
 
@@ -77,3 +77,13 @@ def test_database_confirm_failure_does_not_immediately_repeat_the_remote_send():
         OutboxPublisher(store, queue, "publisher").dispatch_once()
     assert queue.publish.call_count == 1
     store.release_outbox.assert_not_called()
+
+
+def test_default_sqs_client_disables_sdk_retry_layer():
+    from unittest.mock import patch
+
+    with patch("boto3.client") as factory:
+        SqsOperationQueue(URL, region="ap-northeast-2", account_id="123456789012")
+    config = factory.call_args.kwargs["config"]
+    assert config.retries["total_max_attempts"] == 1
+    assert config.connect_timeout == 5 and config.read_timeout == 20

@@ -261,7 +261,7 @@ def test_publisher_crash_can_be_recovered_without_changing_dedup_identity(store,
     with database() as connection:
         connection.execute(
             """UPDATE sky_state.outbox_events
-            SET publisher_until=clock_timestamp()-interval '1 second' WHERE workspace=%s AND id=%s""",
+            SET available_at=clock_timestamp(),publisher_until=clock_timestamp()-interval '1 second' WHERE workspace=%s AND id=%s""",
             (store.workspace, old.id),
         )
     assert not store.confirm_outbox(old)
@@ -406,6 +406,7 @@ def test_cold_operation_migration_failure_rolls_back_all_new_tables(database):
 def test_uncertain_fifo_send_republishes_same_attempt_and_cannot_claim_twice(store, database):
     from application.outbox import OutboxPublisher
 
+    store.outbox_retry_base = 0
     admit(store)
     accepted = []
     leases = []
@@ -426,7 +427,7 @@ def test_uncertain_fifo_send_republishes_same_attempt_and_cannot_claim_twice(sto
             if len(accepted) == 1:
                 raise OSError("Queue accepted it but response was lost")
 
-    publisher = OutboxPublisher(store, Queue(), "publisher", retry_delay=0)
+    publisher = OutboxPublisher(store, Queue(), "publisher")
     assert publisher.dispatch_once().deferred == 1
     assert publisher.dispatch_once().confirmed == 1
     assert accepted[0] == accepted[1]
@@ -454,7 +455,7 @@ def test_database_confirmation_failure_keeps_outbox_recoverable_after_send(store
     assert len(accepted) == 1
     with database() as connection:
         connection.execute(
-            "UPDATE sky_state.outbox_events SET publisher_until=clock_timestamp()-interval '1 second' WHERE workspace=%s",
+            "UPDATE sky_state.outbox_events SET available_at=clock_timestamp(),publisher_until=clock_timestamp()-interval '1 second' WHERE workspace=%s",
             (store.workspace,),
         )
     assert publisher.dispatch_once().confirmed == 1
@@ -646,3 +647,232 @@ def test_old_resolution_cannot_change_a_later_uncertain_attempt(store):
     assert newer.status == "needs_attention"
     assert not resolve(store, blocked)
     assert store.get(blocked.id) == newer
+
+
+def make_outbox_available(store, database, *, expire_owner=False):
+    with database() as connection:
+        connection.execute(
+            """UPDATE sky_state.outbox_events SET available_at=clock_timestamp(),
+            publisher_until=CASE WHEN %s THEN clock_timestamp()-interval '1 second' ELSE publisher_until END
+            WHERE workspace=%s""",
+            (expire_owner, store.workspace),
+        )
+
+
+def test_persisted_exponential_backoff_and_cap_survive_new_publisher(store, database):
+    operation = admit(store)
+    for expected_delay in [5, 10, 20, 40, 80, 160, 300]:
+        # A differently configured replica must still use the event's original policy.
+        replica = PostgresOperationStore(database, workspace=store.workspace, outbox_retry_base=99)
+        delivery = replica.claim_outbox("publisher")[0]
+        assert replica.release_outbox(delivery)
+        with database() as connection:
+            delay = connection.execute(
+                """SELECT extract(epoch FROM available_at-clock_timestamp())
+                FROM sky_state.outbox_events WHERE workspace=%s AND id=%s""",
+                (store.workspace, delivery.id),
+            ).fetchone()[0]
+        assert expected_delay - 2 < delay <= expected_delay
+        assert store.claim_outbox("too-early") == ()
+        assert delivery.attempt_id == operation.attempt_id
+        make_outbox_available(store, database)
+    final = store.claim_outbox("last")[0]
+    assert store.release_outbox(final)
+    failed = store.list_failed_outbox()[0]
+    assert failed.publish_attempts == failed.max_attempts == 8
+    assert failed.failure_code == "retry_exhausted"
+    assert failed.operation_id == operation.id and failed.attempt_id == operation.attempt_id
+    assert store.claim_outbox("never-again") == ()
+    assert store.get(operation.id).status == "queued"
+    assert count(store, database, "mutation_scopes") == 1
+
+
+def test_lost_send_responses_stop_at_budget_without_marking_running_job_failed(store, database):
+    from application.outbox import OutboxPublisher
+
+    store.outbox_max_attempts, store.outbox_retry_base = 3, 0
+    operation = admit(store)
+    accepted = []
+
+    class Queue:
+        def publish(self, delivery):
+            accepted.append(delivery.message())
+            store.claim(delivery.operation_id, delivery.attempt_id, "consumer")
+            raise OSError("accepted but response lost")
+
+    publisher = OutboxPublisher(store, Queue(), "publisher")
+    for _ in range(3):
+        assert publisher.dispatch_once().deferred == 1
+    assert publisher.dispatch_once().deferred == 0
+    assert len(accepted) == 3 and all(item == accepted[0] for item in accepted)
+    assert store.get(operation.id).status == "running"
+    assert store.list_failed_outbox()[0].publish_attempts == 3
+    assert count(store, database, "mutation_scopes") == 1
+
+
+def test_last_allowed_send_can_be_confirmed_successfully(store):
+    store.outbox_max_attempts = 1
+    admit(store)
+    delivery = store.claim_outbox("publisher")[0]
+    assert store.confirm_outbox(delivery)
+    assert store.list_failed_outbox() == ()
+    assert store.claim_outbox("again") == ()
+
+
+def test_publisher_crashes_consume_budget_and_observe_delay(store, database):
+    store.outbox_max_attempts = 2
+    admit(store)
+    old = store.claim_outbox("old")[0]
+    with database() as connection:
+        connection.execute(
+            """UPDATE sky_state.outbox_events SET publisher_until=clock_timestamp()-interval '1 second'
+            WHERE workspace=%s""",
+            (store.workspace,),
+        )
+    assert store.claim_outbox("early") == ()
+    make_outbox_available(store, database)
+    final = store.claim_outbox("final")[0]
+    assert not store.confirm_outbox(old)
+    assert store.claim_outbox("while-final-active") == ()
+    assert store.list_failed_outbox() == ()
+    make_outbox_available(store, database, expire_owner=True)
+    assert store.claim_outbox("after-crash") == ()
+    assert not store.confirm_outbox(final)
+    assert not store.release_outbox(final, delay=0)
+    assert store.list_failed_outbox()[0].publish_attempts == 2
+
+
+def test_failed_outbox_is_workspace_scoped_and_immutable_to_stale_tokens(store, database):
+    store.outbox_max_attempts = 1
+    admit(store)
+    delivery = store.claim_outbox("publisher")[0]
+    assert store.release_outbox(delivery)
+    before = store.list_failed_outbox()
+    assert before[0].failed_at is not None
+    other = PostgresOperationStore(database, workspace=uuid4().hex)
+    assert other.list_failed_outbox() == ()
+    assert not other.confirm_outbox(delivery)
+    assert not store.confirm_outbox(delivery)
+    assert not store.release_outbox(delivery, delay=0)
+    assert store.list_failed_outbox() == before
+
+
+def test_failed_release_transaction_does_not_lose_last_attempt(store, database):
+    store.outbox_max_attempts = 1
+    admit(store)
+    delivery = store.claim_outbox("publisher")[0]
+
+    class RollbackConnection:
+        def __enter__(self):
+            self.connection = database()
+            return self.connection
+
+        def __exit__(self, *args):
+            try:
+                self.connection.execute("SELECT 1/0")
+            finally:
+                self.connection.rollback()
+                self.connection.close()
+
+    broken = PostgresOperationStore(RollbackConnection, workspace=store.workspace)
+    with pytest.raises(OSError):
+        broken.release_outbox(delivery)
+    assert store.list_failed_outbox() == ()
+    assert store.confirm_outbox(delivery)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"outbox_max_attempts": True},
+        {"outbox_max_attempts": 0},
+        {"outbox_max_attempts": 101},
+        {"outbox_retry_base": -1},
+        {"outbox_retry_cap": 3601},
+        {"outbox_retry_base": 10, "outbox_retry_cap": 5},
+    ],
+)
+def test_invalid_outbox_policy_is_rejected(database, policy):
+    with pytest.raises(ValueError):
+        PostgresOperationStore(database, **policy)
+
+
+def test_version_one_outbox_migration_preserves_existing_delivery(store, database):
+    operation = admit(store)
+    delivery = store.claim_outbox("publisher")[0]
+    with database() as connection:
+        connection.execute("BEGIN")
+        connection.execute("ALTER TABLE sky_state.outbox_events DROP CONSTRAINT outbox_failure_consistent")
+        connection.execute("""ALTER TABLE sky_state.outbox_events
+            DROP COLUMN max_attempts, DROP COLUMN retry_base_seconds, DROP COLUMN retry_cap_seconds,
+            DROP COLUMN failed_at, DROP COLUMN failure_code""")
+        connection.execute("DELETE FROM sky_state.operation_schema_versions WHERE version=2")
+
+        class BorrowedConnection:
+            def __enter__(self):
+                return connection
+
+            def __exit__(self, *args):
+                pass
+
+        migrated = PostgresOperationStore(BorrowedConnection, workspace=store.workspace)
+        migrated.initialize()
+        migrated.initialize()
+        row = connection.execute(
+            """SELECT operation_id,attempt_id,publish_attempts,publisher_epoch,max_attempts,
+            retry_base_seconds,retry_cap_seconds,failed_at FROM sky_state.outbox_events
+            WHERE workspace=%s AND id=%s""",
+            (store.workspace, delivery.id),
+        ).fetchone()
+        assert tuple(map(str, row[:2])) == (operation.id, operation.attempt_id)
+        assert row[2:] == (1, delivery.epoch, 8, 5, 300, None)
+        connection.rollback()
+
+
+def test_competing_publishers_cannot_exceed_last_attempt_budget(store, database):
+    store.outbox_max_attempts, store.outbox_retry_base = 1, 0
+    admit(store)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(lambda index: store.claim_outbox(f"publisher{index}"), range(8)))
+    deliveries = [item for group in claims for item in group]
+    assert len(deliveries) == 1
+    make_outbox_available(store, database, expire_owner=True)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(
+            group == () for group in pool.map(lambda index: store.claim_outbox(f"retry{index}"), range(8))
+        )
+    failures = store.list_failed_outbox()
+    assert len(failures) == 1 and failures[0].publish_attempts == 1
+
+
+def test_failed_operation_migration_rolls_back_policy_columns(store, database):
+    with database() as connection:
+        connection.execute("BEGIN")
+        connection.execute("ALTER TABLE sky_state.outbox_events DROP CONSTRAINT outbox_failure_consistent")
+        connection.execute("""ALTER TABLE sky_state.outbox_events
+            DROP COLUMN max_attempts, DROP COLUMN retry_base_seconds, DROP COLUMN retry_cap_seconds,
+            DROP COLUMN failed_at, DROP COLUMN failure_code""")
+        connection.execute("DELETE FROM sky_state.operation_schema_versions WHERE version=2")
+        # An unexpected pre-existing column makes migration fail atomically.
+        connection.execute("ALTER TABLE sky_state.outbox_events ADD COLUMN failed_at text")
+        connection.execute("SAVEPOINT before_migration")
+
+        class BorrowedConnection:
+            def __enter__(self):
+                return connection
+
+            def __exit__(self, *args):
+                pass
+
+        with pytest.raises(OSError):
+            PostgresOperationStore(BorrowedConnection).initialize()
+        connection.execute("ROLLBACK TO SAVEPOINT before_migration")
+        assert connection.execute("SELECT version FROM sky_state.operation_schema_versions").fetchall() == [
+            (1,)
+        ]
+        assert (
+            connection.execute("""SELECT count(*) FROM information_schema.columns
+            WHERE table_schema='sky_state' AND table_name='outbox_events' AND column_name='max_attempts'""").fetchone()
+            == (0,)
+        )
+        connection.rollback()

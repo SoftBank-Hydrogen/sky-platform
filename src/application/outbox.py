@@ -13,10 +13,8 @@ class DispatchReport:
 
 
 class OutboxPublisher:
-    def __init__(self, store: OperationStore, queue: OperationQueue, owner: str, *, retry_delay=5):
-        if type(retry_delay) is not int or not 0 <= retry_delay <= 3600:
-            raise ValueError("Invalid outbox retry delay")
-        self.store, self.queue, self.owner, self.retry_delay = store, queue, owner, retry_delay
+    def __init__(self, store: OperationStore, queue: OperationQueue, owner: str):
+        self.store, self.queue, self.owner = store, queue, owner
 
     def dispatch_once(self, *, limit=10) -> DispatchReport:
         confirmed = deferred = 0
@@ -26,7 +24,7 @@ class OutboxPublisher:
             except OSError:
                 # The queue may have accepted it. Preserve the attempt/dedup ID.
                 # A DB failure here leaves the claim recoverable by lease expiry.
-                self.store.release_outbox(delivery, delay=self.retry_delay)
+                self.store.release_outbox(delivery)
                 deferred += 1
                 continue
             # Never resend immediately after an ambiguous database commit.
