@@ -162,6 +162,52 @@ def test_membership_file_rejects_duplicate_and_maps_source_from_trust(tmp_path: 
         AlbRequestAuthenticator.from_files(trust_file, member_file)
 
 
+def test_json_documents_share_file_validation(tmp_path: Path):
+    trusts = {
+        "version": 1,
+        "trusts": [
+            {"signer_arn": SIGNER, "issuer": ISSUER, "client_id": CLIENT, "login_source": "external_idp"}
+        ],
+    }
+    member = {
+        "issuer": ISSUER,
+        "subject": "identity-123",
+        "user_id": "alice",
+        "organization_id": "team_a",
+        "role": "deployer",
+        "enabled": True,
+    }
+    trust_file, member_file = tmp_path / "trusts.json", tmp_path / "members.json"
+
+    def both(members):
+        trust_file.write_text(json.dumps(trusts))
+        member_file.write_text(json.dumps(members))
+        from_files = AlbRequestAuthenticator.from_files(trust_file, member_file)
+        from_json = AlbRequestAuthenticator.from_json(json.dumps(trusts), json.dumps(members))
+        assert from_json.trusts == from_files.trusts
+        assert from_json.memberships.records == from_files.memberships.records
+        return from_json
+
+    auth = both({"version": 1, "members": [member]})
+    assert auth.memberships.resolve(ISSUER, "identity-123", LoginSource.EXTERNAL_IDP) == Principal(
+        "alice", "team_a", Role.DEPLOYER, LoginSource.EXTERNAL_IDP
+    )
+    for members, match in [
+        ({"version": 1, "members": [member, member]}, "Duplicate membership"),
+        ({"version": 2, "members": [member]}, "Invalid memberships file"),
+        ({"version": 1, "members": [{**member, "organization_id": "-team"}]}, "organization_id"),
+        ({"version": 1, "members": [{**member, "role": "owner"}]}, "Role"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            both(members)
+    with pytest.raises(ValueError, match="too large"):
+        AlbRequestAuthenticator.from_json(json.dumps(trusts), " " * 1_048_577)
+    with pytest.raises(ValueError, match="Duplicate JSON field"):
+        AlbRequestAuthenticator.from_json('{"version": 1, "version": 1, "trusts": []}', "{}")
+    with pytest.raises(TypeError):
+        AlbRequestAuthenticator.from_json(None, "{}")
+
+
 def test_signed_identity_filters_http_jobs_without_local_token(verifier):
     auth, key, _ = verifier
     with tempfile.TemporaryDirectory() as folder:
