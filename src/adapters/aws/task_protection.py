@@ -9,7 +9,10 @@ from adapters.github.remote_build import NoRedirect
 class EcsTaskProtection:
     def __init__(self, uri=None):
         self.uri = uri if uri is not None else os.environ.get("ECS_AGENT_URI", "")
-        if not re.fullmatch(r"http://169\.254\.170\.2(?::[0-9]{1,5})?", self.uri):
+        # Fargate supplies a task-specific /api/<task-id>-<runtime-id> base URI.
+        # Keep the agent host fixed and reject arbitrary paths, queries and fragments.
+        pattern = r"http://169\.254\.170\.2(?::[0-9]{1,5})?(?:/api/[0-9a-f]{32}-[0-9]+)?"
+        if not isinstance(self.uri, str) or not re.fullmatch(pattern, self.uri):
             raise ValueError("ECS agent task protection endpoint required")
         self.opener = urllib.request.build_opener(NoRedirect())
 
