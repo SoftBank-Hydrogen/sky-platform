@@ -4,6 +4,48 @@ evaluation_interval: 15s
 tests:
   - interval: 15s
     input_series:
+      - series: 'sky_discovery_up{target="sky",kind="sky"}'
+        values: '0+0x12'
+      - series: 'sky_discovery_rejected{target="sky",kind="sky"}'
+        values: '1+0x12'
+      - series: 'up{job="alertmanager"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SkyDiscoveryFailed
+        exp_alerts:
+          - exp_labels: {target: sky, kind: sky, severity: warning}
+            exp_annotations: {summary: "Game discovery failed; existing targets retained"}
+      - eval_time: 3m
+        alertname: SkyDiscoveryRejected
+        exp_alerts:
+          - exp_labels: {target: sky, kind: sky, severity: warning}
+            exp_annotations: {summary: "Game discovery rejected an endpoint or exceeded target capacity"}
+      - eval_time: 3m
+        alertname: SkyAlertmanagerUnavailable
+        exp_alerts:
+          - exp_labels: {job: alertmanager, severity: warning}
+            exp_annotations: {summary: "Alert delivery service is unavailable; external monitoring also required"}
+  - interval: 15s
+    input_series:
+      - series: 'sky_discovery_up{target="sky",kind="sky"}'
+        values: '1+0x12'
+      - series: 'sky_discovery_rejected{target="sky",kind="sky"}'
+        values: '0+0x12'
+      - series: 'up{job="alertmanager"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SkyDiscoveryFailed
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SkyDiscoveryRejected
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SkyAlertmanagerUnavailable
+        exp_alerts: []
+  - interval: 15s
+    input_series:
       - series: 'up{job="sky-observer"}'
         values: '0+0x12'
       - series: 'sky_observed_websocket_up{target="demo-game",kind="game"}'

@@ -17,14 +17,15 @@ AWS ECS·ALB·EC2 지표/로그 ──── CloudWatch ────────
 
 ## 구성 파일
 
-- `compose.yml`: 별도 모니터링 서버에서 observer·Prometheus·Grafana 실행.
+- `compose.yml`: 별도 모니터링 서버에서 observer·Prometheus·Grafana·Alertmanager 실행. 기본 설정은 외부 알림 비활성화.
 - `targets.example.json`: Sky와 게임 API 접속 주소를 지정하는 예시.
 - `exporter/`: 기존 API를 읽어 지표로 변환하는 수집기.
 - `prometheus/`: 수집 설정과 초기 알람 규칙.
-- `grafana/`: 데이터 소스와 19개 패널 대시보드 자동 등록.
+- `grafana/`: 데이터 소스와 자동 발견 상태를 포함한 21개 패널 대시보드 자동 등록.
+- `alertmanager/`, `compose.slack.yml`: #sky-alerts 알림 설정. Webhook 준비 후 별도로 활성화.
 - `cloudwatch-read-policy.json`: AWS 지표/로그 조회용 권한 초안. 실제 역할에 아직 적용하지 않았으며 최종 범위를 인프라 담당자와 검토한다.
 
-수집 대상은 운영자가 지정한다. 업로드 앱이 지정한 임의 URL을 자동 등록하지 않는다. 새 게임 배포 후 작업 ID·대상 ECS 서비스·접속 주소를 확인하고 `targets.json`을 수정한 뒤 observer를 재시작한다. 자동 대상 등록은 후속 작업이다. 대상 이름은 고정하고 작업 ID·사용자 ID를 매번 Prometheus label로 추가하지 않는다.
+수동 대상은 운영자가 지정한다. `targets.discovery.example.json`처럼 Sky 대상에 `discovery`를 설정하면 성공했고 현재 active인 게임 배포를 자동 발견한다. 업로드 앱이 지정한 임의 URL을 자동 신뢰하지 않고 운영자가 정한 호스트 허용 목록을 적용한다. 대상 이름은 앱/배포 환경별로 유지하며 작업 ID·사용자 ID를 매번 Prometheus label로 추가하지 않는다.
 
 ## 시작 방법 (Linux/VM)
 
@@ -92,7 +93,7 @@ Grafana의 CloudWatch 데이터 소스는 기본 AWS 인증 체인을 사용한�
 
 수집이 실패하면 이전 앱 지표를 재사용하지 않는다. 무응답·잘못된 JSON·토큰 실패를 정상 0명/0건으로 표시하지 않는다. 작업 성공률과 단계별 시간은 아직 이벤트 기반 지표가 없으므로 별도 코드 작업이 필요하다. 게임 메시지 처리 시간·DB 쓰기 오류도 기존 API에서 제공하지 않아 아직 수집하지 않는다.
 
-알람 규칙은 Prometheus에서 평가하지만 Alertmanager/SNS 등 수신 연결은 아직 없다. 규칙 등록만으로 팀에 알림이 발송되지 않는다. 중단·수집 실패·WS 실패·점수판 실패를 먼저 평가하고, 인프라 알람/수신자는 실제 환경 연결 단계에서 정한다.
+알람 규칙은 Prometheus에서 평가하고 Alertmanager로 전달한다. 기본 receiver는 외부 전송이 비활성화된 상태이며 Slack 연결은 아래 override로 명시적으로 켠다. 규칙 등록만으로 Slack에 메시지가 발송되지 않는다. CloudWatch 자체 알람의 Slack 연결은 아직 포함하지 않았다.
 
 Grafana 데이터는 named volume에 저장하고 Prometheus 보관은 7일/1GB로 제한한다. OSS 설치에 라이선스 비용은 없지만 VM/스토리지·CloudWatch 로그/쿼리·Container Insights 등 비용은 별도다. 필요한 지표만 켜고 실제 데이터량으로 비용을 확인한다.
 
@@ -143,3 +144,79 @@ k6 결과는 현재 JSON 요약이며 Grafana에 실시간 전송하지 않는�
 게임 DB는 테스트 컨테이너의 임시 SQLite 파일이다. 위 결과는 실제 AWS 배포 성공·재시작 후 DB 영속성·최대 동시 사용자 수를 증명하지 않는다. Cognito 로그인, 실제 프런트엔드 Origin/Unity 로딩, AWS 지표·로그, 알림 발송은 실제 환경 연결 후 검증한다.
 
 `.github/workflows/monitoring.yml`은 수집기 테스트·대시보드 구조·Prometheus 알람·k6 설정 해석을 자동 검사한다. 실제 서비스 부하나 AWS 호출은 실행하지 않는다. 게임 테스트는 잘못된 메시지 형식과 45초 이전의 비정상 연결 종료도 실패로 처리한다.
+
+## 게임 자동 등록
+
+1. Sky의 인증된 `/api/jobs`에서 성공·active 상태를 읽는다.
+2. 해당 작업 상세에서 `sky-probe-protocol` 계약과 배포 주소를 확인한다.
+3. 운영자가 지정한 `allowedHosts`와 일치하는 주소만 게임 대상으로 등록한다.
+4. 재배포 시 같은 앱/배포 대상의 주소를 갱신하고 superseded/deleted 등 비활성 배포는 제거한다.
+5. Sky 조회 실패·인증 만료 때는 기존 대상을 유지하고 `sky_discovery_up=0`을 표시한다.
+
+최초에 허용할 호스트와 Sky 접속 정보를 한 번 설정하면 이후 주소 변경마다 파일을 편집하거나 재시작할 필요가 없다. 정상 상태의 등록 반영은 대략 한 번의 poll 주기(기본 30초)다. 현재 게임의 `/stats`·점수판·`/ws` 계약에 맞춘 기능으로, 일반 웹 앱을 게임으로 등록하지 않는다. 자동 등록은 기본적으로 꺼져 있다.
+
+`applicationIds`는 선택 사항이다. 특정 게임만 관찰하려면 안정적인 앱 ID를 지정하고, 동일 계약의 새 게임도 모두 발견하려면 항목을 제거한다. 앱 ID가 유지될 때만 재배포 후 지표 이름도 유지된다. 익명 단발 배포는 작업 ID가 앱 식별자 역할을 하므로 별도 대상으로 보일 수 있다.
+
+`allowedHosts`는 소문자 exact hostname 또는 `*.example.com` 형식이다. 루프백/메타데이터/다른 호스트는 명시적으로 허용하지 않으면 등록되지 않는다. 온프렘이 `127.0.0.1` 주소만 제공하면 모니터링 서버에서 접근 가능한 주소가 아니므로 터널/내부 주소를 먼저 확정한다. 쿠키와 인증 헤더는 Sky에서 게임으로 전달하지 않는다. 인증이 필요한 게임은 별도 수동 대상으로 설정한다.
+
+성공·active 배포 상세는 한 번에 최대 20개씩 조회하며 게임 계약·호스트를 확인한 뒤 대상 용량 제한을 적용한다. 일반 앱이 목록 앞에 많아도 뒤의 게임까지 확인한다. 어느 배치에서든 상세 조회가 실패하면 이전 대상을 유지한다. 배포 수가 많으면 발견 주기가 길어질 수 있으므로 필요한 경우 `applicationIds`로 조회 범위를 좁힌다.
+
+전체 수집 대상은 최대 20개이며 자동 발견 소스가 여러 개면 남은 자리를 균등 배분한다. 용량 초과·호스트 거부는 `sky_discovery_rejected`와 알람으로 표시한다. AWS ECS CPU·메모리 패널의 리소스 선택은 아직 자동 등록하지 않으며 실제 리소스 정보/조회 권한을 연결할 때 추가한다.
+
+## Slack 알림 — #sky-alerts
+
+경로는 `Prometheus → Alertmanager → Slack Incoming Webhook`이다. 장애/복구를 보내고 같은 종류·대상의 알람을 묶는다. 기존 규칙의 1~2분 지속 조건 이후 최초 집계는 30초, 변경된 그룹 알림은 5분, 계속되는 동일 장애의 재알림은 4시간 기준이다.
+
+Slack 앱의 Incoming Webhook을 **#sky-alerts에 연결**한다. 채널 생성과 앱 설치에는 해당 워크스페이스 권한이 필요하다. 최신 Incoming Webhook은 생성 때 선택한 채널에 묶이므로 설정 파일의 channel 값만 바꿔 다른 채널로 전환하지 않는다. Webhook URL은 비밀이며 채팅/Git에 넣지 않는다.
+
+호스트 관리자 권한으로 아래 명령을 실행해 URL을 숨겨 입력하고 Alertmanager UID 65534만 읽도록 저장한다. 기존 파일은 덮어쓰지 않는다.
+
+```sh
+python3 - <<'PY'
+import os, getpass
+from urllib.parse import urlsplit
+url = getpass.getpass('Slack Webhook URL: ').strip()
+parsed = urlsplit(url)
+if (parsed.scheme != 'https' or parsed.hostname != 'hooks.slack.com'
+    or parsed.username or parsed.password or parsed.query or parsed.fragment
+    or not parsed.path.startswith('/services/')):
+    raise ValueError('Slack Incoming Webhook URL이 필요합니다.')
+descriptor = os.open('secrets/slack_webhook', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+with os.fdopen(descriptor, 'w') as file:
+    file.write(url)
+os.chown('secrets/slack_webhook', 65534, 65534)
+PY
+docker compose -f compose.yml -f compose.slack.yml config --quiet
+docker compose -f compose.yml -f compose.slack.yml up -d alertmanager
+```
+
+**마지막 실행 명령부터 실제 알림이 전송될 수 있다.** 이후에도 같은 두 Compose 파일을 사용해 운영한다. 기본 파일만 다시 적용하면 외부 알림은 비활성화된다. Webhook 갱신 시 기존 파일을 안전하게 교체하고 Alertmanager를 재시작한다.
+
+메시지에는 장애/복구 상태, 알람명, 심각도, 대상, 요약을 넣는다. 배포 코드·URL 토큰·쿠키는 포함하지 않는다. Alertmanager가 보낼 수 없는 상황은 전송 실패 지표/로그와 외부 모니터링으로 별도 확인해야 한다.
+
+실제 Slack 전송은 아직 실행하지 않았다. 로컬 모의 Webhook으로 형식과 장애/복구 흐름을 검증하며 실제 채널 수신 확인은 Webhook 준비 후 별도로 한다. 참고: [Slack Incoming Webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), [Alertmanager 설정](https://prometheus.io/docs/alerting/latest/configuration/).
+
+### 자동 등록·알림 추가 검증 — 2026-10-10
+
+외부 통신이 없는 Docker 네트워크에서 배포 목록은 모의 Sky API, 게임은 실제 게임 서버 소스로 검증했다. 실제 AWS 배포 연동 검증과는 구분한다.
+
+- 수집기·자동 발견 단위 테스트 7개 통과. 재배포 시 이름 유지, 비활성 제외, 허용되지 않은 주소 거부, 인증 정보 미전달 확인.
+- 성공·active 게임 자동 등록과 통계 수집, Sky 조회 장애 시 기존 대상 유지, 삭제 후 지표 제거 확인.
+- Prometheus 설정·9개 알람 구문 검사, 새 알람 3개의 장애 발동·정상 비발동 테스트 통과.
+- Alertmanager 두 설정과 Compose 결합 검사 통과. 모의 Webhook에서 #sky-alerts 장애·복구 메시지 수신 확인.
+- 21개 대시보드 패널의 ID·데이터 소스·쿼리 구조 검사 통과. 추가 패널의 Grafana 등록/화면은 실제 스택 연결 후 확인한다.
+
+위 모의 Webhook 형식 테스트는 Alertmanager에 합성 알람을 직접 전달했다. 이후 아래 전체 흐름 검증을 추가했다. 실제 Slack 수신과 CloudWatch 자체 알람의 Slack 전송은 아직 검증하지 않았다.
+
+### 알림 전체 흐름 검증 — 2026-10-10
+
+외부 통신이 차단된 별도 Docker 네트워크에서 실제 게임 서버 소스·수집기·Prometheus·Alertmanager·모의 Webhook을 연결했다. 배포 목록은 모의 Sky API가 제공했으며, 수집기 이미지는 현재 소스와 SHA256이 일치했다.
+
+1. 자동 등록된 게임의 WebSocket 정상 지표, Prometheus 수집, Alertmanager 발견을 확인했다. 게임 WS 장애 알람이 발동하지 않는 것도 확인했다.
+2. 해당 테스트 게임 컨테이너만 중단했다. 수집기 WS 지표가 0이 되고, Prometheus의 GameWebSocketUnavailable이 pending → firing으로 바뀌었다. 운영 규칙의 `for: 2m`는 그대로 사용했다.
+3. Prometheus가 생성한 알람이 Alertmanager를 거쳐 모의 #sky-alerts에 FIRING 메시지로 도착했다. Alertmanager API에 알람을 직접 주입하지 않았다. 장애 중 게임 대상은 제거되지 않았다.
+4. 게임 컨테이너를 재시작했다. WS 지표가 정상으로 돌아오고 Prometheus 알람이 해제된 뒤 같은 대상의 RESOLVED 메시지를 수신했다.
+
+이번 한 번의 격리 실행에서는 중단 후 장애 메시지까지 약 2분 32초, 재시작 후 복구 메시지까지 약 28초였다. 테스트에서만 group_wait=1s, group_interval=5s로 줄였고 수집·평가는 15초 주기였다. 운영 설정은 group_wait=30s, group_interval=5m, 수집기 30초 주기이므로 위 시간을 운영 알림 지연이나 성능 보장으로 사용하지 않는다.
+
+테스트 컨테이너·네트워크는 종료 후 정리했다. 공개 포트·호스트 Docker 소켓·AWS 자격 증명·실제 Slack Webhook은 컨테이너에 연결하지 않았다. 실제 환경의 인증·네트워크·Slack 수신은 별도 검증이 필요하다. 알림 기본 상세 링크는 내부 Alertmanager 주소이므로 운영 연결 때 접근 가능한 대시보드 링크를 확정한다.

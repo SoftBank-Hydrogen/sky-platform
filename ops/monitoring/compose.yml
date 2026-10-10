@@ -28,6 +28,18 @@ services:
     mem_limit: 512m
     cpus: 0.5
     restart: unless-stopped
+  alertmanager:
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager", "--cluster.listen-address="]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.25
+    restart: unless-stopped
   grafana:
     image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     ports: ["127.0.0.1:3000:3000"]
@@ -50,5 +62,6 @@ services:
     cpus: 0.5
     restart: unless-stopped
 volumes:
+  alertmanager-data:
   prometheus-data:
   grafana-data:
