@@ -24,6 +24,8 @@ from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_async_database_callers, check_database_consistency, check_port_consistency,
     check_postgres_node_dependency, check_postgres_numeric_parsers, PG_NUMERIC_PARSERS, check_source_change_scope,
+    check_python_connection_transactions,
+    check_python_dict_row_access,
     check_sqlite_migration_consistency, check_websocket_state_consistency,
     check_target_resource_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
@@ -82,6 +84,25 @@ queries, placeholders and dependencies with PostgreSQL equivalents in the workin
 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE environment. Do not remove database behavior or claim that
 the conversion succeeded until the real migration, deployment and HTTP probe succeed. Report a blocker
 if the source is too complex to convert safely.
+For SQLite-converted Python apps using psycopg 3, sqlite3 `with conn:` commits/rolls back
+without closing the connection, whereas psycopg `with conn:` closes it on exit. Replace
+every existing connection-object context (including route parameters supplied by FastAPI
+Depends/get_db) with `with conn.transaction():` or explicit commit/rollback. Keep connection
+closing at the end of its request/lifetime; do not reuse a closed connection. CV-04 rejects
+remaining `with db:`/`with conn:` connection contexts. Ordinary file/cursor contexts are fine.
+Preserve transaction durability too: psycopg defaults to implicit transactions, so a SELECT
+before transaction() can start an outer transaction and make transaction() only a savepoint.
+Use autocommit=True together with explicit transaction() blocks, or explicitly commit/rollback
+the outer transaction. Preserve atomic multi-statement writes and rollback on exceptions.
+Inspect signup and create-then-read endpoints, not just health. Do not remove type information
+or rename variables to bypass CV-04. These Python rules apply to both AWS and GCP.
+SQLite sqlite3.Row allows both positional and named access; psycopg dict_row allows only
+column-name keys. When using dict_row, convert every fetched-row consumer, including
+COUNT/SUM queries, INSERT ... RETURNING, assigned rows and loops, to named keys. Give
+aggregate expressions explicit SQL aliases: SELECT COUNT(*) AS total then fetchone()["total"].
+Use RETURNING id then fetchone()["id"]. Do not switch the entire connection to tuple_row
+while routes still use row["name"]. Preserve the API's existing value types and JSON shape.
+CV-04 rejects statically proven positional access to dict rows before deployment.
 PostgreSQL client methods are asynchronous. When converting a synchronous SQLite API, inspect and update
 every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.
 Do not treat an HTTP health response as proof that database-backed endpoints work.
@@ -516,6 +537,8 @@ class DeploymentTools:
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
         if self.sqlite_conversion is not None:
+            check_python_connection_transactions(self.original, self.work)
+            check_python_dict_row_access(self.work)
             check_postgres_node_dependency(self.work)
             check_postgres_numeric_parsers(self.work)
             check_async_database_callers(self.original, self.work,
