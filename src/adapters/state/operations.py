@@ -27,6 +27,7 @@ KINDS = {
     "retire",
     "image_cleanup",
     "db_create",
+    "db_shared_allocate",
     "db_retire",
     "snapshot_create",
     "restore_drill",

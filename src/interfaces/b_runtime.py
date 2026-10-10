@@ -1,4 +1,4 @@
-"""Explicit B API, opt-in preparation/outbox publisher and one-shot migration."""
+"""Explicit B API preparation/shared DB intake, outbox and maintenance."""
 
 import argparse
 import os
@@ -69,29 +69,46 @@ def main(argv):
     api.add_argument("--auth-mode", choices=("alb", "local"), default="alb")
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
-    api.add_argument(
+    intake = api.add_mutually_exclusive_group()
+    intake.add_argument(
+        "--shared-database-pool-config", help="Opt in to reviewed workload DB allocation intake"
+    )
+    intake.add_argument(
         "--enable-preparation",
         action="store_true",
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
-    api.add_argument("--origin", help="Canonical HTTPS browser origin for preparation requests")
+    api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
+    api.add_argument(
+        "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
+    )
     worker = modes.add_parser(
-        "worker", help="Outbox publisher; NOT a deployment consumer", allow_abbrev=False
+        "worker", help="Explicit outbox or single shared database allocation", allow_abbrev=False
     )
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox",),
+        choices=("outbox", "shared-database"),
         required=True,
-        help="Explicitly select outbox; deployment consumption is not implemented",
+        help="Select outbox publishing or one shared DB allocation; no app deployment consumer",
     )
+    worker.add_argument("--pool-config")
+    worker.add_argument("--alb-trusts-file")
+    worker.add_argument("--memberships-file")
+    worker.add_argument("--operation-id")
+    worker.add_argument("--attempt-id")
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
     worker.add_argument("--interval", type=int, default=5)
-    modes.add_parser(
+    migrate = modes.add_parser(
         "migrate",
         help="Apply pending PostgreSQL state migrations once and exit; safe to repeat",
         allow_abbrev=False,
+    )
+    migrate.add_argument(
+        "--shared-database-reviews",
+        action="store_true",
+        help="Explicitly migrate the opt-in shared DB review schema too",
     )
     args = parser.parse_args(argv)
     if args.mode == "migrate":
@@ -111,6 +128,14 @@ def main(argv):
             parser.error("Invalid B migration database or workspace configuration")
         try:
             run_migrations(RotatingDatabaseConnection(settings), workspace)
+            if args.shared_database_reviews:
+                from adapters.state.operations import PostgresOperationStore
+                from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
+
+                PostgresSharedDatabaseReviews.initialize_schema(
+                    PostgresOperationStore(RotatingDatabaseConnection(settings), workspace=workspace)
+                )
+                print("shared database review schema: up to date", flush=True)
         except (OSError, ValueError, BotoCoreError, ClientError):
             # Do not log query diagnostics, credentials or DDL.
             parser.exit(
@@ -118,9 +143,14 @@ def main(argv):
             )
         return
     if args.mode == "api":
-        if args.origin and not args.enable_preparation:
-            parser.error("--origin requires --enable-preparation")
+        if args.shared_database_pool_config:
+            from interfaces.shared_database_api import run_shared_database_api
+
+            run_shared_database_api(args, parser)
+            return
         if args.enable_preparation:
+            if args.check_config:
+                parser.error("--check-config currently requires --shared-database-pool-config")
             if (
                 args.auth_mode != "alb"
                 or not (
@@ -144,6 +174,10 @@ def main(argv):
                     "Preparation API unavailable; check hosted authentication, schemas, S3 and database configuration.\n",
                 )
             return
+        if args.origin or args.check_config:
+            parser.error(
+                "--origin requires preparation or shared database intake; --check-config requires shared intake"
+            )
         from interfaces.http.server import serve
 
         forwarded = [
@@ -168,11 +202,23 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.worker_mode == "shared-database":
+        from interfaces.shared_database_worker import run_shared_database
+
+        run_shared_database(args, parser)
+        return
+    if any(
+        (args.pool_config, args.alb_trusts_file, args.memberships_file, args.operation_id, args.attempt_id)
+    ):
+        parser.error("Shared database options require --mode shared-database")
     from botocore.exceptions import BotoCoreError, ClientError
 
     from adapters.aws.job_queue import SqsOperationQueue
     from adapters.state.operations import PostgresOperationStore
-    from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+    from adapters.state.postgres import (
+        PostgresStateSettings,
+        RotatingDatabaseConnection,
+    )
     from adapters.state.readiness import check_database_ready
     from application.outbox import OutboxPublisher
 
