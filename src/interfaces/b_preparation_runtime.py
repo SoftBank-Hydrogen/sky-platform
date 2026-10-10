@@ -19,10 +19,23 @@ from interfaces.http.deployment_approvals import DatabaseApprovalApp
 from interfaces.http.deployment_preparation import DatabasePreparationApp, handler_for_preparation
 
 
+def preparation_identity(args):
+    """Accept exactly one complete identity source, matching the read-only API."""
+    trusts = os.environ.get("SKY_ALB_TRUSTS_JSON")
+    members = os.environ.get("SKY_MEMBERSHIPS_JSON")
+    has_environment = trusts is not None or members is not None
+    has_files = bool(args.alb_trusts_file or args.memberships_file)
+    if has_environment:
+        if has_files or trusts is None or members is None:
+            raise ValueError("Use one complete ALB identity configuration source")
+        return AlbRequestAuthenticator.from_json(trusts, members)
+    if not args.alb_trusts_file or not args.memberships_file:
+        raise ValueError("Both ALB identity files are required")
+    return AlbRequestAuthenticator.from_files(Path(args.alb_trusts_file), Path(args.memberships_file))
+
+
 def run_preparation_api(args):
-    authenticator = AlbRequestAuthenticator.from_files(
-        Path(args.alb_trusts_file), Path(args.memberships_file)
-    )
+    authenticator = preparation_identity(args)
     # Validate browser origin before constructing credential or AWS providers.
     DatabaseApprovalApp(None, None, authenticator=authenticator, origin=args.origin, readiness=lambda: None)
     database = PostgresStateSettings.from_environment()

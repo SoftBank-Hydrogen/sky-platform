@@ -2752,14 +2752,27 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     parser.add_argument("--read-only-database", action="store_true",
                         help="Read persisted PostgreSQL deployments without local writers")
     args = parser.parse_args()
-    if args.auth_mode == 'local' and (args.alb_trusts_file or args.memberships_file):
-        parser.error('ALB trust and membership files require --auth-mode alb')
-    if args.auth_mode == 'alb' and (not args.alb_trusts_file or not args.memberships_file):
-        parser.error('--auth-mode alb requires both trust and membership files')
+    # ECS can inject Secrets Manager values directly; never echo these documents.
+    identity_env = {name: os.environ.get(name) for name in ('SKY_ALB_TRUSTS_JSON', 'SKY_MEMBERSHIPS_JSON')}
+    has_files = bool(args.alb_trusts_file or args.memberships_file)
+    has_env = any(value is not None for value in identity_env.values())
+    if args.auth_mode == 'local' and (has_files or has_env):
+        parser.error('ALB trust and membership configuration requires --auth-mode alb')
+    if has_files and has_env:
+        parser.error('Use either ALB identity files or SKY_ALB_TRUSTS_JSON/SKY_MEMBERSHIPS_JSON, not both')
+    if args.auth_mode == 'alb' and has_env and None in identity_env.values():
+        parser.error('--auth-mode alb requires both SKY_ALB_TRUSTS_JSON and SKY_MEMBERSHIPS_JSON')
+    if args.auth_mode == 'alb' and not has_env and (not args.alb_trusts_file or not args.memberships_file):
+        parser.error('--auth-mode alb requires both trust and membership files '
+                     'or SKY_ALB_TRUSTS_JSON and SKY_MEMBERSHIPS_JSON')
     authenticator = None
     if args.auth_mode == 'alb':
         try:
-            authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
+            if has_env:
+                authenticator = AlbRequestAuthenticator.from_json(
+                    identity_env['SKY_ALB_TRUSTS_JSON'], identity_env['SKY_MEMBERSHIPS_JSON'])
+            else:
+                authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
         except (OSError, ValueError, TypeError, UnicodeError) as exc:
             parser.error(f'Invalid hosted identity configuration: {exc}')
     if args.read_only_database:

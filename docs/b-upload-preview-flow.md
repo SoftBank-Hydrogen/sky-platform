@@ -8,6 +8,10 @@ continues to be read-only. Explicit hosted preparation startup is available via:
 
 `sky-service api --enable-preparation --origin https://<service-host> --alb-trusts-file <trusts.json> --memberships-file <memberships.json>`
 
+Alternatively, omit both identity file options and provide SKY_ALB_TRUSTS_JSON and
+SKY_MEMBERSHIPS_JSON using PR #22's validated environment document format. Mixed or
+partial identity sources are rejected without exposing document contents.
+
 This opt-in mode requires configured DB/S3 settings and already-applied foundation,
 approval and preview schemas. Startup checks readiness without migrations or local
 state, creates no legacy App/poller/outbox publisher, and fails closed if schemas or
@@ -102,7 +106,10 @@ approval. New approval/preview revision semantics remain future work.
 Explicit initialize adds deployment_previews and preview_schema_versions version 1
 under the shared advisory lock. Runtime never migrates. Foundation initializers have
 separate commits; the new preview DDL itself is transactional. Coordinate maintenance
-migrations/ownership import with teammates.
+migrations/ownership import with teammates. PR #22's existing `migrate` command
+applies metadata and operation schemas only; it does not yet initialize admission,
+approval or preview schemas. These require an explicit coordinated maintenance step
+through the preview initializer before enabling preparation.
 
 Contract tests use disposable loopback PostgreSQL plus an in-memory S3 double.
 CI uses a small SQLite fixture; the full Unity ZIP is not copied into this repository.

@@ -11,7 +11,7 @@ from adapters.state.service_volume import (
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in {"api", "worker"}:
+    if len(sys.argv) > 1 and sys.argv[1] in {"api", "worker", "migrate"}:
         from interfaces.b_runtime import main as run_b_runtime
 
         run_b_runtime(sys.argv[1:])
@@ -19,7 +19,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Sky service: require initialized persistent state before starting.",
-        epilog="B modes: sky-service api --help; sky-service worker --help. "
+        epilog="B modes: sky-service api --help; sky-service worker --help; sky-service migrate. "
         "Legacy server options are forwarded to sky-platform; see sky-platform --help.",
         allow_abbrev=False,
     )

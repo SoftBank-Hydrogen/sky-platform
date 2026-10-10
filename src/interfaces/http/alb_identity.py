@@ -5,6 +5,8 @@ Trust file: {"version": 1, "trusts": [{"signer_arn": "...", "issuer": "https://.
 Membership file: {"version": 1, "members": [{"issuer": "https://...", "subject": "...",
 "user_id": "...", "organization_id": "...", "role": "admin|deployer|viewer",
 "enabled": true}]}. Both files are operator-provisioned; no browser claim grants membership.
+The same documents may instead arrive as JSON strings (for example, ECS secrets) and
+pass identical validation.
 """
 
 from __future__ import annotations
@@ -55,14 +57,17 @@ def _decode(segment: str) -> bytes:
     return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
 
 
+def _parse_configuration(payload: bytes) -> dict:
+    if len(payload) > 1_048_576:
+        raise ValueError("Identity configuration is too large")
+    return _unique_json(payload)
+
+
 def _read_configuration(path: Path) -> dict:
     if path.stat().st_mode & 0o022:
         raise ValueError("Identity configuration must not be group/world writable")
     with path.open("rb") as source:
-        payload = source.read(1_048_577)
-    if len(payload) > 1_048_576:
-        raise ValueError("Identity configuration is too large")
-    return _unique_json(payload)
+        return _parse_configuration(source.read(1_048_577))
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +107,10 @@ class Memberships:
 
     @classmethod
     def from_file(cls, path: Path, trusts: tuple[AlbTrust, ...]) -> Memberships:
-        data = _read_configuration(path)
+        return cls.from_document(_read_configuration(path), trusts)
+
+    @classmethod
+    def from_document(cls, data: dict, trusts: tuple[AlbTrust, ...]) -> Memberships:
         if (
             set(data) != {"version", "members"}
             or type(data["version"]) is not int
@@ -184,7 +192,20 @@ class AlbRequestAuthenticator:
 
     @classmethod
     def from_files(cls, trusts_path: Path, memberships_path: Path) -> AlbRequestAuthenticator:
-        data = _read_configuration(trusts_path)
+        trusts = cls._trusts_from_document(_read_configuration(trusts_path))
+        return cls(trusts, Memberships.from_file(memberships_path, trusts))
+
+    @classmethod
+    def from_json(cls, trusts_json: str, memberships_json: str) -> AlbRequestAuthenticator:
+        """Same validation as from_files, for documents injected as environment values."""
+        if not isinstance(trusts_json, str) or not isinstance(memberships_json, str):
+            raise TypeError("Identity configuration must be a JSON string")
+        trusts = cls._trusts_from_document(_parse_configuration(trusts_json.encode()))
+        memberships = Memberships.from_document(_parse_configuration(memberships_json.encode()), trusts)
+        return cls(trusts, memberships)
+
+    @staticmethod
+    def _trusts_from_document(data: dict) -> tuple[AlbTrust, ...]:
         if (
             set(data) != {"version", "trusts"}
             or type(data["version"]) is not int
@@ -206,9 +227,7 @@ class AlbRequestAuthenticator:
                     item["signer_arn"], item["issuer"], item["client_id"], LoginSource(item["login_source"])
                 )
             )
-        trust_tuple = tuple(trusts)
-        memberships = Memberships.from_file(memberships_path, trust_tuple)
-        return cls(trust_tuple, memberships)
+        return tuple(trusts)
 
     def _key(self, region: str, key_id: str) -> ec.EllipticCurvePublicKey:
         identity = (region, key_id)

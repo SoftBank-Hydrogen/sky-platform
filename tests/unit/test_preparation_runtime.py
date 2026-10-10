@@ -59,3 +59,41 @@ def test_preparation_failure_is_sanitized(capsys):
             ]
         )
     assert "private" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "environment,files",
+    [
+        ({"SKY_ALB_TRUSTS_JSON": "private"}, (None, None)),
+        ({"SKY_MEMBERSHIPS_JSON": "private"}, (None, None)),
+        (
+            {"SKY_ALB_TRUSTS_JSON": "private", "SKY_MEMBERSHIPS_JSON": "private"},
+            ("trust.json", "members.json"),
+        ),
+        ({}, ("trust.json", None)),
+    ],
+)
+def test_preparation_identity_rejects_mixed_or_partial_sources(environment, files):
+    from argparse import Namespace
+
+    from interfaces.b_preparation_runtime import preparation_identity
+
+    with patch.dict("os.environ", environment, clear=True), pytest.raises(ValueError):
+        preparation_identity(Namespace(alb_trusts_file=files[0], memberships_file=files[1]))
+
+
+def test_preparation_identity_uses_validated_environment_documents():
+    from argparse import Namespace
+
+    from interfaces.b_preparation_runtime import preparation_identity
+
+    environment = {"SKY_ALB_TRUSTS_JSON": "trusts-document", "SKY_MEMBERSHIPS_JSON": "members-document"}
+    with (
+        patch.dict("os.environ", environment, clear=True),
+        patch("interfaces.b_preparation_runtime.AlbRequestAuthenticator.from_json") as validate,
+    ):
+        assert (
+            preparation_identity(Namespace(alb_trusts_file=None, memberships_file=None))
+            is validate.return_value
+        )
+    validate.assert_called_once_with("trusts-document", "members-document")
