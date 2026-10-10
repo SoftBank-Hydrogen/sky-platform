@@ -100,6 +100,26 @@ def test_guard_renews_both_leases_and_refuses_lost_db_lease(consumer):
             guard()
 
 
+def test_rapid_guards_keep_db_fencing_without_throttling_sqs(consumer, monkeypatch):
+    service, store, queue, _worker, _operation = consumer
+    store.heartbeat.return_value = True
+    service.protection = Mock()
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr("application.shared_database_consumer.time.monotonic", clock)
+    with service.ownership("lease", "delivery") as guard:
+        guard()
+        guard()
+        guard()
+        assert store.heartbeat.call_count == 3
+        queue.extend.assert_called_once_with("delivery", seconds=300)
+        service.protection.set.assert_called_once_with(True)
+        clock.return_value = 131.0
+        guard()
+        assert store.heartbeat.call_count == 4
+        assert queue.extend.call_count == 2
+        assert service.protection.set.call_count == 2
+
+
 def test_router_reads_kind_from_database_and_preserves_delivery(consumer):
     _, store, default, allocation, operation = consumer
     router = AllocationQueueRouter(store, default, allocation)

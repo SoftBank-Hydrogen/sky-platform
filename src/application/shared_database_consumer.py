@@ -1,6 +1,7 @@
 """Consume reviewed allocations; queue bodies never carry allocation commands."""
 
 import threading
+import time
 from contextlib import contextmanager
 
 from application.shared_database_workflow import KIND
@@ -35,14 +36,26 @@ class SharedDatabaseConsumer:
     @contextmanager
     def ownership(self, lease, delivery):
         stop, lost = threading.Event(), threading.Event()
+        renewal_lock = threading.Lock()
+        last_transport_renewal = None
 
         def renew():
-            if lost.is_set() or not self.operations.heartbeat(lease, seconds=900):
-                lost.set()
-                raise AllocationOwnershipLost("Allocation execution ownership lost")
-            self.queue.extend(delivery, seconds=300)
-            if self.protection is not None and not stop.is_set():
-                self.protection.set(True)
+            nonlocal last_transport_renewal
+            with renewal_lock:
+                if lost.is_set() or not self.operations.heartbeat(lease, seconds=900):
+                    lost.set()
+                    raise AllocationOwnershipLost("Allocation execution ownership lost")
+                now = time.monotonic()
+                # Guards can run several times before an external operation. SQS
+                # throttles repeated visibility updates to the same receipt, so
+                # retain DB fencing on every guard and coalesce transport renewals.
+                if last_transport_renewal is None or now - last_transport_renewal >= min(
+                    self.heartbeat_seconds, 30
+                ):
+                    self.queue.extend(delivery, seconds=300)
+                    if self.protection is not None and not stop.is_set():
+                        self.protection.set(True)
+                    last_transport_renewal = now
 
         def heartbeat():
             while not stop.wait(self.heartbeat_seconds):
