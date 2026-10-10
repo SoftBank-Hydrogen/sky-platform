@@ -460,3 +460,189 @@ def test_database_confirmation_failure_keeps_outbox_recoverable_after_send(store
     assert publisher.dispatch_once().confirmed == 1
     assert len(accepted) == 2
     assert accepted[0].attempt_id == accepted[1].attempt_id
+
+
+def blocked_operation(store):
+    operation = admit(store)
+    lease = store.claim(operation.id, operation.attempt_id, "worker")
+    store.begin_external(lease, {"request_key": "stable-token", "resource": "stack1"})
+    store.interrupt(lease, {"phase": "requested"})
+    return store.get(operation.id), lease
+
+
+def resolve(store, snapshot, *, outcome="succeeded", **changes):
+    arguments = {
+        "operation_id": snapshot.id,
+        "attempt_id": snapshot.attempt_id,
+        "expected_version": snapshot.row_version,
+        "expected_intent": snapshot.external_intent,
+        "receipt": {"resource": "stack1", "state": "verified_final"},
+        "checkpoint": {"phase": "external_verified"},
+        "resolver": "trusted-reconciler",
+        "outcome": outcome,
+        "result": None if outcome == "resume" else {"confirmed": True},
+    }
+    arguments.update(changes)
+    return store.resolve_attention(**arguments)
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def test_verified_resolution_finishes_original_operation_and_releases_scope(store, database, outcome):
+    blocked, old = blocked_operation(store)
+    assert resolve(store, blocked, outcome=outcome)
+    finished = store.get(blocked.id)
+    assert finished.status == outcome and not finished.external_pending
+    assert finished.result == {"confirmed": True}
+    assert finished.checkpoint == {"phase": "external_verified"}
+    assert finished.external_receipt["resolution"] == {
+        "resolver": "trusted-reconciler",
+        "outcome": outcome,
+        "attempt_id": blocked.attempt_id,
+        "row_version": blocked.row_version,
+    }
+    assert count(store, database, "mutation_scopes") == 0
+    assert count(store, database, "outbox_events") == 1
+    assert not store.complete(old, {})
+    assert not resolve(store, blocked, outcome=outcome)
+    assert admit(store, key="next").status == "queued"
+
+
+def test_verified_resume_retains_reservation_and_creates_one_new_attempt(store, database):
+    blocked, old = blocked_operation(store)
+    assert resolve(store, blocked, outcome="resume")
+    resumed = store.get(blocked.id)
+    assert resumed.status == "queued" and not resumed.external_pending
+    assert resumed.attempt_id != blocked.attempt_id
+    assert resumed.checkpoint == {"phase": "external_verified"}
+    assert resumed.external_receipt["observation"]["resource"] == "stack1"
+    assert resumed.result is None
+    assert count(store, database, "mutation_scopes") == 1
+    assert count(store, database, "outbox_events") == 2
+    assert not resolve(store, blocked, outcome="resume")
+    assert store.claim(blocked.id, blocked.attempt_id, "old-message") is None
+    assert not store.heartbeat(old)
+    with pytest.raises(ApplicationBusy):
+        admit(store, key="next")
+    new = store.claim(resumed.id, resumed.attempt_id, "new-worker")
+    assert store.complete(new, {"done": True})
+    assert admit(store, key="next").status == "queued"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"expected_version": 1},
+        {"attempt_id": str(uuid4())},
+        {"expected_intent": {"request_key": "different-token"}},
+    ],
+)
+def test_wrong_snapshot_cannot_resolve_uncertainty(store, database, changes):
+    blocked, _ = blocked_operation(store)
+    before = [
+        count(store, database, table) for table in ["operation_events", "outbox_events", "mutation_scopes"]
+    ]
+    assert not resolve(store, blocked, **changes)
+    assert store.get(blocked.id) == blocked
+    assert before == [
+        count(store, database, table) for table in ["operation_events", "outbox_events", "mutation_scopes"]
+    ]
+
+
+def test_competing_resolvers_commit_only_one_resolution(store, database):
+    from threading import Barrier
+
+    blocked, _ = blocked_operation(store)
+    barrier = Barrier(8)
+
+    def finish(index):
+        other = PostgresOperationStore(database, workspace=store.workspace)
+        barrier.wait(timeout=10)
+        return resolve(other, blocked, outcome="resume" if index % 2 else "succeeded")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert sum(pool.map(finish, range(8))) == 1
+    current = store.get(blocked.id)
+    assert current.status in {"queued", "succeeded"}
+    assert count(store, database, "outbox_events") == (2 if current.status == "queued" else 1)
+    assert count(store, database, "mutation_scopes") == (1 if current.status == "queued" else 0)
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "resume"])
+def test_resolution_transaction_failure_preserves_blocked_state(store, database, outcome):
+    blocked, _ = blocked_operation(store)
+    original = store._event
+
+    def fail_after_effect(connection, identity, stage):
+        original(connection, identity, stage)
+        if stage in {"succeeded", "requeued"}:
+            raise psycopg.OperationalError("lost after final mutation")
+
+    with patch.object(store, "_event", side_effect=fail_after_effect), pytest.raises(OSError):
+        resolve(store, blocked, outcome=outcome)
+    assert store.get(blocked.id) == blocked
+    assert count(store, database, "mutation_scopes") == 1
+    assert count(store, database, "outbox_events") == 1
+    assert count(store, database, "operation_events") == 4
+    assert resolve(store, blocked, outcome=outcome)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"receipt": {}},
+        {"checkpoint": {}},
+        {"expected_intent": {}},
+        {"outcome": "retry_unknown"},
+        {"outcome": []},
+        {"expected_version": True},
+        {"expected_version": 0},
+        {"resolver": "bad/name"},
+        {"result": None},
+        {"receipt": {"bad": float("nan")}},
+        {"outcome": "resume", "result": {}},
+    ],
+)
+def test_invalid_resolution_preserves_uncertainty(store, changes):
+    blocked, _ = blocked_operation(store)
+    with pytest.raises(ValueError):
+        resolve(store, blocked, **changes)
+    assert store.get(blocked.id) == blocked
+
+
+def test_reconciliation_is_workspace_scoped(store, database):
+    blocked, _ = blocked_operation(store)
+    other = PostgresOperationStore(database, workspace=uuid4().hex)
+    with pytest.raises(FileNotFoundError):
+        resolve(other, blocked)
+    assert store.get(blocked.id) == blocked
+
+
+def test_running_operation_cannot_be_resolved_outside_its_worker_lease(store):
+    operation = admit(store)
+    lease = store.claim(operation.id, operation.attempt_id, "worker")
+    store.begin_external(lease, {"request_key": "token"})
+    running = store.get(operation.id)
+    assert not resolve(store, running)
+    assert store.get(operation.id) == running
+
+
+def test_resolution_requires_original_reservation(store, database):
+    blocked, _ = blocked_operation(store)
+    with database() as connection:
+        connection.execute("DELETE FROM sky_state.mutation_scopes WHERE workspace=%s", (store.workspace,))
+    with pytest.raises(ValueError, match="reservation"):
+        resolve(store, blocked)
+    assert store.get(blocked.id) == blocked
+
+
+def test_old_resolution_cannot_change_a_later_uncertain_attempt(store):
+    blocked, _ = blocked_operation(store)
+    assert resolve(store, blocked, outcome="resume")
+    resumed = store.get(blocked.id)
+    lease = store.claim(resumed.id, resumed.attempt_id, "new-worker")
+    store.begin_external(lease, {"request_key": "next-step"})
+    store.interrupt(lease, {"phase": "next-requested"})
+    newer = store.get(blocked.id)
+    assert newer.status == "needs_attention"
+    assert not resolve(store, blocked)
+    assert store.get(blocked.id) == newer

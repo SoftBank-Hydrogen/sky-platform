@@ -88,6 +88,20 @@ class OperationStore(Protocol):
 
     def recover_expired(self, *, limit: int = 100) -> tuple[str, ...]: ...
 
+    def resolve_attention(
+        self,
+        operation_id: str,
+        attempt_id: str,
+        expected_version: int,
+        expected_intent: dict,
+        receipt: dict,
+        checkpoint: dict,
+        *,
+        resolver: str,
+        outcome: str,
+        result: dict | None = None,
+    ) -> bool: ...
+
     def claim_outbox(
         self, owner: str, *, seconds: int = 60, limit: int = 10
     ) -> tuple[OutboxDelivery, ...]: ...

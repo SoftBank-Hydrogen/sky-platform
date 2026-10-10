@@ -412,6 +412,92 @@ class PostgresOperationStore:
                 self._resume_or_block(connection, self._select(connection, identity))
             return tuple(str(row[0]) for row in rows)
 
+    def resolve_attention(
+        self,
+        operation_id,
+        attempt_id,
+        expected_version,
+        expected_intent,
+        receipt,
+        checkpoint,
+        *,
+        resolver,
+        outcome,
+        result=None,
+    ):
+        """Commit an externally verified resolution against the original snapshot.
+
+        The trusted caller must observe the original resource/request outside this
+        transaction and establish that the old executor cannot issue late effects.
+        This method performs no AWS calls and cannot verify arbitrary JSON evidence.
+        Unknown or merely absent resources must remain blocked. Resume means start
+        a new attempt at the verified checkpoint, never blindly repeat the intent.
+        """
+        operation_id, attempt_id = self._uuid(operation_id), self._uuid(attempt_id)
+        resolver = self._text(resolver, "resolver identity")
+        if type(expected_version) is not int or expected_version <= 0:
+            raise ValueError("Invalid expected operation version")
+        if not isinstance(outcome, str) or outcome not in {"succeeded", "failed", "resume"}:
+            raise ValueError("Invalid reconciliation outcome")
+        expected_intent = self._document(expected_intent)
+        receipt, checkpoint = self._document(receipt), self._document(checkpoint)
+        if not expected_intent or not receipt or not checkpoint:
+            raise ValueError("Original intent, verified receipt and checkpoint are required")
+        if outcome == "resume":
+            if result is not None:
+                raise ValueError("Resume cannot include a terminal result")
+        else:
+            result = self._document(result)
+        evidence = self._document(
+            {
+                "observation": receipt,
+                "resolution": {
+                    "resolver": resolver,
+                    "outcome": outcome,
+                    "attempt_id": attempt_id,
+                    "row_version": expected_version,
+                },
+            }
+        )
+        with self.records._connection() as connection:
+            operation = self._select(connection, operation_id, lock=True)
+            if (
+                operation.status != "needs_attention"
+                or not operation.external_pending
+                or operation.attempt_id != attempt_id
+                or operation.row_version != expected_version
+                or operation.external_intent != expected_intent
+            ):
+                return False
+            reserved = connection.execute(
+                """SELECT operation_id FROM sky_state.mutation_scopes
+                WHERE workspace=%s AND application_id=%s AND operation_id=%s FOR UPDATE""",
+                (self.workspace, operation.application_id, operation_id),
+            ).fetchone()
+            if reserved is None:
+                raise ValueError("Reconciliation requires the original application reservation")
+            connection.execute(
+                """UPDATE sky_state.operations SET external_pending=false,
+                external_receipt=%s,checkpoint=%s,row_version=row_version+1
+                WHERE workspace=%s AND id=%s""",
+                (self._json(evidence), self._json(checkpoint), self.workspace, operation_id),
+            )
+            self._event(connection, operation_id, "reconciled_" + outcome)
+            if outcome == "resume":
+                self._resume_or_block(connection, self._select(connection, operation_id))
+            else:
+                connection.execute(
+                    """UPDATE sky_state.operations SET status=%s,result=%s,
+                    lease_owner=NULL,lease_until=NULL WHERE workspace=%s AND id=%s""",
+                    (outcome, self._json(result), self.workspace, operation_id),
+                )
+                connection.execute(
+                    "DELETE FROM sky_state.mutation_scopes WHERE workspace=%s AND operation_id=%s",
+                    (self.workspace, operation_id),
+                )
+                self._event(connection, operation_id, outcome)
+            return True
+
     def claim_outbox(self, owner, *, seconds=60, limit=10):
         owner = self._text(owner, "publisher identity")
         seconds, limit = self._bounded(seconds, 1, 3600), self._bounded(limit, 1, 100)
