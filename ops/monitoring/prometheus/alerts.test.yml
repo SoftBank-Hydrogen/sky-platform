@@ -1,0 +1,34 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="sky-observer"}'
+        values: '0+0x12'
+      - series: 'sky_observed_websocket_up{target="demo-game",kind="game"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SkyObserverUnavailable
+        exp_alerts:
+          - exp_labels: {job: sky-observer, severity: critical}
+            exp_annotations: {summary: "Sky observer is unavailable"}
+      - eval_time: 3m
+        alertname: GameWebSocketUnavailable
+        exp_alerts:
+          - exp_labels: {target: demo-game, kind: game, severity: critical}
+            exp_annotations: {summary: "Game application WebSocket round trip failed"}
+  - interval: 15s
+    input_series:
+      - series: 'up{job="sky-observer"}'
+        values: '1+0x12'
+      - series: 'sky_observed_websocket_up{target="demo-game",kind="game"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SkyObserverUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GameWebSocketUnavailable
+        exp_alerts: []

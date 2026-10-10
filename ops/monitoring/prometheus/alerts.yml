@@ -1,0 +1,33 @@
+groups:
+  - name: sky-observations
+    rules:
+      - alert: SkyObserverHasNoTargets
+        expr: sky_observer_targets == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "No Sky or game targets have been configured"}
+      - alert: SkyObserverUnavailable
+        expr: up{job="sky-observer"} == 0 or absent(up{job="sky-observer"})
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "Sky observer is unavailable"}
+      - alert: SkyTargetCollectionFailed
+        expr: sky_observed_collection_up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Target collection failed; check target, schema and authentication"}
+      - alert: SkyObservationStale
+        expr: time() - sky_observed_last_success_timestamp_seconds > 120
+        for: 1m
+        labels: {severity: warning}
+        annotations: {summary: "Target observation has not been refreshed"}
+      - alert: GameWebSocketUnavailable
+        expr: sky_observed_websocket_up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Game application WebSocket round trip failed"}
+      - alert: GameScoreboardUnavailable
+        expr: sky_game_scoreboard_up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Game scoreboard read failed; persistence still needs functional verification"}

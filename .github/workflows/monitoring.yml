@@ -1,0 +1,52 @@
+name: monitoring-checks
+on:
+  pull_request:
+    paths: ["ops/monitoring/**", "scripts/load/**", ".github/workflows/monitoring.yml"]
+  push:
+    branches: [main]
+    paths: ["ops/monitoring/**", "scripts/load/**", ".github/workflows/monitoring.yml"]
+permissions:
+  contents: read
+jobs:
+  monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ops/monitoring/exporter/package-lock.json
+      - name: Install observer dependencies
+        working-directory: ops/monitoring/exporter
+        run: npm ci --ignore-scripts
+      - name: Check observer failure handling
+        working-directory: ops/monitoring/exporter
+        run: npm test
+      - name: Validate dashboard queries and provisioned data source IDs
+        run: node ops/monitoring/exporter/test/dashboard.cjs
+      - name: Check Prometheus configuration and alert behavior
+        env:
+          PROM_IMAGE: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            -v "$PWD/ops/monitoring/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool "$PROM_IMAGE" check config /etc/prometheus/prometheus.yml
+          docker run --rm --network none --read-only --cap-drop ALL --tmpfs /tmp:size=64m \
+            -v "$PWD/ops/monitoring/prometheus:/etc/prometheus:ro" --workdir /etc/prometheus \
+            --entrypoint promtool "$PROM_IMAGE" test rules alerts.test.yml
+      - name: Parse k6 scenarios without sending traffic
+        env:
+          K6_IMAGE: grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34
+        run: |
+          for profile in smoke baseline ramp soak; do
+            docker run --rm --network none --read-only --cap-drop ALL \
+              -v "$PWD/scripts/load:/scripts:ro" -e PROFILE="$profile" \
+              "$K6_IMAGE" inspect /scripts/platform.js > /dev/null
+          done
+          for mode in probe play; do
+            docker run --rm --network none --read-only --cap-drop ALL \
+              -v "$PWD/scripts/load:/scripts:ro" -e GAME_MODE="$mode" -e ALLOW_GAME_INPUT=true \
+              "$K6_IMAGE" inspect /scripts/game.js > /dev/null
+          done
