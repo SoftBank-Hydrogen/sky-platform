@@ -10,14 +10,29 @@ from threading import Condition
 
 
 class ApplicationWriteGate:
-    def __init__(self, controller_id, binding, allowed_bindings, *, rebind, read_probe, drain_timeout=30):
-        if binding not in allowed_bindings or len(allowed_bindings) != 2 or drain_timeout <= 0:
+    def __init__(
+        self,
+        controller_id,
+        binding,
+        allowed_bindings,
+        *,
+        rebind,
+        read_probe,
+        drain_timeout=30,
+        initially_blocked=False,
+    ):
+        if (
+            binding not in allowed_bindings
+            or len(allowed_bindings) != 2
+            or drain_timeout <= 0
+            or type(initially_blocked) is not bool
+        ):
             raise ValueError("Explicit registered bindings and bounded drain required")
         self.controller_id, self.binding = controller_id, dict(binding)
         self.allowed = [dict(item) for item in allowed_bindings]
         self.rebind, self.read_probe, self.drain_timeout = rebind, read_probe, drain_timeout
         self.condition = Condition()
-        self.blocked, self.active, self.generation = False, 0, 0
+        self.blocked, self.active, self.generation = initially_blocked, 0, 0
         self.verified, self.uncertain, self.controlling = False, False, False
 
     @contextmanager

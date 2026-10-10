@@ -253,3 +253,17 @@ def test_private_control_ca_cannot_disable_tls_verification(disable):
             guard=lambda: None,
             ssl_context=context,
         )
+
+
+def test_standby_can_start_with_write_gate_closed():
+    _, plan, _, _, _ = setup()
+    gate = ApplicationWriteGate(
+        "standby",
+        plan["target"],
+        [plan["source"], plan["target"]],
+        rebind=lambda binding: None,
+        read_probe=lambda binding: True,
+        initially_blocked=True,
+    )
+    with pytest.raises(RuntimeError, match="Writes"), gate.write(plan["target"]):
+        pass

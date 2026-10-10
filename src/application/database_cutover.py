@@ -64,9 +64,15 @@ class DatabaseCutover:
 
     def rollback(self, plan, final_baseline):
         self._validate(plan, final_baseline)
+        active = plan["target"]
+        inspect = getattr(self.traffic, "recovery_binding", None)
+        if callable(inspect):
+            active = self._step("inspect_recovery_route", inspect)
+            if active not in (plan["source"], plan["target"]):
+                raise ValueError("Recovery route differs from registered application")
         # Required even if target health failed before resume: there may be writes
         # from a prior attempt. Guard/journal failures deliberately leave it closed.
-        self._step("quiesce_target", lambda: self.traffic.quiesce(plan["target"]))
+        self._step("quiesce_target", lambda: self.traffic.quiesce(active))
         self._step("fence_target_recovery", lambda: self._login(self.target, False))
         self._step("fence_source_recovery", lambda: self._login(self.source, False))
         recovered = self._step(
@@ -76,7 +82,8 @@ class DatabaseCutover:
             ),
         )
         self._step("enable_source", lambda: self._login(self.source, True))
-        self._step("activate_source", lambda: self.traffic.activate(plan["target"], plan["source"]))
+        if active != plan["source"]:
+            self._step("activate_source", lambda: self.traffic.activate(active, plan["source"]))
         self._step("probe_source", lambda: self.traffic.probe(plan["source"]))
         self._step("resume_source", lambda: self.traffic.resume(plan["source"]))
         return {
