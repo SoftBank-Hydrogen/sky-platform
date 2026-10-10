@@ -210,3 +210,50 @@ def test_ambiguous_observation_commit_is_never_retried_or_interrupted(workflow):
     operations.observe_external.assert_called_once()
     operations.interrupt.assert_not_called()
     operations.complete.assert_not_called()
+
+
+def test_queue_ownership_is_checked_before_external_allocation(workflow):
+    from contextlib import contextmanager
+
+    from application.shared_database_consumer import AllocationOwnershipLost
+
+    worker, _, _, operations, allocator, _, operation = workflow
+
+    @contextmanager
+    def lost(_):
+        def guard():
+            raise AllocationOwnershipLost()
+
+        yield guard
+
+    worker.ownership = lost
+    with pytest.raises(AllocationOwnershipLost):
+        worker.execute(operation.id, operation.attempt_id)
+    operations.begin_external.assert_not_called()
+    allocator.allocate.assert_not_called()
+
+
+def test_lease_loss_after_allocation_never_commits_unverified_success(workflow):
+    from contextlib import contextmanager
+
+    from application.shared_database_consumer import AllocationOwnershipLost
+
+    worker, _, _, operations, allocator, _, operation = workflow
+    calls = 0
+
+    @contextmanager
+    def ownership(_):
+        def guard():
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise AllocationOwnershipLost()
+
+        yield guard
+
+    worker.ownership = ownership
+    assert worker.execute(operation.id, operation.attempt_id)["status"] == "needs_attention"
+    allocator.allocate.assert_called_once()
+    operations.observe_external.assert_not_called()
+    operations.complete.assert_not_called()
+    assert operations.interrupt.call_args.args[1]["stage"] == "allocation_outcome_uncertain"

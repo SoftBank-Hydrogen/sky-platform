@@ -83,14 +83,14 @@ def main(argv):
         "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
     )
     worker = modes.add_parser(
-        "worker", help="Explicit outbox or single shared database allocation", allow_abbrev=False
+        "worker", help="Outbox publisher, explicit or queued shared database allocation", allow_abbrev=False
     )
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "shared-database"),
+        choices=("outbox", "shared-database", "shared-database-queue"),
         required=True,
-        help="Select outbox publishing or one shared DB allocation; no app deployment consumer",
+        help="Select outbox or shared DB allocation execution; no app deployment consumer",
     )
     worker.add_argument("--pool-config")
     worker.add_argument("--alb-trusts-file")
@@ -98,7 +98,9 @@ def main(argv):
     worker.add_argument("--operation-id")
     worker.add_argument("--attempt-id")
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
-    worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
+    worker.add_argument(
+        "--once", action="store_true", help="Process one bounded batch or queue delivery and exit"
+    )
     worker.add_argument("--interval", type=int, default=5)
     migrate = modes.add_parser(
         "migrate",
@@ -202,7 +204,7 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
-    if args.worker_mode == "shared-database":
+    if args.worker_mode in {"shared-database", "shared-database-queue"}:
         from interfaces.shared_database_worker import run_shared_database
 
         run_shared_database(args, parser)
@@ -228,6 +230,11 @@ def main(argv):
         url = os.environ.get("SKY_JOB_QUEUE_URL", "")
         # A sentinel avoids constructing a boto client during configuration validation.
         SqsOperationQueue(url, region=settings.region, account_id=account, client=object())
+        allocation_url = os.environ.get("SKY_SHARED_DATABASE_QUEUE_URL", "")
+        if allocation_url:
+            if allocation_url == url:
+                raise ValueError("Allocation queue must be separate from the build queue")
+            SqsOperationQueue(allocation_url, region=settings.region, account_id=account, client=object())
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
     except ValueError:
@@ -240,6 +247,15 @@ def main(argv):
         check_database_ready(connection, operations=True)
         store = PostgresOperationStore(connection, workspace=workspace)
         queue = SqsOperationQueue(url, region=settings.region, account_id=account)
+        from application.shared_database_consumer import AllocationQueueRouter
+
+        queue = AllocationQueueRouter(
+            store,
+            queue,
+            SqsOperationQueue(allocation_url, region=settings.region, account_id=account)
+            if allocation_url
+            else None,
+        )
         publisher = OutboxPublisher(store, queue, "outbox-" + uuid4().hex)
         stop = threading.Event()
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}

@@ -1,8 +1,10 @@
-"""One-operation workload DB worker; no automatic SQS consumption or deployment."""
+"""Explicit or queued workload DB allocation; never deploys the application."""
 
 import hashlib
 import json
 import os
+import signal
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -95,7 +97,21 @@ def run_shared_database(args, parser):
         authenticator = load_hosted_identity(args)
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
-        if not args.check_config:
+        queued = args.worker_mode == "shared-database-queue"
+        if queued:
+            from adapters.aws.job_queue import SqsOperationQueue
+
+            queue_url = os.environ.get("SKY_SHARED_DATABASE_QUEUE_URL", "")
+            SqsOperationQueue(
+                queue_url, region=state.region, account_id=settings.pool.account_id, client=object()
+            )
+            if queue_url == os.environ.get("SKY_JOB_QUEUE_URL"):
+                raise ValueError("Allocation and build queues must be separate")
+            if args.operation_id or args.attempt_id or args.interval < 1:
+                raise ValueError(
+                    "Queue mode requires a dedicated queue and positive interval, not operation IDs"
+                )
+        if not args.check_config and not queued:
             if not args.operation_id or not args.attempt_id:
                 raise ValueError("One operation and attempt ID are required")
             UUID(args.operation_id)
@@ -122,6 +138,31 @@ def run_shared_database(args, parser):
             lambda user, org: current_membership(authenticator, user, org),
             owner="shared-db-" + uuid4().hex,
         )
+        if queued:
+            from application.shared_database_consumer import SharedDatabaseConsumer
+
+            consumer = SharedDatabaseConsumer(
+                operations,
+                SqsOperationQueue(queue_url, region=state.region, account_id=settings.pool.account_id),
+                worker,
+            )
+            stop = threading.Event()
+            previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+            try:
+                for sig in previous:
+                    signal.signal(sig, lambda *_: stop.set())
+                while not stop.is_set():
+                    try:
+                        report = consumer.consume_once()
+                    except OSError:
+                        report = "unavailable"
+                    print("Shared database consumer: " + report, flush=True)
+                    if args.once or stop.wait(args.interval):
+                        break
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
+            return
         result = worker.execute(args.operation_id, args.attempt_id)
         print(
             f"Shared database operation={result['operation_id']} status={result['status']}; app deployment not started",

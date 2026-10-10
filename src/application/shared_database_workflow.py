@@ -5,6 +5,7 @@ revalidated against the current job, pool registration and current membership.
 """
 
 import re
+from contextlib import nullcontext
 from dataclasses import asdict
 
 from application.deployment_writes import DeploymentMetadataWriter, authorize_job_snapshot
@@ -79,11 +80,13 @@ class SharedDatabaseWorker:
         resolve_principal,
         *,
         owner: str,
+        ownership=None,
     ):
         self.writer = DeploymentMetadataWriter(records)
         self.operations, self.pool, self.config_digest = operations, pool, config_digest
         self.service = ManagedSharedDatabaseService(allocator)
         self.resolve_principal, self.owner = resolve_principal, owner
+        self.ownership = ownership
 
     def _validate(self, operation):
         command = operation.command
@@ -138,6 +141,13 @@ class SharedDatabaseWorker:
         lease = self.operations.claim(operation_id, attempt_id, self.owner, seconds=900)
         if lease is None:
             return {"status": "not_claimed", "operation_id": operation_id}
+        context = self.ownership(lease) if self.ownership else nullcontext(lambda: None)
+        with context as guard:
+            guard()
+            return self._execute_owned(operation, lease, guard)
+
+    def _execute_owned(self, operation, lease, guard):
+        operation_id = operation.id
         try:
             principal, job, request, selection = self._validate(operation)
         except (ValueError, PermissionError, FileNotFoundError, RecordConflict):
@@ -160,10 +170,12 @@ class SharedDatabaseWorker:
                 raise ValueError("Recorded external evidence requires reconciliation")
             safe = safe_receipt(operation.external_receipt, request)
         else:
+            guard()
             if not self.operations.begin_external(lease, intent):
                 return {"status": "lease_lost", "operation_id": operation_id}
             try:
                 receipt = self.service.allocate(principal, job, request)
+                guard()
                 safe = safe_receipt(receipt, request, require_ready=True)
             except Exception:  # noqa: BLE001 -- all uncertain external effects need reconciliation
                 # The adapter may have created a secret/DB. Preserve the intent and reservation.
@@ -184,6 +196,7 @@ class SharedDatabaseWorker:
                 "http_verification",
             ],
         }
+        guard()
         completed = self.operations.complete(lease, result)
         return {"status": "succeeded" if completed else "lease_lost", "operation_id": operation_id}
 

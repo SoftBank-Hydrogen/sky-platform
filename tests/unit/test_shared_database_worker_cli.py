@@ -283,3 +283,21 @@ def test_preparation_and_shared_intake_options_never_silently_override_one_anoth
     assert error.value.code == 2
     shared.assert_not_called()
     prepare.assert_not_called()
+
+
+def test_queue_config_is_explicit_and_requires_separate_queue(configuration, monkeypatch, capsys):
+    path, _ = configuration
+    args = arguments(path)
+    args[2] = "shared-database-queue"
+    url = "https://sqs.ap-northeast-2.amazonaws.com/111111111111/shared-db.fifo"
+    with patch("interfaces.shared_database_worker.AlbRequestAuthenticator.from_files", return_value=Mock()):
+        with pytest.raises(SystemExit):
+            main([*args, "--check-config"])
+        monkeypatch.setenv("SKY_SHARED_DATABASE_QUEUE_URL", url)
+        monkeypatch.setenv("SKY_JOB_QUEUE_URL", url)
+        with pytest.raises(SystemExit):
+            main([*args, "--check-config"])
+        monkeypatch.setenv("SKY_JOB_QUEUE_URL", url.replace("shared-db", "build"))
+        with patch("boto3.client", side_effect=AssertionError("AWS call")):
+            main([*args, "--check-config"])
+        assert "no AWS/DB calls" in capsys.readouterr().out
