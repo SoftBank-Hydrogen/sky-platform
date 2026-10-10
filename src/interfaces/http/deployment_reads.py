@@ -19,7 +19,8 @@ from ports.deployment_reads import ReadCursor
 
 
 class DatabaseReadApp:
-    def __init__(self, service: DeploymentReadService, *, workspace="team", authenticator=None):
+    def __init__(self, service: DeploymentReadService, *, workspace="team", authenticator=None, readiness=None):
+        self.readiness = readiness
         self.service = service
         self.workspace = workspace
         self.hosted = authenticator is not None
@@ -93,6 +94,16 @@ def handler_for_reads(app: DatabaseReadApp):
         def do_GET(self):
             if self.path == "/health":
                 self.json_response(200, {"status": "ok"})
+                return
+            if self.path == "/ready":
+                try:
+                    if app.readiness is None:
+                        raise OSError("Readiness is not configured")
+                    app.readiness()
+                except (OSError, ValueError):
+                    self.json_response(503, {"status": "not_ready"})
+                else:
+                    self.json_response(200, {"status": "ready", "mode": "read_only"})
                 return
             if self.path == "/":
                 if app.hosted and not self.authenticate_api():

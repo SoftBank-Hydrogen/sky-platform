@@ -4,7 +4,7 @@ This step depends on the state port in PR #6. The adapter implements deployment 
 
 ## Infrastructure contract
 
-The connection factory reads SKY_DATABASE_HOST, SKY_DATABASE_PORT (5432 by default), SKY_DATABASE_NAME, SKY_DATABASE_SECRET_ARN and SKY_AWS_REGION. It fetches the RDS-managed username/password with Secrets Manager using the task role. It never trusts host/port fields from the secret. Supply SKY_DATABASE_SSLROOTCERT pointing to the Amazon RDS CA bundle (default /etc/ssl/certs/sky-rds-global-bundle.pem). TLS uses verify-full. The existing service image does not yet install that bundle or the optional state-postgres dependencies.
+The connection factory reads SKY_DATABASE_HOST, SKY_DATABASE_PORT (5432 by default), SKY_DATABASE_NAME, SKY_DATABASE_SECRET_ARN and SKY_AWS_REGION. It fetches the RDS-managed username/password with Secrets Manager using the task role. It never trusts host/port fields from the secret. Supply SKY_DATABASE_SSLROOTCERT pointing to the Amazon RDS CA bundle (default /etc/ssl/certs/sky-rds-global-bundle.pem). TLS uses verify-full. The service image now installs that bundle and the optional state-postgres dependencies; see b-runtime-entrypoints.md for the explicit read-only API and outbox modes.
 
 Credential cache is five minutes. A connection failure refreshes the secret and retries connection once. SQL statements and commits are never retried automatically: their outcome can be uncertain. No credential content or SQL diagnostics are included in adapter errors.
 

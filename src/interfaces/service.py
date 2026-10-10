@@ -11,9 +11,16 @@ from adapters.state.service_volume import (
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in {"api", "worker"}:
+        from interfaces.b_runtime import main as run_b_runtime
+
+        run_b_runtime(sys.argv[1:])
+        return
+
     parser = argparse.ArgumentParser(
         description="Sky service: require initialized persistent state before starting.",
-        epilog="Server options are forwarded to sky-platform; see sky-platform --help.",
+        epilog="B modes: sky-service api --help; sky-service worker --help. "
+        "Legacy server options are forwarded to sky-platform; see sky-platform --help.",
         allow_abbrev=False,
     )
     parser.add_argument("--state-dir", type=Path, default=Path("/.sky"))

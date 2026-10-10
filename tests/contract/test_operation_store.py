@@ -876,3 +876,48 @@ def test_failed_operation_migration_rolls_back_policy_columns(store, database):
             == (0,)
         )
         connection.rollback()
+
+
+def test_outbox_runtime_publishes_real_db_claim_without_running_deployment(store, database, monkeypatch):
+    import json
+    from unittest.mock import Mock
+
+    from assets import ASSET_ROOT
+    from interfaces.b_runtime import main
+
+    operation = admit(store)
+    env = {
+        "SKY_DATABASE_HOST": "db.example",
+        "SKY_DATABASE_NAME": "sky",
+        "SKY_DATABASE_SECRET_ARN": "arn:aws:secretsmanager:ap-northeast-2:977889523182:secret:test",
+        "SKY_AWS_REGION": "ap-northeast-2",
+        "SKY_AWS_ACCOUNT_ID": "977889523182",
+        "SKY_DATABASE_SSLROOTCERT": str(ASSET_ROOT / "infra/rds-global-bundle.pem"),
+        "SKY_STATE_WORKSPACE": store.workspace,
+        "SKY_JOB_QUEUE_URL": "https://sqs.ap-northeast-2.amazonaws.com/977889523182/test.fifo",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    client = Mock()
+    with (
+        patch("adapters.state.postgres.RotatingDatabaseConnection", return_value=database),
+        patch("boto3.client", return_value=client),
+        patch(
+            "adapters.state.operations.PostgresOperationStore.initialize",
+            side_effect=AssertionError("Runtime DDL"),
+        ),
+    ):
+        main(["worker", "--mode", "outbox", "--once"])
+    sent = client.send_message.call_args.kwargs
+    assert json.loads(sent["MessageBody"])["operation_id"] == operation.id
+    assert sent["MessageDeduplicationId"] == operation.attempt_id
+    assert store.get(operation.id).status == "queued"
+    with database() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM sky_state.outbox_events "
+                "WHERE workspace=%s AND published_at IS NOT NULL",
+                (store.workspace,),
+            ).fetchone()[0]
+            == 1
+        )
