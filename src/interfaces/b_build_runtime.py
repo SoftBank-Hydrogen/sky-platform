@@ -50,6 +50,7 @@ def run_build_consumer(args):
     ).check_ready()
     artifacts = S3ArtifactSettings(settings.bucket, settings.region, settings.account_id)
     from adapters.aws.built_deployment import BuiltImageDeployment
+
     deployer = BuiltImageDeployment(settings) if getattr(args, "deploy_built_image", False) else None
     consumer = BuildConsumer(
         store,
