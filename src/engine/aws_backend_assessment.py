@@ -192,7 +192,22 @@ def aws_backend_assessments(profile: InfrastructureProfile) -> list[dict]:
                 "structural_status": structure,
                 "execution_status": "unsupported_by_sky",
                 "status": "unsupported_by_sky",
-                "reasons": [item["reason"] for item in constraints] + ["Sky 배포 어댑터는 미구현입니다."],
+                "native_adapter": {
+                    "support": "implemented",
+                    "selection_mode": "explicit_cli",
+                    "command": "sky-service aws-backend " + ("lambda" if target == "aws-lambda" else "ec2"),
+                    "profile": (
+                        "python_stdlib_handler_zip"
+                        if target == "aws-lambda"
+                        else "stateless_ecr_container_public_subnet"
+                    ),
+                    "verification_status": "unverified",
+                    "compiler_integration": "unimplemented",
+                },
+                "reasons": [item["reason"] for item in constraints]
+                + [
+                    "명시적 CLI 배포 어댑터는 구현됐지만 ZIP 자동 선택·배포 경로에는 아직 연결되지 않았습니다."
+                ],
                 "constraint_results": constraints,
                 "violated_rule_ids": sorted(
                     {item["rule_id"] for item in constraints if item["status"] == "violated"}
