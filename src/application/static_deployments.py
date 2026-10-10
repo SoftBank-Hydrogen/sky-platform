@@ -12,12 +12,14 @@ from adapters.aws.static_site import AwsStaticSiteAdapter
 from application.analysis import redact
 from application.deployment_core import source_digest
 from application.static_compilation import static_compilation, verify_static_compilation
+from domain.access import ResourceOwner
 
 
 class StaticDeploymentsMixin:
     def create_static_job(
         self, job_id: str, project: Path, application_id: str, *, requested_target: str,
         source: dict | None = None, public_url_required: bool = False,
+        owner: ResourceOwner | None = None,
     ) -> None:
         """Persist one static release before starting its cloud worker."""
         attempt_id = job_id + "-a1"
@@ -49,6 +51,7 @@ class StaticDeploymentsMixin:
                 "requested_target": requested_target,
                 **({"public_url_required": True} if public_url_required else {}),
                 "application_id": application_id, "attempt_id": attempt_id,
+                **(owner.record() if owner else {}),
                 "status": "running", "deployment_state": "active", "public": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "project": str(project), "source_digest": preflight["source_digest"],

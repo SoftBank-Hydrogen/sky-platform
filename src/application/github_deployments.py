@@ -35,6 +35,7 @@ from engine.architecture_decision import architecture_decision
 from engine.compilation import compile_decision
 from engine.deployment_policy import deployment_policy
 from engine.static_site import assess_static_site
+from domain.access import ResourceOwner, owner_from_record
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
 
@@ -76,6 +77,8 @@ class GitHubDeploymentsMixin:
                         for job_id in item["last_job_ids"]
                     )
                     or (item.get("last_error") is not None and not isinstance(item["last_error"], str))
+                    or (("organization_id" in item or "created_by" in item)
+                        and owner_from_record(item) is None)
                 ):
                     raise ValueError("invalid source record")
                 item["repository_url"] = repository.url
@@ -221,6 +224,7 @@ class GitHubDeploymentsMixin:
             raise ValueError("선택한 배포 대상의 공개 범위를 지원하지 않습니다.")
         policy.require(target, plan["compatibility"]["access_mode"])
         digest = source_digest(project)
+        source_owner = owner_from_record(source)
         job_id = uuid.uuid4().hex[:16]
         directory = self.root / job_id
         directory.mkdir()
@@ -237,6 +241,7 @@ class GitHubDeploymentsMixin:
                 "requested_target": requested_target,
                 "infrastructure_plan": plan,
                 "application_id": application_id,
+                **(source_owner.record() if source_owner else {}),
                 "public": plan["compatibility"]["access_mode"] == "public",
                 "status": "running",
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -313,7 +318,8 @@ class GitHubDeploymentsMixin:
             if source_digest(copied) != digest:
                 raise ValueError("GitHub 소스가 복사 중 변경됐습니다.")
             self.create_static_job(
-                job_id, copied, application_id, requested_target="auto", source=source
+                job_id, copied, application_id, requested_target="auto", source=source,
+                owner=owner_from_record(source),
             )
             self.clear_upload_marker(directory)
             return {"id": job_id, "status": "running", "target": "aws-s3-cloudfront"}
@@ -333,6 +339,7 @@ class GitHubDeploymentsMixin:
         targets: list[str],
         public: bool,
         subscription_id: str | None = None,
+        owner: ResourceOwner | None = None,
     ) -> tuple[dict, list[str]]:
         self._validate_github_request(application_id, targets, public)
         source = {
@@ -340,6 +347,7 @@ class GitHubDeploymentsMixin:
             "branch": branch,
             "commit": commit,
             "subscription_id": subscription_id,
+            **(owner.record() if owner else {}),
         }
         with tempfile.TemporaryDirectory(prefix=".github-import-", dir=self.root) as temporary:
             root = Path(temporary)
@@ -349,7 +357,8 @@ class GitHubDeploymentsMixin:
             if len(targets) == 1:
                 job = self._reserve_single_github_job(project, application_id, targets[0], public, source)
                 return job, [job["id"]]
-            group = self.create_deployment_group(project, application_id, targets, public, source=source)
+            group = self.create_deployment_group(project, application_id, targets, public,
+                                                 source=source, owner=owner)
             return group, [child["job_id"] for child in group["targets"]]
 
     def _start_github_jobs(self, result: dict, job_ids: list[str]):
@@ -375,6 +384,7 @@ class GitHubDeploymentsMixin:
         targets: list[str],
         public: bool,
         auto_deploy: bool,
+        *, owner: ResourceOwner | None = None,
     ) -> dict:
         repository = parse_repository_url(repository_url)
         self._validate_github_request(application_id, targets, public)
@@ -393,7 +403,7 @@ class GitHubDeploymentsMixin:
         actual_branch, commit = resolve_revision(repository, branch)
         source_id = uuid.uuid4().hex[:16] if auto_deploy else None
         result, job_ids = self._reserve_github_revision(
-            repository, actual_branch, commit, application_id, targets, public, source_id
+            repository, actual_branch, commit, application_id, targets, public, source_id, owner
         )
         if auto_deploy:
             item = {
@@ -408,6 +418,7 @@ class GitHubDeploymentsMixin:
                 "last_job_ids": job_ids,
                 "last_error": None,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
+                **(owner.record() if owner else {}),
             }
             try:
                 with self.lock:
@@ -488,6 +499,7 @@ class GitHubDeploymentsMixin:
                     snapshot["targets"],
                     snapshot["public"],
                     source_id,
+                    owner_from_record(snapshot),
                 )
                 try:
                     with self.lock:

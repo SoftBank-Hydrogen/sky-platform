@@ -20,5 +20,9 @@ class LocalTokenAuthenticator:
     def authenticate(self, supplied_token: str | None) -> Principal | None:
         if not isinstance(supplied_token, str) or not hmac.compare_digest(supplied_token, self._token):
             return None
-        return Principal(user_id="local_operator", organization_id="local_workspace",
-                         role=Role.ADMIN, login_source=LoginSource.LOCAL)
+        return Principal(
+            user_id="local_operator",
+            organization_id="local_workspace",
+            role=Role.ADMIN,
+            login_source=LoginSource.LOCAL,
+        )
