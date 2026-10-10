@@ -551,6 +551,9 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                   if recorded == 'passed' else
                                   '실제 대상의 sky.probe 왕복에 실패했습니다.' if recorded == 'failed' else
                                   '실제 대상의 WebSocket 메시지 왕복 기록이 없습니다.')})
+        checks.append({'name': 'websocket_session_continuity', 'status': 'unverified',
+                       'detail': '새 연결의 메시지 왕복은 기존 플레이어 연결·진행 중인 게임 상태의 유지를 증명하지 않습니다. '
+                                 '이 배포 리비전에 연결된 갱신·재시작·롤백 세션 증거가 필요합니다.'})
 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes

@@ -244,6 +244,10 @@ class CertificateTests(unittest.TestCase):
                          if item['name'] == 'websocket_round_trip')
         self.assertEqual(websocket['status'], 'passed')
         self.assertEqual(websocket['source_evidence_ids'], [evidence_id])
+        continuity = next(item for item in certificate['verification']
+                          if item['name'] == 'websocket_session_continuity')
+        self.assertEqual(continuity['status'], 'unverified')
+        self.assertIn('websocket_session_continuity', certificate['unverified'])
         self.assertEqual(ir['evidence'][0]['verified_by'], ())
         ir['evidence'][0]['source']['revision'] = 'b' * 64
         tampered = deployment_certificate(job)['decision_trace']
