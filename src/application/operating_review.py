@@ -68,7 +68,10 @@ def _binding(job):
     raw = job.get("workload_database_binding")
     if not isinstance(raw, dict):
         raise ValueError("A recorded workload database binding is required")  # noqa: TRY004 -- missing evidence
-    source = DatabaseBinding(**raw)
+    try:
+        source = DatabaseBinding(**raw)
+    except (ValueError, TypeError):
+        raise ValueError("Invalid recorded workload database binding") from None
     if (source.role != "shared_workload" or source.organization_id != job.get("organization_id")
             or source.application_id != job.get("application_id")):
         raise ValueError("Workload binding differs from deployment ownership")

@@ -5,11 +5,16 @@ from http.server import ThreadingHTTPServer
 
 from adapters.state.deployment_reads import PostgresDeploymentReads
 from adapters.state.operations import PostgresOperationStore
-from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+from adapters.state.postgres import (
+    PostgresDeploymentRecordStore,
+    PostgresStateSettings,
+    RotatingDatabaseConnection,
+)
 from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
 from application.deployment_reads import DeploymentReadService
 from interfaces.http.mutation_requests import validate_origin
 from interfaces.http.shared_database import SharedDatabaseApp, handler_for_shared_database
+from interfaces.operating_review import OperatingReviewController, load_operating_policies
 from interfaces.shared_database_worker import load_hosted_identity, load_pool_configuration
 
 
@@ -29,6 +34,9 @@ def run_shared_database_api(args, parser):
         authenticator = load_hosted_identity(args)
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
+        policy_path = getattr(args, "operating_review_policy_config", None)
+        policies = (load_operating_policies(policy_path, account_id=settings.pool.account_id,
+                                           region=state.region) if policy_path else None)
     except (ValueError, TypeError, KeyError, OSError):
         parser.error("Invalid shared database API configuration or identity settings")
     if args.check_config:
@@ -46,7 +54,13 @@ def run_shared_database_api(args, parser):
         app = SharedDatabaseApp(
             reads, reviews, authenticator=authenticator, origin=origin, workspace=workspace
         )
-        server = ThreadingHTTPServer((args.host, args.port), handler_for_shared_database(app))
+        handler = handler_for_shared_database(app)
+        if policies is not None:
+            from interfaces.http.operating_review import handler_for_operating_review
+
+            handler = handler_for_operating_review(app, OperatingReviewController(
+                PostgresDeploymentRecordStore(connection, workspace=workspace), policies))
+        server = ThreadingHTTPServer((args.host, args.port), handler)
         print(f"Sky shared database review: {origin}/shared-database", flush=True)
         try:
             server.serve_forever()

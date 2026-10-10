@@ -99,6 +99,7 @@ def main(argv):
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
     api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
+    api.add_argument("--operating-review-policy-config", help="Operator-reviewed scheduled DB promotion policies")
     api.add_argument(
         "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
     )
@@ -172,6 +173,8 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if args.operating_review_policy_config and not args.shared_database_pool_config:
+            parser.error("Operating reviews require hosted shared database intake")
         if args.shared_database_pool_config:
             from interfaces.shared_database_api import run_shared_database_api
 

@@ -25,6 +25,12 @@ def test_api_routes_to_database_without_local_state():
         assert sys.argv is previous
 
 
+def test_operating_policy_cannot_silently_start_read_only_or_preparation_mode():
+    with pytest.raises(SystemExit) as error:
+        main(["api", "--operating-review-policy-config", "policies.json"])
+    assert error.value.code == 2
+
+
 def test_api_forwards_read_only_and_alb_configuration():
     def serve(**_):
         assert "--read-only-database" in sys.argv
