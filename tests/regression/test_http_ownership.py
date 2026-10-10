@@ -29,7 +29,7 @@ def _job(job_id, organization=None, *, group_id=None):
 
 
 def _handler(app, principal, path, *, method="GET", headers=None, body=b""):
-    app.authenticator = Mock(authenticate=Mock(return_value=principal))
+    app.authenticator = Mock(authenticate_request=Mock(return_value=principal))
     handler = handler_for(app).__new__(handler_for(app))
     handler.path = path
     handler.headers = {"X-Sky-Token": "fixture", "Content-Length": str(len(body)), **(headers or {})}

@@ -7,8 +7,16 @@ the browser token is deliberately not treated as a multi-user credential.
 from __future__ import annotations
 
 import hmac
+from collections.abc import Mapping
+from typing import Protocol
 
 from domain.access import LoginSource, Principal, Role
+
+
+class RequestAuthenticator(Protocol):
+    """An injected hosted authenticator must verify request identity itself."""
+
+    def authenticate_request(self, headers: Mapping[str, str]) -> Principal | None: ...
 
 
 class LocalTokenAuthenticator:
@@ -26,3 +34,6 @@ class LocalTokenAuthenticator:
             role=Role.ADMIN,
             login_source=LoginSource.LOCAL,
         )
+
+    def authenticate_request(self, headers: Mapping[str, str]) -> Principal | None:
+        return self.authenticate(headers.get("X-Sky-Token"))

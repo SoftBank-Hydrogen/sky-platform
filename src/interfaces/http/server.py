@@ -67,7 +67,7 @@ from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
 from domain.access import AccessResult, Action, LoginSource, ResourceOwner, Role, permitted, record_access
-from interfaces.http.auth import LocalTokenAuthenticator
+from interfaces.http.auth import LocalTokenAuthenticator, RequestAuthenticator
 
 
 def dockerfile_diff(source: Path, plan: dict) -> str:
@@ -82,12 +82,20 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
-                 github_poll_interval: int = 60):
+                 github_poll_interval: int = 60, authenticator: RequestAuthenticator | None = None):
         self.root = root.resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
-        self.token = secrets.token_urlsafe(32)
-        self.authenticator = LocalTokenAuthenticator(self.token)
+        self.hosted = authenticator is not None
+        if self.hosted:
+            if isinstance(authenticator, LocalTokenAuthenticator) or not callable(
+                    getattr(authenticator, 'authenticate_request', None)):
+                raise ValueError('Hosted mode requires a request authenticator')
+            self.token = None
+            self.authenticator = authenticator
+        else:
+            self.token = secrets.token_urlsafe(32)
+            self.authenticator = LocalTokenAuthenticator(self.token)
         self.lock = threading.Lock()
         self.jobs = {}
         self.active_groups = set()
@@ -1529,7 +1537,12 @@ def handler_for(app: App):
             self.wfile.write(payload)
 
         def authenticate_api(self):
-            self.principal = app.authenticator.authenticate(self.headers.get("X-Sky-Token"))
+            if app.hosted and self.headers.get('X-Sky-Token') is not None:
+                self.json_response(403, {"error": "Local session token is unavailable in hosted mode"})
+                return False
+            self.principal = app.authenticator.authenticate_request(self.headers)
+            if app.hosted and self.principal is not None and self.principal.login_source is LoginSource.LOCAL:
+                self.principal = None
             if self.principal is None:
                 self.json_response(403, {"error": "Invalid session token"})
                 return False
@@ -1604,8 +1617,10 @@ def handler_for(app: App):
                 self.json_response(200, {"status": "ok"})
                 return
             if self.path == "/":
+                if app.hosted and not self.authenticate_api():
+                    return
                 content = (ASSET_ROOT / "static/index.html").read_text()
-                payload = content.replace("__TOKEN__", app.token).encode()
+                payload = content.replace("__TOKEN__", app.token or '').encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
