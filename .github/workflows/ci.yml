@@ -102,6 +102,8 @@ jobs:
           retention-days: 1
 
   publish-service:
+    outputs:
+      service_image: ${{ steps.image.outputs.image }}
     # Infra owner supplies these variables. PRs never obtain AWS credentials.
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
@@ -132,6 +134,7 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
       - name: Push the verified service image
+        id: image
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.SKY_SERVICE_ECR_REPOSITORY }}
@@ -143,4 +146,33 @@ jobs:
           image="$REGISTRY/$ECR_REPOSITORY:$image_tag"
           docker tag "sky-platform:$IMAGE_SHA" "$image"
           docker push "$image"
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
           printf 'Sky service image: `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"
+
+  propose-infra-image:
+    # This job cannot run unless the verified image was successfully pushed.
+    needs: publish-service
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: dev
+    concurrency:
+      group: sky-infra-image-pr
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Propose the published image to sky-infra
+        env:
+          GH_TOKEN: ${{ secrets.SKY_INFRA_PR_TOKEN }}
+          SOURCE_GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          SERVICE_IMAGE: ${{ needs.publish-service.outputs.service_image }}
+          SOURCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/propose_infra_image.py
