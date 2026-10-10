@@ -45,20 +45,27 @@ Runtime never initializes or migrates the database. Run `sky-service migrate` (b
 
 `sky-service migrate`
 
-This one-shot command applies pending PostgreSQL state migrations and exits. It reads the same configuration as the API: SKY_DATABASE_HOST, SKY_DATABASE_PORT, SKY_DATABASE_NAME, SKY_DATABASE_SECRET_ARN, SKY_AWS_REGION, optional SKY_STATE_WORKSPACE and optional SKY_DATABASE_SSLROOTCERT. Credentials, TLS verify-full and timeouts are also the same as the API. It does not need a state directory, ALB identity or SQS settings.
+This one-shot command applies pending PostgreSQL state migrations and exits. It reads the same configuration as the API: SKY_DATABASE_HOST, SKY_DATABASE_PORT, SKY_DATABASE_NAME, SKY_DATABASE_SECRET_ARN, SKY_AWS_REGION, SKY_AWS_ACCOUNT_ID, optional SKY_STATE_WORKSPACE and optional SKY_DATABASE_SSLROOTCERT. Credentials, TLS verify-full and timeouts are also the same as the API. SKY_AWS_ACCOUNT_ID (12 digits) is validated by the admission store before any connection; the migrations themselves do not record it. It does not need a state directory, ALB identity or SQS settings.
 
-The command runs the metadata migrations first, then the operation migrations. These are the same `initialize()` code paths as before. Each one runs in a single transaction under the existing `pg_advisory_xact_lock`, so concurrent runs serialize and a failed migration rolls back. Already applied versions are skipped, so the command is safe to repeat. A successful run prints one line per ledger:
+The command applies all five ledgers in order: metadata, operation, admission, approval, preview. These are the existing `initialize()` code paths of the record, operation, admission, approval and preview stores, so afterwards both the read-only API and the opt-in preparation API (`--enable-preparation`) pass readiness. Each initializer also calls its predecessors first; those find their ledger current and change nothing. Each ledger step runs in its own transaction under the existing `pg_advisory_xact_lock`, so concurrent runs serialize and a failed step rolls back. Already applied versions are skipped, so the command is safe to repeat. After a failure, a rerun continues from the first incomplete ledger. A successful run prints one line per ledger:
 
 ```
 metadata schema: applied 1,2 (now 1,2)
-operation schema: up to date (now 1,2)
+operation schema: applied 1,2 (now 1,2)
+admission schema: applied 1 (now 1)
+approval schema: applied 1 (now 1)
+preview schema: applied 1 (now 1)
 ```
+
+A database migrated by the earlier metadata/operation-only command reports those two as `up to date` and applies the other three.
+
+Existing data: migrate only adds schemas and tables; it never changes or deletes existing rows. `application_owners` is created empty and is not populated from existing deployment records, so apps recorded before this migration still need an explicit ownership import before they can be prepared.
 
 Exit codes:
 
 - `0`: the schema is current.
 - `2`: invalid configuration. No database connection is attempted.
-- `1`: credential, connection or migration failure, or a database with a newer/unsupported schema version. Such a database is left unchanged.
+- `1`: credential, connection or migration failure, or a database with a newer/unsupported schema version. The failing ledger is left unchanged; ledgers before it may already have been applied by this run.
 
 Failure output is a fixed message with no query text, DDL, endpoint diagnostics or secrets.
 
