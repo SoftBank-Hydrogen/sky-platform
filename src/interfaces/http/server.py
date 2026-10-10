@@ -65,6 +65,7 @@ from application.postgres_retirement_operations import PostgresRetirementOperati
 from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
+from interfaces.http.auth import LocalTokenAuthenticator
 
 
 def dockerfile_diff(source: Path, plan: dict) -> str:
@@ -84,6 +85,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.root.chmod(0o700)
         self.token = secrets.token_urlsafe(32)
+        self.authenticator = LocalTokenAuthenticator(self.token)
         self.lock = threading.Lock()
         self.jobs = {}
         self.active_groups = set()
@@ -1479,6 +1481,13 @@ def handler_for(app: App):
             self.end_headers()
             self.wfile.write(payload)
 
+        def authenticate_api(self):
+            self.principal = app.authenticator.authenticate(self.headers.get("X-Sky-Token"))
+            if self.principal is None:
+                self.json_response(403, {"error": "Invalid session token"})
+                return False
+            return True
+
         def do_GET(self):
             if self.path == "/health":
                 # Service liveness only; user-app readiness is checked separately.
@@ -1494,8 +1503,7 @@ def handler_for(app: App):
                 self.end_headers()
                 self.wfile.write(payload)
                 return
-            if self.headers.get("X-Sky-Token") != app.token:
-                self.json_response(403, {"error": "Invalid session token"})
+            if not self.authenticate_api():
                 return
             if self.path == "/api/config":
                 self.json_response(200, {"ai_available": app.ai_settings.available,
@@ -1631,8 +1639,7 @@ def handler_for(app: App):
             self.json_response(404, {"error": "Not found"})
 
         def do_POST(self):
-            if self.headers.get("X-Sky-Token") != app.token:
-                self.json_response(403, {"error": "Invalid session token"})
+            if not self.authenticate_api():
                 return
             try:
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
