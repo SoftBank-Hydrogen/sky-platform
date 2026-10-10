@@ -11,8 +11,8 @@ psycopg = pytest.importorskip("psycopg")
 from psycopg import sql
 
 from adapters.database.shared_pool import PostgresSharedPool
+from domain.shared_database import PoolAllocationRequest, SharedDatabasePool
 from engine.database_promotion import DatabaseBinding, PromotionTrigger, plan_database_promotion
-from engine.shared_database import PoolAllocationRequest, SharedDatabasePool
 from ports.shared_database import (
     AllocationCredentials,
     PoolAllocationConflict,

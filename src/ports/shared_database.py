@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from engine.shared_database import PoolAllocationRequest
+from domain.shared_database import PoolAllocationRequest
 
 
 class PoolAllocationError(ValueError):

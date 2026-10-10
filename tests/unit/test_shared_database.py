@@ -5,10 +5,11 @@ from unittest.mock import Mock
 
 import pytest
 
+from adapters.database.shared_pool import PostgresSharedPool
 from application.shared_database import SharedDatabaseService
 from domain.access import LoginSource, Principal, Role
-from engine.shared_database import PoolAllocationRequest, SharedDatabasePool
-from ports.shared_database import AllocationCredentials
+from domain.shared_database import PoolAllocationRequest, SharedDatabasePool
+from ports.shared_database import AllocationCredentials, PoolAllocationError
 
 
 def pool():
@@ -47,3 +48,14 @@ def test_viewer_foreign_org_and_mismatched_application_never_call_adapter():
     service.allocate(deployer, application, request, credentials)
     adapter.allocate.assert_called_once_with(request, credentials)
     assert credentials.password not in repr(credentials)
+
+
+def test_other_app_secret_reference_is_rejected_before_any_database_connection():
+    request = PoolAllocationRequest(pool(), "team-a", "game")
+    other = PoolAllocationRequest(pool(), "team-b", "game")
+    reference = f"arn:aws:secretsmanager:{pool().region}:{pool().account_id}:secret:sky-pool/{pool().id}/{other.id}-test01"
+    connect = Mock()
+    adapter = PostgresSharedPool(pool(), connect, Mock())
+    with pytest.raises(PoolAllocationError, match="credential reference"):
+        adapter.allocate(request, AllocationCredentials(reference, "disposable-password-for-test"))
+    connect.assert_not_called()

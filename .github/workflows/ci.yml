@@ -68,7 +68,7 @@ jobs:
               'ports/deployment_reads.py', 'adapters/state/deployment_reads.py',
               'application/deployment_reads.py', 'interfaces/http/deployment_reads.py',
               'application/deployment_writes.py',
-              'engine/shared_database.py', 'ports/shared_database.py',
+              'domain/database.py', 'domain/shared_database.py', 'ports/shared_database.py',
               'application/shared_database.py', 'adapters/database/shared_pool.py',
           }
           assert required <= files, sorted(required - files)

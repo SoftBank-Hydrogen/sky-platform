@@ -1,7 +1,7 @@
 """Authorize a workload allocation before invoking a privileged DB adapter."""
 
 from domain.access import Action, Principal, owner_from_record, permitted
-from engine.shared_database import PoolAllocationRequest
+from domain.shared_database import PoolAllocationRequest
 from ports.shared_database import AllocationCredentials, SharedDatabaseAllocator
 
 

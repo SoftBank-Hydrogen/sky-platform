@@ -6,11 +6,12 @@ AWS tags, TLS, secret ownership or network isolation; those are caller gates.
 
 import hashlib
 import json
+import re
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 
-from engine.shared_database import PoolAllocationRequest, SharedDatabasePool
+from domain.shared_database import PoolAllocationRequest, SharedDatabasePool
 from ports.shared_database import (
     AllocationCredentials,
     PoolAllocationConflict,
@@ -141,7 +142,7 @@ class PostgresSharedPool:
         if request.pool != self.pool:
             raise PoolAllocationError("Allocation pool differs from the registered adapter")
         prefix = f"arn:aws:secretsmanager:{self.pool.region}:{self.pool.account_id}:secret:sky-pool/{self.pool.id}/{request.id}-"
-        if not credentials.secret_ref.startswith(prefix):
+        if not re.fullmatch(re.escape(prefix) + r"[A-Za-z0-9]{6}", credentials.secret_ref):
             raise PoolAllocationError("A separate app credential reference is required")
         payload = {
             **asdict(request),

@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from engine.database_promotion import DatabaseBinding
+from domain.database import DatabaseBinding
 
 
 @dataclass(frozen=True)
