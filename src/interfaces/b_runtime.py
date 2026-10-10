@@ -19,11 +19,14 @@ def run_outbox(publisher, stop, *, interval=5, once=False):
 _LEDGERS = (
     ("metadata", "sky_state.schema_versions"),
     ("operation", "sky_state.operation_schema_versions"),
+    ("admission", "sky_state.admission_schema_versions"),
+    ("approval", "sky_state.approval_schema_versions"),
+    ("preview", "sky_state.preview_schema_versions"),
 )
 
 
 def schema_versions(connection_factory):
-    """Read both migration ledgers without DDL; a missing ledger reports no versions."""
+    """Read every migration ledger without DDL; a missing ledger reports no versions."""
     import psycopg
 
     try:
@@ -42,14 +45,31 @@ def schema_versions(connection_factory):
         raise OSError("State database schema versions are unavailable") from None
 
 
-def run_migrations(connection_factory, workspace):
-    """Apply metadata then operation migrations under the existing advisory lock."""
+def migration_steps(connection_factory, workspace, *, account_id, region):
+    """Initializers in ledger order. Construction validates the account/region without connecting."""
+    from adapters.state.deployment_admission import PostgresDeploymentAdmission
+    from adapters.state.deployment_approvals import PostgresDeploymentApprovals
+    from adapters.state.deployment_previews import PostgresDeploymentPreviews
     from adapters.state.operations import PostgresOperationStore
-    from adapters.state.postgres import PostgresDeploymentRecordStore
 
+    operations = PostgresOperationStore(connection_factory, workspace=workspace)
+    admission = PostgresDeploymentAdmission(operations, account_id=account_id, region=region)
+    approvals = PostgresDeploymentApprovals(admission)
+    previews = PostgresDeploymentPreviews(approvals)
+    return (operations.records, operations, admission, approvals, previews)
+
+
+def run_migrations(connection_factory, workspace, *, account_id, region):
+    """Apply metadata, operation, admission, approval then preview migrations.
+
+    Each initializer re-runs its predecessors; those find their ledger current under the
+    shared advisory lock and change nothing. Each step commits separately, so a rerun
+    after a failure continues from the first incomplete ledger.
+    """
+    steps = migration_steps(connection_factory, workspace, account_id=account_id, region=region)
     before = schema_versions(connection_factory)
-    PostgresDeploymentRecordStore(connection_factory, workspace=workspace).initialize()
-    PostgresOperationStore(connection_factory, workspace=workspace).initialize()
+    for step in steps:
+        step.initialize()
     after = schema_versions(connection_factory)
     for name, _ in _LEDGERS:
         applied = [version for version in after[name] if version not in before[name]]
@@ -88,7 +108,7 @@ def main(argv):
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "shared-database", "shared-database-queue"),
+        choices=("outbox", "build", "shared-database", "shared-database-queue"),
         required=True,
         help="Select outbox or shared DB allocation execution; no app deployment consumer",
     )
@@ -130,11 +150,13 @@ def main(argv):
         try:
             settings = PostgresStateSettings.from_environment()
             workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
+            account_id = os.environ.get("SKY_AWS_ACCOUNT_ID", "").strip()
             PostgresDeploymentRecordStore(None, workspace=workspace)
+            migration_steps(None, workspace, account_id=account_id, region=settings.region)
         except ValueError:
-            parser.error("Invalid B migration database or workspace configuration")
+            parser.error("Invalid B migration database, account or workspace configuration")
         try:
-            run_migrations(RotatingDatabaseConnection(settings), workspace)
+            run_migrations(RotatingDatabaseConnection(settings), workspace, account_id=account_id, region=settings.region)
             if args.shared_database_reviews:
                 from adapters.state.operations import PostgresOperationStore
                 from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
@@ -225,6 +247,19 @@ def main(argv):
         )
     ):
         parser.error("Shared database options require --mode shared-database")
+    if args.worker_mode == "build":
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from interfaces.b_build_runtime import run_build_consumer
+
+        try:
+            run_build_consumer(args)
+        except (OSError, ValueError, TypeError, KeyError, BotoCoreError, ClientError):
+            parser.exit(
+                1,
+                "Build consumer unavailable; check schemas, pinned builder configuration and credentials.\n",
+            )
+        return
     from botocore.exceptions import BotoCoreError, ClientError
 
     from adapters.aws.job_queue import SqsOperationQueue

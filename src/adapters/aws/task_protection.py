@@ -14,7 +14,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class EcsTaskProtection:
     def __init__(self, uri=None):
         self.uri = uri if uri is not None else os.environ.get("ECS_AGENT_URI", "")
-        if not re.fullmatch(r"http://169\.254\.170\.2(?::[0-9]{1,5})?", self.uri):
+        pattern = r"http://169\.254\.170\.2(?::[0-9]{1,5})?(?:/api/[0-9a-f]{32}-[0-9]+)?"
+        if not isinstance(self.uri, str) or not re.fullmatch(pattern, self.uri):
             raise ValueError("ECS agent task protection endpoint required")
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 

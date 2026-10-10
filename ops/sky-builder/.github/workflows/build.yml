@@ -1,0 +1,112 @@
+name: sky-remote-build
+run-name: sky-build:${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        required: true
+        type: string
+      request_key:
+        required: true
+        type: string
+      request_digest:
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: sky-build-${{ inputs.build_id }}
+  cancel-in-progress: false
+env:
+  BUILD_ID: ${{ inputs.build_id }}
+  REQUEST_KEY: ${{ inputs.request_key }}
+  REQUEST_DIGEST: ${{ inputs.request_digest }}
+  SKY_PLATFORM_CODE_SHA: ${{ vars.SKY_PLATFORM_CODE_SHA }}
+  SKY_ARTIFACTS_BUCKET: ${{ vars.SKY_ARTIFACTS_BUCKET }}
+  SKY_AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check immutable platform code pin
+        run: '[[ "$SKY_PLATFORM_CODE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          repository: SoftBank-Hydrogen/sky-platform
+          ref: ${{ vars.SKY_PLATFORM_CODE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[state-postgres]'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APP_BUILDER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: python scripts/remote_builder.py prepare
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sky-build-input
+          path: build-input/
+          retention-days: 1
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: SoftBank-Hydrogen/sky-platform
+          ref: ${{ vars.SKY_PLATFORM_CODE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[state-postgres]'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sky-build-input
+          path: build-input/
+      - name: Build without AWS credentials or OIDC permission
+        run: python scripts/remote_builder.py build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sky-build-image
+          path: build-output/image.tar
+          retention-days: 1
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: SoftBank-Hydrogen/sky-platform
+          ref: ${{ vars.SKY_PLATFORM_CODE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[state-postgres]'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sky-build-input
+          path: build-input/
+      - uses: actions/download-artifact@v4
+        with:
+          name: sky-build-image
+          path: build-output/
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APP_BUILDER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: python scripts/remote_builder.py publish
