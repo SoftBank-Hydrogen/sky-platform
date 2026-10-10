@@ -1,4 +1,14 @@
-from domain.access import Action, LoginSource, Principal, ResourceOwner, Role, owner_from_record, permitted
+from domain.access import (
+    AccessResult,
+    Action,
+    LoginSource,
+    Principal,
+    ResourceOwner,
+    Role,
+    owner_from_record,
+    permitted,
+    record_access,
+)
 from interfaces.http.auth import LocalTokenAuthenticator
 
 
@@ -48,3 +58,19 @@ def test_local_token_authentication_is_single_workspace_and_rejects_other_tokens
     assert authenticator.authenticate("secret-value") == Principal(
         "local_operator", "local_workspace", Role.ADMIN, LoginSource.LOCAL
     )
+
+
+def test_record_access_hides_foreign_and_unowned_records_from_hosted_users():
+    user = principal("team_a", Role.VIEWER)
+    assert (
+        record_access(user, Action.READ, {"organization_id": "team_b", "created_by": "other"})
+        is AccessResult.NOT_FOUND
+    )
+    assert record_access(user, Action.READ, {"id": "legacy"}) is AccessResult.NOT_FOUND
+    assert (
+        record_access(user, Action.DEPLOY, {"organization_id": "team_a", "created_by": "creator_1"})
+        is AccessResult.FORBIDDEN
+    )
+    local = Principal("local_operator", "local_workspace", Role.ADMIN, LoginSource.LOCAL)
+    assert record_access(local, Action.READ, {"id": "legacy"}) is AccessResult.GRANTED
+    assert record_access(local, Action.READ, {"organization_id": "local_workspace"}) is AccessResult.NOT_FOUND

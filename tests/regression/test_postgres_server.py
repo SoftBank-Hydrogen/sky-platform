@@ -798,6 +798,8 @@ class PostgresServerTests(unittest.TestCase):
         self.assertEqual(self.app.jobs[job_id]['status'], 'interrupted')
 
     def test_manual_postgres_resume_route_requires_authentication(self):
+        self.app.jobs['a' * 16] = {'id': 'a' * 16, 'status': 'interrupted',
+                                   'application_id': 'demo-app'}
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/deployments/' + 'a' * 16 + '/resume-postgres'
         handler.headers = {'Content-Length': '0'}
@@ -864,6 +866,8 @@ class PostgresServerTests(unittest.TestCase):
         no_aws.assert_not_called()
 
     def test_interrupted_migration_inspection_route_requires_token_and_empty_body(self):
+        self.app.jobs['a' * 16] = {'id': 'a' * 16, 'status': 'interrupted',
+                                   'application_id': 'demo-app'}
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/jobs/' + 'a' * 16 + '/migration/inspect'
         handler.headers = {'Content-Length': '0'}
@@ -1024,6 +1028,8 @@ class PostgresServerTests(unittest.TestCase):
             self.app.cleanup_interrupted_aws_migration(job_id)
 
     def test_interrupted_migration_cleanup_route_requires_token_and_empty_body(self):
+        self.app.jobs['a' * 16] = {'id': 'a' * 16, 'status': 'interrupted',
+                                   'application_id': 'demo-app'}
         handler = handler_for(self.app).__new__(handler_for(self.app))
         handler.path = '/api/jobs/' + 'a' * 16 + '/migration/cleanup'
         handler.headers = {'Content-Length': '0'}

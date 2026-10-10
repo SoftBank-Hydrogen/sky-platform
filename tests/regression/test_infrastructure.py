@@ -516,6 +516,8 @@ class InfrastructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
             job_id = 'a' * 16
+            app.jobs[job_id] = {'id': job_id, 'status': 'interrupted',
+                                'application_id': 'demo-app'}
             handler = handler_for(app).__new__(handler_for(app))
             handler.path = f'/api/deployments/{job_id}/resume-unstarted'
             handler.headers = {'Content-Length': '0'}
