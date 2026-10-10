@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 from application.shared_database_workflow import KIND
 from application.database_promotion_workflow import KIND as PROMOTION_KIND
+from application.database_cutover_workflow import KIND as CUTOVER_KIND
 
 
 class AllocationOwnershipLost(OSError):
@@ -15,15 +16,27 @@ class AllocationOwnershipLost(OSError):
 class AllocationQueueRouter:
     """Route using durable operation kind, never fields supplied in queue payloads."""
 
-    def __init__(self, operations, default_queue, allocation_queue, *, promotion_queue=None):
-        self.operations, self.default_queue, self.allocation_queue = operations, default_queue, allocation_queue
+    def __init__(
+        self, operations, default_queue, allocation_queue, *, promotion_queue=None, cutover_queue=None
+    ):
+        self.operations, self.default_queue, self.allocation_queue = (
+            operations,
+            default_queue,
+            allocation_queue,
+        )
         self.promotion_queue = promotion_queue
+        self.cutover_queue = cutover_queue
 
     def publish(self, delivery):
         operation = self.operations.get(delivery.operation_id)
-        if delivery.workspace != self.operations.workspace or operation.application_id != delivery.application_id:
+        if (
+            delivery.workspace != self.operations.workspace
+            or operation.application_id != delivery.application_id
+        ):
             raise OSError("Outbox scope does not match durable operation")
-        if operation.kind == PROMOTION_KIND:
+        if operation.kind == CUTOVER_KIND:
+            queue = self.cutover_queue
+        elif operation.kind == PROMOTION_KIND:
             queue = self.promotion_queue
         else:
             queue = self.allocation_queue if operation.kind == KIND else self.default_queue
@@ -34,7 +47,7 @@ class AllocationQueueRouter:
 
 class SharedDatabaseConsumer:
     def __init__(self, operations, queue, worker, *, heartbeat_seconds=30, protection=None, kind=KIND):
-        if kind not in {KIND, PROMOTION_KIND}:
+        if kind not in {KIND, PROMOTION_KIND, CUTOVER_KIND}:
             raise ValueError("Unsupported database consumer kind")
         self.kind = kind
         self.operations, self.queue, self.worker = operations, queue, worker
@@ -103,7 +116,9 @@ class SharedDatabaseConsumer:
             self.queue.extend(delivery, seconds=30)
             return "other_kind"
         if operation.attempt_id != message["attempt_id"] or operation.status in {
-            "succeeded", "failed", "needs_attention"
+            "succeeded",
+            "failed",
+            "needs_attention",
         }:
             self.queue.delete(delivery)
             return "duplicate"

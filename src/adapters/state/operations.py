@@ -29,6 +29,7 @@ KINDS = {
     "db_create",
     "db_shared_allocate",
     "db_dedicated_prepare",
+    "db_dedicated_cutover",
     "db_retire",
     "snapshot_create",
     "restore_drill",
