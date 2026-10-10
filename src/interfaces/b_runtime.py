@@ -1,4 +1,4 @@
-"""Explicit B entry points: read-only API and opt-in outbox publisher only."""
+"""Explicit B modes: read-only API, outbox publisher, one shared DB allocation."""
 
 import argparse
 import os
@@ -28,15 +28,20 @@ def main(argv):
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
     worker = modes.add_parser(
-        "worker", help="Outbox publisher; NOT a deployment consumer", allow_abbrev=False
+        "worker", help="Explicit outbox or single shared database allocation", allow_abbrev=False
     )
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox",),
+        choices=("outbox", "shared-database"),
         required=True,
-        help="Explicitly select outbox; deployment consumption is not implemented",
+        help="Select outbox publishing or one shared DB allocation; no app deployment consumer",
     )
+    worker.add_argument("--pool-config")
+    worker.add_argument("--alb-trusts-file")
+    worker.add_argument("--memberships-file")
+    worker.add_argument("--operation-id")
+    worker.add_argument("--attempt-id")
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
     worker.add_argument("--interval", type=int, default=5)
@@ -66,11 +71,23 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.worker_mode == "shared-database":
+        from interfaces.shared_database_worker import run_shared_database
+
+        run_shared_database(args, parser)
+        return
+    if any(
+        (args.pool_config, args.alb_trusts_file, args.memberships_file, args.operation_id, args.attempt_id)
+    ):
+        parser.error("Shared database options require --mode shared-database")
     from botocore.exceptions import BotoCoreError, ClientError
 
     from adapters.aws.job_queue import SqsOperationQueue
     from adapters.state.operations import PostgresOperationStore
-    from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+    from adapters.state.postgres import (
+        PostgresStateSettings,
+        RotatingDatabaseConnection,
+    )
     from adapters.state.readiness import check_database_ready
     from application.outbox import OutboxPublisher
 

@@ -70,7 +70,8 @@ jobs:
               'application/deployment_writes.py',
               'domain/database.py', 'domain/shared_database.py', 'ports/shared_database.py',
               'application/shared_database.py', 'adapters/database/shared_pool.py',
-              'adapters/aws/shared_database.py',
+              'adapters/aws/shared_database.py', 'engine/database_placement.py',
+              'application/shared_database_workflow.py', 'interfaces/shared_database_worker.py',
           }
           assert required <= files, sorted(required - files)
           PY
