@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from engine.backend_identity import backend_identity
 from engine.compatibility import InfrastructureProfile, infrastructure_compatibility
+from engine.cost_exposure import cost_exposure
 from engine.static_site import StaticSiteAssessment
 
 SUPPORTED_TARGETS = ("local-docker", "aws-ecs-express", "cloud-run")
@@ -34,7 +35,7 @@ def compare_targets(
                 "configured": reason is None,
                 "configuration_reason": reason,
                 "preview_eligible": report["compatible"] and not report["unknowns"] and reason is None,
-                "cost": {"estimate": None, "note": "대상 전체 비용은 아직 산정하지 않았습니다."},
+                "cost": cost_exposure(target, database_required=bool(profile.database_engines)),
             }
         )
     return reports, evaluate_candidates(reports)
@@ -103,6 +104,7 @@ def evaluate_candidates(reports: list[dict]) -> list[dict]:
                     }
                 ),
                 "cost_estimate": None,
+                "cost": report["cost"],
                 "selected": False,
             }
         )
@@ -162,5 +164,6 @@ def static_hosting_candidate(
         "evidence_ids": [],
         "evidence_files": list(assessment.evidence_files),
         "cost_estimate": None,
+        "cost": cost_exposure("aws-s3-cloudfront"),
         "selected": False,
     }

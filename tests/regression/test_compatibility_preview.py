@@ -49,6 +49,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertEqual(reports['onprem-compose']['access_mode'], 'loopback')
         self.assertEqual(reports['aws-ecs-express']['access_mode'], 'public')
         self.assertTrue(all(item['cost']['estimate'] is None for item in reports.values()))
+        self.assertIn('ECS Fargate 실행 시간과 요청 자원', reports['aws-ecs-express']['cost']['drivers'])
+        self.assertIn('Cloud Run 실행 자원·요청', reports['cloud-run']['cost']['drivers'])
+        self.assertIn('현재 PC의 CPU·메모리·전력·디스크', reports['local-docker']['cost']['drivers'])
         self.assertEqual(payload['inspection']['requirements'], [])
         self.assertEqual(payload['inspection']['scanned_files'], 2)
         self.assertEqual(payload['application_ir']['schema_version'], 2)
@@ -69,9 +72,20 @@ class CompatibilityPreviewTests(unittest.TestCase):
         candidates = {item['id']: item for item in payload['candidates']}
         self.assertEqual(candidates['local-docker']['status'], 'eligible')
         self.assertEqual(candidates['local-docker']['cost_estimate'], None)
+        self.assertIn('CloudFront 요청·전송량', candidates['aws-s3-cloudfront']['cost']['drivers'])
         self.assertTrue(all(not item['selected'] for item in candidates.values()))
         self.assertEqual(self.app.jobs, {})
         self.assertFalse(list(Path(self.temp.name).glob('*/job.json')))
+
+    def test_preview_discloses_rds_cost_only_when_database_is_detected(self):
+        status, payload = self.preview(archive({
+            'requirements.txt': 'psycopg[binary]>=3',
+            'app.py': 'import psycopg\nconnection = psycopg.connect("postgresql://localhost/app")',
+        }))
+        self.assertEqual(status, 200)
+        aws = next(item for item in payload['candidates'] if item['id'] == 'aws-ecs-express')
+        self.assertIn('선택한 신규·기존 RDS의 실행·저장·백업', aws['cost']['drivers'])
+        self.assertIsNone(aws['cost']['estimate'])
 
     def test_preview_explains_unsupported_sqlite_on_every_target(self):
         status, payload = self.preview(archive({

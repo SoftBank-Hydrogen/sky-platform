@@ -338,7 +338,9 @@ function compatibilityPreviewText(result){
    (rules.length?rules.join('\n'):'  '+candidate.reasons.join('; '))+
    (candidate.status==='requires_database_binding'?'\n  '+candidate.reasons.join('; '):'')+
    (candidate.selection_mode==='explicit_only'?'\n  현재 수동 대상 선택만 가능':
-    candidate.id==='aws-s3-cloudfront'&&candidate.selection_mode==='automatic'?'\n  ZIP/폴더 및 단일 GitHub 링크에서 자동 선택 가능':'')+'\n  비용: 미산정';
+    candidate.id==='aws-s3-cloudfront'&&candidate.selection_mode==='automatic'?'\n  ZIP/폴더 및 단일 GitHub 링크에서 자동 선택 가능':'')+
+   '\n  비용: 미산정'+((candidate.cost?.drivers||[]).length?' · 영향 항목: '+candidate.cost.drivers.join(', '):'')+
+   (candidate.cost?.note?'\n  '+candidate.cost.note:'');
  });
  const sqliteNextStep=(inspection.requirements||[]).includes('sqlite')?
   (result.local_sqlite_binding?'\n\nLocal Docker DB 볼륨 '+result.local_sqlite_binding.volume_name+' → '+result.local_sqlite_binding.mount_path+' 경로를 확인했습니다. 이 결과는 실제 Docker 연결·앱 동작의 검증은 아닙니다.':

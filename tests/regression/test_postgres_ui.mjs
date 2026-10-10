@@ -96,7 +96,9 @@ test('environment preview shows target differences before deployment', async () 
        application_ir: {evidence: [{id: 'E-1', path: 'server.js'}]},
        candidates: [
         {id: 'local-docker', status: 'eligible', reasons: ['조건부 가능']},
-        {id: 'aws-ecs-express', status: 'rejected', reasons: ['공개 범위 미지원']},
+        {id: 'aws-ecs-express', status: 'rejected', reasons: ['공개 범위 미지원'],
+         cost: {estimate: null, drivers: ['ECS Fargate 실행 시간과 요청 자원', '로드 밸런서 사용량'],
+          note: '총액은 미산정입니다.'}},
         {id: 'aws-s3-cloudfront', status: 'needs_build', selection_mode: 'automatic',
          reasons: ['빌드 산출물과 API 의존성을 확인해야 합니다.']},
        ], reports: [
@@ -120,6 +122,8 @@ test('environment preview shows target differences before deployment', async () 
   assert.doesNotMatch(elements.compatibilityMap.textContent, /현재 배포 미지원/);
   assert.match(elements.compatibilityMap.textContent, /\[ACCESS-01\] 공개 범위 미지원 · 근거: 사용자 선택·설정/);
   assert.match(elements.compatibilityMap.textContent, /비용: 미산정/);
+  assert.match(elements.compatibilityMap.textContent, /영향 항목: ECS Fargate 실행 시간과 요청 자원, 로드 밸런서 사용량/);
+  assert.match(elements.compatibilityMap.textContent, /총액은 미산정입니다/);
 });
 
 test('multi-target button uploads once and requests an ordered deployment group', async () => {
