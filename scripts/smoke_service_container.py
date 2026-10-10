@@ -69,11 +69,87 @@ def expect_state_rejection(*args):
         raise AssertionError("Service started without initialized persistent state")
 
 
+def smoke_b_api(image):
+    """Run an isolated read-only API without state, credentials or external network."""
+    name = "sky-b-api-smoke-" + uuid.uuid4().hex[:12]
+    try:
+        docker(
+            "run",
+            "-d",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--read-only",
+            "--user",
+            "65534:65534",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "-e",
+            "AWS_EC2_METADATA_DISABLED=true",
+            "-e",
+            "SKY_DATABASE_HOST=127.0.0.1",
+            "-e",
+            "SKY_DATABASE_NAME=test",
+            "-e",
+            "SKY_AWS_REGION=ap-northeast-2",
+            "-e",
+            "SKY_DATABASE_SECRET_ARN=arn:aws:secretsmanager:ap-northeast-2:000000000000:secret:test",
+            image,
+            "api",
+            "--host",
+            "127.0.0.1",
+            "--auth-mode",
+            "local",
+        )
+        script = """
+import json,re,time,urllib.request,urllib.error
+from pathlib import Path
+base='http://127.0.0.1:8080'
+for _ in range(40):
+    try:
+        with urllib.request.urlopen(base+'/health',timeout=1) as response:
+            assert json.load(response)=={'status':'ok'}
+        break
+    except OSError:
+        time.sleep(.2)
+else:
+    raise AssertionError('B API did not start')
+assert not Path('/.sky').exists()
+try:
+    urllib.request.urlopen(base+'/ready',timeout=5)
+except urllib.error.HTTPError as error:
+    assert error.code==503 and json.load(error)=={'status':'not_ready'}
+else:
+    raise AssertionError('DB outage reported ready')
+with urllib.request.urlopen(base,timeout=3) as response:
+    html=response.read().decode()
+token=re.search("const token='([^']+)'",html)[1]
+request=urllib.request.Request(base+'/api/config',headers={'X-Sky-Token':token})
+with urllib.request.urlopen(request,timeout=3) as response:
+    assert json.load(response)['read_only'] is True
+request=urllib.request.Request(base+'/api/deploy/test',data=b'{}',headers={'X-Sky-Token':token})
+try:
+    urllib.request.urlopen(request,timeout=3)
+except urllib.error.HTTPError as error:
+    assert error.code==405
+else:
+    raise AssertionError('Mutation accepted')
+print('PASS: B API non-root/read-only/no state; health 200, ready 503, mutation 405')
+"""
+        print(docker("exec", name, "python", "-c", script))
+    finally:
+        docker("rm", "-f", name, check=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="sky-platform:smoke")
     parser.add_argument("--full", action="store_true")
     options = parser.parse_args()
+    smoke_b_api(options.image)
     name = "sky-service-smoke-" + uuid.uuid4().hex[:12]
     job_id = None
     with tempfile.TemporaryDirectory(prefix=name + "-") as directory:
@@ -157,6 +233,17 @@ def main():
                 "--security-opt",
                 "no-new-privileges",
             ]
+            docker(
+                *probe,
+                "--entrypoint",
+                "python",
+                options.image,
+                "-c",
+                "import ssl, psycopg, boto3; "
+                "ssl.create_default_context(cafile='/etc/ssl/certs/sky-rds-global-bundle.pem')",
+            )
+            docker(*probe, options.image, "api", "--help")
+            docker(*probe, options.image, "worker", "--help")
             expect_state_rejection(*probe, options.image, "--state-dir", "/.sky")
             state_mount = f"type=bind,source={state},target=/.sky"
             expect_state_rejection(*probe, "--mount", state_mount, options.image, "--state-dir", "/.sky")

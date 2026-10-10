@@ -2765,18 +2765,22 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
     if args.read_only_database:
         if authenticator is None and args.host not in {'127.0.0.1', 'localhost'}:
             parser.error('--read-only-database requires loopback or --auth-mode alb')
+        from botocore.exceptions import BotoCoreError, ClientError
         from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
         from adapters.state.deployment_reads import PostgresDeploymentReads
+        from adapters.state.readiness import check_database_ready
         from application.deployment_reads import DeploymentReadService
         from interfaces.http.deployment_reads import DatabaseReadApp
         try:
             settings = PostgresStateSettings.from_environment()
             workspace = os.environ.get('SKY_STATE_WORKSPACE', 'team')
-            reads = PostgresDeploymentReads(RotatingDatabaseConnection(settings), workspace=workspace)
-        except ValueError as error:
-            parser.error(str(error))
+            connection_factory = RotatingDatabaseConnection(settings)
+            reads = PostgresDeploymentReads(connection_factory, workspace=workspace)
+        except (ValueError, OSError, BotoCoreError, ClientError):
+            parser.error("Read-only database configuration or credentials provider is unavailable")
         app = DatabaseReadApp(DeploymentReadService(reads), workspace=workspace,
-                              authenticator=authenticator)
+                              authenticator=authenticator,
+                              readiness=lambda: check_database_ready(connection_factory))
         server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
         print(f"{product_name} (read-only): http://{args.host}:{args.port}", flush=True)
         try:

@@ -231,3 +231,59 @@ def test_service_read_only_does_not_require_local_state():
         import sys
 
         assert "--read-only-database" in sys.argv
+
+
+def test_public_readiness_checks_real_database_and_redacts_failure(http):
+    from adapters.state.readiness import check_database_ready
+
+    store, app, request = http
+    app.readiness = lambda: check_database_ready(store.connection_factory)
+    assert request("/ready", token=False) == (200, {"status": "ready", "mode": "read_only"})
+    app.readiness = Mock(side_effect=OSError("private DB password"))
+    assert request("/ready", token=False) == (503, {"status": "not_ready"})
+    assert request("/health", token=False) == (200, {"status": "ok"})
+
+
+def test_readiness_never_migrates_missing_schema(setup):
+    from adapters.state.readiness import check_database_ready
+
+    _store, connect, _service = setup
+
+    class Connection:
+        def __enter__(self):
+            self.connection = connect()
+            self.connection.__enter__()
+            return self
+
+        def execute(self, query):
+            assert not any(
+                word in query.upper() for word in ("CREATE", "ALTER", "INSERT", "UPDATE", "DELETE")
+            )
+            if "sky_state.schema_versions" in query:
+                query = query.replace("sky_state.schema_versions", "missing_b_runtime_schema.schema_versions")
+            return self.connection.execute(query)
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+    with pytest.raises(OSError, match="not ready"):
+        check_database_ready(Connection)
+
+
+def test_read_only_entrypoint_wires_database_readiness():
+    fake_server = Mock()
+    connection = Mock()
+    with (
+        patch("sys.argv", ["sky-platform", "--read-only-database"]),
+        patch("adapters.state.postgres.PostgresStateSettings.from_environment", return_value=Mock()),
+        patch("adapters.state.postgres.RotatingDatabaseConnection", return_value=connection),
+        patch("adapters.state.readiness.check_database_ready") as readiness,
+        patch("interfaces.http.server.ThreadingHTTPServer", return_value=fake_server) as server_class,
+    ):
+        serve()
+        handler = server_class.call_args.args[1].__new__(server_class.call_args.args[1])
+        handler.path = "/ready"
+        handler.json_response = Mock()
+        handler.do_GET()
+        readiness.assert_called_once_with(connection)
+        handler.json_response.assert_called_once_with(200, {"status": "ready", "mode": "read_only"})

@@ -14,7 +14,8 @@ RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[state-postgres]' \
+    && install -m 0644 /app/src/assets/infra/rds-global-bundle.pem /etc/ssl/certs/sky-rds-global-bundle.pem
 # Root is needed for the host Docker socket in the internal A-phase deployment.
 # The EC2 host is dedicated to Sky; do not expose this service unrestricted.
 EXPOSE 8080
