@@ -1,4 +1,4 @@
-"""Explicit B entry points: read-only API, opt-in outbox publisher and one-shot migration."""
+"""Explicit B API, opt-in preparation/outbox publisher and one-shot migration."""
 
 import argparse
 import os
@@ -62,13 +62,19 @@ def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     modes = parser.add_subparsers(dest="mode", required=True)
     api = modes.add_parser(
-        "api", help="Read-only PostgreSQL API; no deployment admission", allow_abbrev=False
+        "api", help="PostgreSQL API; preparation/admission requires explicit opt-in", allow_abbrev=False
     )
     api.add_argument("--host", default="0.0.0.0")
     api.add_argument("--port", type=int, default=8080)
     api.add_argument("--auth-mode", choices=("alb", "local"), default="alb")
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
+    api.add_argument(
+        "--enable-preparation",
+        action="store_true",
+        help="Opt in to upload/preview/approval admission; no deployment consumer",
+    )
+    api.add_argument("--origin", help="Canonical HTTPS browser origin for preparation requests")
     worker = modes.add_parser(
         "worker", help="Outbox publisher; NOT a deployment consumer", allow_abbrev=False
     )
@@ -112,6 +118,32 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if args.origin and not args.enable_preparation:
+            parser.error("--origin requires --enable-preparation")
+        if args.enable_preparation:
+            if (
+                args.auth_mode != "alb"
+                or not (
+                    (args.alb_trusts_file and args.memberships_file)
+                    or all(name in os.environ for name in ("SKY_ALB_TRUSTS_JSON", "SKY_MEMBERSHIPS_JSON"))
+                )
+                or not args.origin
+            ):
+                parser.error(
+                    "Preparation requires ALB authentication, trust/membership configuration and --origin"
+                )
+            from botocore.exceptions import BotoCoreError, ClientError
+
+            from interfaces.b_preparation_runtime import run_preparation_api
+
+            try:
+                run_preparation_api(args)
+            except (OSError, ValueError, TypeError, UnicodeError, BotoCoreError, ClientError):
+                parser.exit(
+                    1,
+                    "Preparation API unavailable; check hosted authentication, schemas, S3 and database configuration.\n",
+                )
+            return
         from interfaces.http.server import serve
 
         forwarded = [
