@@ -3,10 +3,13 @@
 import io
 import json
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock
 
-from domain.access import LoginSource, Principal, Role
+import pytest
+
+from domain.access import AccessResult, Action, LoginSource, Principal, Role
 from interfaces.http.server import App, handler_for
 
 
@@ -109,3 +112,90 @@ def test_create_rejects_foreign_application_before_upload_or_github_call():
             404, {"error": "Not found"}
         )
         app.create_github_deployment.assert_not_called()
+
+
+def test_application_registration_is_durable_and_organization_scoped():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        app = App(root, monitor_interval=0, github_poll_interval=0)
+        admin = Principal("admin", "team_a", Role.ADMIN, LoginSource.EXTERNAL_IDP)
+        other = Principal("admin", "team_b", Role.ADMIN, LoginSource.EXTERNAL_IDP)
+        viewer = Principal("viewer", "team_a", Role.VIEWER, LoginSource.EXTERNAL_IDP)
+        body = json.dumps({"application_id": "new-app"}).encode()
+        assert _handler(app, viewer, "/api/applications", method="POST", body=body) == (
+            403, {"error": "Insufficient permission"}
+        )
+        assert _handler(app, admin, "/api/applications", method="POST", body=body) == (
+            201, {"application_id": "new-app"}
+        )
+        assert _handler(app, admin, "/api/applications", method="POST", body=body) == (
+            200, {"application_id": "new-app"}
+        )
+        assert _handler(app, other, "/api/applications", method="POST", body=body) == (
+            409, {"error": "Application ID is unavailable"}
+        )
+        assert _handler(app, other, "/api/applications") == (200, [])
+        assert _handler(app, admin, "/api/applications") == (
+            200, [{"id": "new-app", "organization_id": "team_a", "created_by": "admin"}]
+        )
+        deployment = json.dumps({"repository_url": "https://github.com/example/demo", "branch": "main",
+                                 "application_id": "new-app", "targets": ["local-docker"],
+                                 "public": False, "auto_deploy": False}).encode()
+        app.create_github_deployment = Mock(return_value={"status": "queued"})
+        assert _handler(app, admin, "/api/github/deployments", method="POST", body=deployment) == (
+            202, {"status": "queued"}
+        )
+        assert app.create_github_deployment.call_args.kwargs["owner"].organization_id == "team_a"
+        restored = App(root, monitor_interval=0, github_poll_interval=0)
+        assert restored.application_access(admin, "new-app", Action.DEPLOY) is AccessResult.GRANTED
+        assert restored.application_access(other, "new-app", Action.DEPLOY) is AccessResult.NOT_FOUND
+
+
+def test_application_registration_rejects_legacy_record_and_corrupt_registry():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        app = App(root, monitor_interval=0, github_poll_interval=0)
+        app.jobs[LEGACY] = _job(LEGACY)
+        admin = Principal("admin", "team_a", Role.ADMIN, LoginSource.EXTERNAL_IDP)
+        body = json.dumps({"application_id": "demo-app"}).encode()
+        assert _handler(app, admin, "/api/applications", method="POST", body=body) == (
+            409, {"error": "Application ID is unavailable"}
+        )
+        (root / "applications.json").write_text("not json")
+        with pytest.raises(RuntimeError, match="refusing to start"):
+            App(root, monitor_interval=0, github_poll_interval=0)
+
+
+def test_concurrent_claims_allow_only_one_organization():
+    with tempfile.TemporaryDirectory() as folder:
+        app = App(Path(folder), monitor_interval=0, github_poll_interval=0)
+        principals = [Principal("admin", team, Role.ADMIN, LoginSource.EXTERNAL_IDP)
+                      for team in ("team_a", "team_b")]
+
+        def claim(principal):
+            try:
+                return app.register_application("shared-app", principal)
+            except ValueError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(claim, principals))
+        assert outcomes.count(True) == 1
+        assert outcomes.count(None) == 1
+        registered = app.application_registry.records["shared-app"]
+        assert registered["organization_id"] in {"team_a", "team_b"}
+        assert json.loads((Path(folder) / "applications.json").read_text())["shared-app"] == registered
+
+
+def test_application_registration_will_not_claim_existing_database_or_network_state():
+    with tempfile.TemporaryDirectory() as folder:
+        app = App(Path(folder), monitor_interval=0, github_poll_interval=0)
+        admin = Principal("admin", "team_a", Role.ADMIN, LoginSource.EXTERNAL_IDP)
+        app.postgres_operations.operations["database-app"] = {"status": "needs_attention"}
+        app.network_operations.operations["network-app"] = {"status": "succeeded"}
+        for application_id in ("database-app", "network-app"):
+            body = json.dumps({"application_id": application_id}).encode()
+            assert _handler(app, admin, "/api/applications", method="POST", body=body) == (
+                409, {"error": "Application ID is unavailable"}
+            )
+        assert app.application_registry.records == {}

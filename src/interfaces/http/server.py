@@ -26,6 +26,7 @@ from engine.static_site import assess_static_site
 from engine.deployment_policy import deployment_policy, policy_from_record
 from application.analysis import AISettings, analyze_project, redact
 from application.agent import DeploymentAgent, DeploymentCancelled, DeploymentTools, NeedsEnvironment, OpenAIDeployAgent
+from application.application_registry import ApplicationRegistry
 from adapters.aws.ecs import AwsConfigurationError, AwsExpressAdapter, AwsSettings
 from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.aws.network import ServiceNetworkRequest, discover_default_network
@@ -105,6 +106,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
         self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
         self.recovery_warnings = []
+        self.application_registry = ApplicationRegistry(self.root)
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings,
             max_baseline_730h_usd=os.environ.get('SKY_MAX_RDS_730H_USD'))
         self.recovery_warnings.extend(self.postgres_operations.recovery_warnings)
@@ -139,6 +141,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             records = [job for job in self.jobs.values() if job.get('application_id') == application_id]
             records.extend(source for source in self.github_sources.values()
                            if source.get('application_id') == application_id)
+            registered = self.application_registry.records.get(application_id)
+        if registered is not None:
+            records.append(registered)
         if not records:
             if principal.login_source is LoginSource.LOCAL and principal.role is Role.ADMIN:
                 return AccessResult.GRANTED
@@ -147,6 +152,30 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         if AccessResult.NOT_FOUND in decisions:
             return AccessResult.NOT_FOUND
         return AccessResult.FORBIDDEN if AccessResult.FORBIDDEN in decisions else AccessResult.GRANTED
+
+    def register_application(self, application_id, principal):
+        with self.lock:
+            existing = [job for job in self.jobs.values() if job.get('application_id') == application_id]
+            existing.extend(source for source in self.github_sources.values()
+                            if source.get('application_id') == application_id)
+            if application_id not in self.application_registry.records and (
+                    application_id in self.postgres_operations.operations
+                    or application_id in self.postgres_operations.cleaned_records
+                    or application_id in self.postgres_operations.untrusted_applications
+                    or self.postgres_operations.untrusted_unknown
+                    or application_id in self.postgres_retirement_operations.operations
+                    or application_id in self.network_operations.operations
+                    or any(operation.get('application_id') == application_id
+                           for operation in self.snapshot_operations.operations.values())):
+                raise ValueError('Application ID is unavailable')
+            return self.application_registry.register(
+                application_id, ResourceOwner(principal.organization_id, principal.user_id), existing)
+
+    def application_summaries(self, principal):
+        with self.lock:
+            return [{'id': application_id, **record}
+                    for application_id, record in sorted(self.application_registry.records.items())
+                    if record_access(principal, Action.READ, record) is AccessResult.GRANTED]
 
     def releases(self, application_id):
         with self.lock:
@@ -1523,7 +1552,7 @@ def handler_for(app: App):
             if len(parts) < 3 or parts[1] != 'api':
                 return True
             if method == 'POST' and self.path in {
-                    '/api/analyze', '/api/deployments', '/api/static-deployments',
+                    '/api/analyze', '/api/applications', '/api/deployments', '/api/static-deployments',
                     '/api/deployment-groups', '/api/github/deployments'}:
                 if not permitted(self.principal, Action.DEPLOY, self.request_owner()):
                     return self.require_access(AccessResult.FORBIDDEN)
@@ -1614,6 +1643,9 @@ def handler_for(app: App):
                 return
             if self.path == "/api/jobs":
                 self.json_response(200, app.summaries(self.principal))
+                return
+            if self.path == "/api/applications":
+                self.json_response(200, app.application_summaries(self.principal))
                 return
             if self.path == "/api/github/sources":
                 self.json_response(200, app.github_source_summaries(self.principal))
@@ -1727,6 +1759,24 @@ def handler_for(app: App):
             if not self.authorize_resource('POST'):
                 return
             try:
+                if self.path == '/api/applications':
+                    size = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < size <= 256:
+                        raise ValueError('앱 등록 요청은 256바이트 이하여야 합니다.')
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict) or set(payload) != {'application_id'}:
+                        raise ValueError('앱 ID가 필요합니다.')
+                    application_id = payload['application_id']
+                    if not isinstance(application_id, str) or not re.fullmatch(
+                            r'[a-z][a-z0-9-]{2,30}', application_id):
+                        raise ValueError('앱 ID는 소문자로 시작하는 3~31자의 소문자·숫자·하이픈이어야 합니다.')
+                    try:
+                        created = app.register_application(application_id, self.principal)
+                    except ValueError as exc:
+                        self.json_response(409, {'error': str(exc)})
+                        return
+                    self.json_response(201 if created else 200, {'application_id': application_id})
+                    return
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
                         raise ValueError('WebSocket 검사 요청에는 본문을 넣을 수 없습니다.')
