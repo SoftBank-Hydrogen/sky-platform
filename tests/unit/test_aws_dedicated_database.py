@@ -172,3 +172,20 @@ def test_sdk_create_retry_is_disabled(prepared):
     AwsDedicatedDatabasePreparer(adapter.settings, session=session, connect=Mock())
     configured = [call.kwargs["config"] for call in session.client.call_args_list if "config" in call.kwargs]
     assert len(configured) == 1 and configured[0].retries == {"total_max_attempts": 1}
+
+
+def test_tls_engine_default_on_later_page_is_valid(prepared):
+    adapter, plan, operation, clients, _, _ = prepared
+    clients['rds'].describe_db_parameters.side_effect = [
+        {'Parameters': [], 'Marker': 'next'},
+        {'Parameters': [{'ParameterName': 'rds.force_ssl', 'ParameterValue': '1', 'Source': 'engine-default'}]}]
+    adapter.prepare(plan, operation_id=operation, guard=Mock())
+    assert 'Source' not in clients['rds'].describe_db_parameters.call_args.kwargs
+
+
+def test_repeated_parameter_page_cannot_prove_tls(prepared):
+    adapter, plan, operation, clients, _, _ = prepared
+    clients['rds'].describe_db_parameters.return_value = {'Parameters': [], 'Marker': 'same'}
+    with pytest.raises(ValueError, match='Ambiguous'):
+        adapter.prepare(plan, operation_id=operation, guard=Mock())
+    clients['rds'].create_db_instance.assert_not_called()

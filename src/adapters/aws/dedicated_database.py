@@ -9,7 +9,10 @@ import time
 from dataclasses import asdict, dataclass, replace
 from uuid import UUID
 
-from adapters.aws.shared_database import AwsSharedDatabaseAllocator, AwsSharedPoolSettings
+from adapters.aws.shared_database import (
+    AwsSharedDatabaseAllocator,
+    AwsSharedPoolSettings,
+)
 from domain.database import DatabaseBinding
 
 
@@ -94,9 +97,25 @@ class AwsDedicatedDatabasePreparer:
                 or len({s.get("SubnetAvailabilityZone", {}).get("Name") for s in group[0].get("Subnets", [])
                         if s.get("SubnetStatus") == "Active"}) < 2):
             raise ValueError("Dedicated subnet group differs from registered VPC")
-        parameters = self.rds.describe_db_parameters(DBParameterGroupName=self.settings.parameter_group, Source="user")
-        if parameters.get("Marker") or not any(p.get("ParameterName") == "rds.force_ssl"
-                and p.get("ParameterValue") == "1" for p in parameters.get("Parameters", [])):
+        # A forced value may equal the engine default and therefore be absent
+        # from Source=user. Inspect the effective group across bounded pages.
+        marker, seen, values = None, set(), []
+        for _ in range(20):
+            args = {"DBParameterGroupName": self.settings.parameter_group, "MaxRecords": 100}
+            if marker:
+                args["Marker"] = marker
+            parameters = self.rds.describe_db_parameters(**args)
+            values.extend(p.get("ParameterValue") for p in parameters.get("Parameters", [])
+                          if p.get("ParameterName") == "rds.force_ssl")
+            marker = parameters.get("Marker")
+            if not marker:
+                break
+            if not isinstance(marker, str) or marker in seen:
+                raise ValueError("Ambiguous dedicated parameter inventory")
+            seen.add(marker)
+        else:
+            raise ValueError("Dedicated parameter inventory exceeded bound")
+        if values != ["1"]:
             raise ValueError("Registered dedicated parameter group must force TLS")
         if source.database_name == pool.control_database or target.database_name == pool.control_database:
             raise ValueError("Workload pool control database cannot be promoted")
