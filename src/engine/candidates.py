@@ -15,10 +15,13 @@ def compare_targets(
     availability: dict[str, str | None],
     *,
     public_access: bool,
+    public_url_required: bool = False,
     local_sqlite: bool = False,
     include_compose: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Evaluate target variants; Compose is explicit-only until auto selection is verified."""
+    if type(public_url_required) is not bool or (public_url_required and not public_access):
+        raise ValueError("공개 URL을 요구하려면 인터넷 공개를 허용해야 합니다.")
     reports = []
     targets = (
         (*SUPPORTED_TARGETS, "onprem-compose", "onprem-vm")
@@ -32,6 +35,21 @@ def compare_targets(
             public_access=public_access,
             local_sqlite=local_sqlite and target in {"local-docker", "onprem-compose"},
         )
+        if public_url_required and report["access_mode"] != "public":
+            report["constraint_results"].append(
+                {
+                    "rule_id": "ACCESS-PUBLIC-REQUIRED",
+                    "status": "violated",
+                    "requirement": "public-url",
+                    "evidence_files": [],
+                    "evidence_ids": [],
+                    "reason": "사용자가 공개 URL을 요구하지만 이 대상은 공개 URL로 배포되지 않습니다.",
+                }
+            )
+            report["compatible"] = False
+            report["problems"].append(
+                "사용자가 공개 URL을 요구하지만 이 대상은 공개 URL로 배포되지 않습니다."
+            )
         reason = availability[target]
         reports.append(
             {

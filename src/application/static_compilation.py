@@ -16,7 +16,8 @@ from engine.evidence_record import source_evidence
 from engine.static_site import assess_static_site
 
 
-def static_compilation(project: Path, source_revision: str, *, requested_target: str = "aws-s3-cloudfront") -> dict:
+def static_compilation(project: Path, source_revision: str, *, requested_target: str = "aws-s3-cloudfront",
+                       public_url_required: bool = False) -> dict:
     """Recompute the source-bound choice without calling AWS or changing files."""
     if requested_target not in {"auto", "aws-s3-cloudfront"}:
         raise ValueError("Unsupported static selection request")
@@ -36,7 +37,7 @@ def static_compilation(project: Path, source_revision: str, *, requested_target:
         topology_status="resolved_static",
         unknowns=("browser_behavior",),
     ).as_dict()
-    policy = deployment_policy(requested_target, True)
+    policy = deployment_policy(requested_target, True, public_url_required=public_url_required)
     candidate = static_hosting_candidate(assessment, configured=True, public_access=True)
     candidate["selected"] = True
     plan = {
@@ -83,7 +84,8 @@ def verify_static_compilation(job: dict, project: Path, source_revision: str) ->
     if len(present) != len(new_record_fields) or "infrastructure_plan" not in job:
         raise ValueError("Incomplete static architecture record")
     expected = static_compilation(
-        project, source_revision, requested_target=job.get("requested_target", "aws-s3-cloudfront")
+        project, source_revision, requested_target=job.get("requested_target", "aws-s3-cloudfront"),
+        public_url_required=job.get("public_url_required", False),
     )
     if any(json.dumps(job[field], sort_keys=True) != json.dumps(expected[field], sort_keys=True)
            for field in fields):

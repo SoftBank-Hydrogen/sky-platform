@@ -699,6 +699,28 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(candidates['local-docker']['status'], 'eligible')
             self.assertTrue(candidates['local-docker']['selected'])
 
+    def test_required_public_url_never_falls_back_to_local_docker(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('Dockerfile', 'FROM node:22\n')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = '/api/deployments'
+            handler.headers = {'X-Sky-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue())),
+                               'X-Deploy-Target': 'auto', 'X-Public-Access': 'true',
+                               'X-Public-URL-Required': 'true'}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value='AWS unavailable'), \
+                    patch('interfaces.http.server.CloudRunSettings.unavailable_reason', return_value='GCP unavailable'):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 400)
+            self.assertIn('자동 배포 대상이 없습니다', handler.json_response.call_args.args[1]['error'])
+            self.assertFalse(app.jobs)
+
 
 if __name__ == '__main__':
     unittest.main()
