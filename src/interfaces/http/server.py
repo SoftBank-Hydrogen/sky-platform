@@ -67,6 +67,7 @@ from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
 from domain.access import AccessResult, Action, LoginSource, ResourceOwner, Role, permitted, record_access
+from interfaces.http.alb_identity import AlbRequestAuthenticator
 from interfaces.http.auth import LocalTokenAuthenticator, RequestAuthenticator
 
 
@@ -2712,6 +2713,9 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
                         help="HTTP bind address; use 0.0.0.0 behind the service load balancer")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--state-dir", type=Path, default=Path(default_state_dir))
+    parser.add_argument("--auth-mode", choices=("local", "alb"), default="local")
+    parser.add_argument("--alb-trusts-file", type=Path)
+    parser.add_argument("--memberships-file", type=Path)
     parser.add_argument("--monitor-interval", type=int, default=300,
                         help="Seconds between health checks (60–3600; 0 disables monitoring)")
     parser.add_argument("--github-poll-interval", type=int, default=60,
@@ -2721,9 +2725,19 @@ def serve(product_name: str = "Sky", default_state_dir: str = ".sky"):
         parser.error('--monitor-interval must be 0 or 60–3600 seconds')
     if args.github_poll_interval != 0 and not 60 <= args.github_poll_interval <= 3600:
         parser.error('--github-poll-interval must be 0 or 60–3600 seconds')
+    if args.auth_mode == 'local' and (args.alb_trusts_file or args.memberships_file):
+        parser.error('ALB trust and membership files require --auth-mode alb')
+    if args.auth_mode == 'alb' and (not args.alb_trusts_file or not args.memberships_file):
+        parser.error('--auth-mode alb requires both trust and membership files')
+    authenticator = None
+    if args.auth_mode == 'alb':
+        try:
+            authenticator = AlbRequestAuthenticator.from_files(args.alb_trusts_file, args.memberships_file)
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            parser.error(f'Invalid hosted identity configuration: {exc}')
     with StateDirectoryLock(args.state_dir) as state_dir:
         app = App(state_dir, monitor_interval=args.monitor_interval,
-                  github_poll_interval=args.github_poll_interval)
+                  github_poll_interval=args.github_poll_interval, authenticator=authenticator)
         server = ThreadingHTTPServer((args.host, args.port), handler_for(app))
         stop_monitor = threading.Event()
         if app.monitor_interval:
