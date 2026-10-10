@@ -32,7 +32,7 @@ def load_operating_policies(path, *, account_id, region):
     policies = {}
     for item in document["policies"]:
         if (not isinstance(item, dict)
-                or set(item) != {"job_id", "policy_id", "review_after", "target",
+                or set(item) - {"target_configuration_digest"} != {"job_id", "policy_id", "review_after", "target",
                                  "max_health_age_seconds", "websocket_sessions"}
                 or not isinstance(item["job_id"], str)
                 or not re.fullmatch(r"[a-f0-9]{16}", item["job_id"])
@@ -43,7 +43,7 @@ def load_operating_policies(path, *, account_id, region):
             raise ValueError("Operating target differs from registered account/region")
         policies[item["job_id"]] = ScheduledPromotionPolicy(
             item["policy_id"], item["review_after"], target,
-            item["max_health_age_seconds"], item["websocket_sessions"])
+            item["max_health_age_seconds"], item["websocket_sessions"], item.get("target_configuration_digest"))
     return policies
 
 

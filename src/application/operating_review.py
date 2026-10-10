@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -47,6 +48,7 @@ class ScheduledPromotionPolicy:
     target: DatabaseBinding
     max_health_age_seconds: int = 300
     websocket_sessions: bool = False
+    target_configuration_digest: str | None = None
 
     def __post_init__(self):
         _time(self.review_after)
@@ -58,6 +60,11 @@ class ScheduledPromotionPolicy:
             raise ValueError("Invalid health freshness bound")
         if type(self.websocket_sessions) is not bool:
             raise TypeError("WebSocket requirement must be explicit")
+        if self.target_configuration_digest is not None and (
+            not isinstance(self.target_configuration_digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", self.target_configuration_digest)
+        ):
+            raise ValueError("Invalid dedicated target configuration digest")
 
 
 def _binding(job):
@@ -109,6 +116,8 @@ class OperatingReview:
         plan = plan_database_promotion(source, policy.target, trigger,
                                        source_revision=job.get("source_digest"),
                                        websocket_sessions=policy.websocket_sessions)
+        if policy.target_configuration_digest is not None:
+            plan["target_configuration_digest"] = policy.target_configuration_digest
         binding = {"job_id": job_id, "application_id": job["application_id"],
                    "organization_id": job["organization_id"], "source_revision": job["source_digest"],
                    "runtime_digest": _digest(job["result"]), "policy_digest": _digest(asdict(policy)),

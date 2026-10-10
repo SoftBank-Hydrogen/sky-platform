@@ -181,3 +181,13 @@ def test_next_review_keeps_previous_consent_in_history(setup):
     assert next_proposal["status"] == "pending_approval"
     assert next_proposal["proposal_id"] != approved["proposal_id"]
     assert records.job["operating_proposal_history"] == [approved]
+
+
+def test_capacity_configuration_digest_is_approved_and_change_invalidates_consent(setup):
+    _, policy, service = setup
+    policy = replace(policy, target_configuration_digest="a" * 64)
+    proposal = service.review(principal(), ID, policy, now=NOW)
+    assert proposal["plan"]["target_configuration_digest"] == "a" * 64
+    changed = replace(policy, target_configuration_digest="b" * 64)
+    with pytest.raises(ValueError):
+        service.approve(principal(), ID, proposal["proposal_id"], changed, now=NOW)
