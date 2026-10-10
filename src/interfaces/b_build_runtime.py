@@ -1,4 +1,4 @@
-"""Opt-in build consumer; task protection required; no Docker or runtime migrations."""
+"""Opt-in build/deployment consumer; task protection required; no Docker or runtime migrations."""
 
 import os
 import signal
@@ -12,11 +12,18 @@ def run_build_consumer(args):
     from adapters.aws.job_queue import SqsOperationQueue
     from adapters.aws.source_artifacts import S3ArtifactSettings
     from adapters.aws.task_protection import EcsTaskProtection
-    from adapters.github.remote_build import GitHubApi, GitHubRemoteBuild, InstallationToken
+    from adapters.github.remote_build import (
+        GitHubApi,
+        GitHubRemoteBuild,
+        InstallationToken,
+    )
     from adapters.state.build_execution import PostgresBuildExecutionStore
     from adapters.state.deployment_admission import PostgresDeploymentAdmission
     from adapters.state.deployment_approvals import PostgresDeploymentApprovals
-    from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+    from adapters.state.postgres import (
+        PostgresStateSettings,
+        RotatingDatabaseConnection,
+    )
     from application.build_consumer import BuildConsumer
     from ports.remote_builds import BuildSettings
 
@@ -42,6 +49,8 @@ def run_build_consumer(args):
         PostgresDeploymentAdmission(store, account_id=settings.account_id, region=settings.region)
     ).check_ready()
     artifacts = S3ArtifactSettings(settings.bucket, settings.region, settings.account_id)
+    from adapters.aws.built_deployment import BuiltImageDeployment
+    deployer = BuiltImageDeployment(settings) if getattr(args, "deploy_built_image", False) else None
     consumer = BuildConsumer(
         store,
         SqsOperationQueue(queue_url, region=settings.region, account_id=settings.account_id),
@@ -51,6 +60,7 @@ def run_build_consumer(args):
         settings,
         protection,
         "build-" + uuid4().hex,
+        deployer=deployer,
     )
     stop = threading.Event()
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
