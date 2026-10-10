@@ -1,3 +1,5 @@
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,6 +93,56 @@ class CertificateTests(unittest.TestCase):
         self.assertIsNone(certificate['destination']['url'])
         self.assertIn('deployment_http', certificate['unverified'])
         self.assertEqual(job['status'], 'failed')
+
+    def test_snapshot_integrity_requires_source_bundle_and_owned_execution_links(self):
+        job_id, account, region = 'a' * 16, '123456789012', 'ap-northeast-2'
+        attempt = job_id + '-a1'
+        counts = {'posts': 2}
+        schema = {'posts': [{'name': 'title', 'type': 'TEXT'}]}
+        sql_hash = 'c' * 64
+        bundle = hashlib.sha256(b'0000_sky_sqlite_import.sql\0' + bytes.fromhex(sql_hash)).hexdigest()
+        evidence = {'protocol': 'sqlite-snapshot-multiset-v1', 'source_revision': 'a' * 64,
+                    'prepared_revision': 'b' * 64, 'snapshot_sha256': 'd' * 64,
+                    'sql_sha256': sql_hash, 'bundle_digest': bundle, 'row_counts': counts,
+                    'schema_sha256': hashlib.sha256(json.dumps(
+                        schema, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+        migration = {
+            'task_arn': f'arn:aws:ecs:{region}:{account}:task/default/' + 'e' * 32,
+            'task_definition_arn': f'arn:aws:ecs:{region}:{account}:task-definition/sky-migrate-{attempt}:1',
+            'image': f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed:{attempt}-db',
+            'image_digest': 'sha256:' + 'f' * 64, 'bundle_digest': bundle,
+        }
+        check = {'id': 'CV-04', 'status': 'pass', 'source': 'reviewed_sqlite_migration',
+                 'integrity': evidence}
+        job = {'id': job_id, 'status': 'succeeded', 'target': 'aws-ecs-express', 'attempts': 1,
+               'source_digest': 'a' * 64, 'plan': {'source_digest': 'b' * 64},
+               'sqlite_conversion': {'source_sha256': 'd' * 64, 'schema': schema, 'row_counts': counts},
+               'consistency_checks': [check], 'postgres': {'application_id': 'sample-app'},
+               'aws': {'region': region, 'expected_account': account},
+               'aws_migration_status': 'succeeded', 'aws_migration_bundle_digest': bundle,
+               'aws_migration_result': dict(migration),
+               'result': {'url': 'https://example.com', 'region': region, 'account': account,
+                          'migration': dict(migration)}}
+
+        def observed():
+            return next(item for item in deployment_certificate(job)['verification']
+                        if item['name'] == 'cross_environment_data_migration')
+
+        self.assertEqual(observed()['status'], 'passed')
+        self.assertEqual(observed()['evidence'], evidence)
+        for key, value in list(evidence.items()):
+            with self.subTest(key=key):
+                evidence[key] = None
+                self.assertEqual(observed()['status'], 'unverified')
+                evidence[key] = value
+        job['consistency_checks'].append(check)
+        self.assertEqual(observed()['status'], 'unverified')
+        job['consistency_checks'].pop()
+        job['aws_migration_status'] = 'running'
+        self.assertEqual(observed()['status'], 'unverified')
+        job['aws_migration_status'] = 'succeeded'
+        job['status'] = 'failed'
+        self.assertEqual(observed()['status'], 'unverified')
 
     def test_model_execution_requires_completed_job_and_valid_response_metadata(self):
         job = {'id': 'a' * 16, 'status': 'succeeded', 'target': 'local-docker',

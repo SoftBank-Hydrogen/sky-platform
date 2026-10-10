@@ -5,17 +5,18 @@ fresh probe of cloud resources. Missing evidence remains explicitly unknown.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 
+from application.consistency import health_result_matches_plan
 from application.deployment_core import DeploymentPlan
 from application.source_transform import executable_plan_digest, resolved_target_plan
+from application.verification_gates import static_consistency_gate, target_verification_obligations
 from engine.architecture_decision import verify_architecture_decision
 from engine.compilation import verify_compilation
 from engine.deployment_policy import policy_from_record
-from application.consistency import health_result_matches_plan
-from application.verification_gates import static_consistency_gate, target_verification_obligations
-
 
 _SHA256 = re.compile(r'[a-f0-9]{64}')
 
@@ -236,6 +237,59 @@ def _schema_migration_task_verified(job: dict, result: dict) -> bool:
     )
 
 
+def _sqlite_integrity_evidence(job: dict, result: dict) -> dict | None:
+    """Connect the bounded snapshot assertion to an owned successful SQL task.
+
+    This proves assertions at import time, not an independent current DB audit.
+    Legacy count-only bundles deliberately have no recognized protocol record.
+    """
+    if not _schema_migration_task_verified(job, result):
+        return None
+    conversion = job.get('sqlite_conversion')
+    plan = job.get('plan')
+    checks = [check for check in _items(job.get('consistency_checks'))
+              if isinstance(check, dict) and check.get('id') == 'CV-04'
+              and check.get('source') == 'reviewed_sqlite_migration']
+    if not isinstance(conversion, dict) or not isinstance(plan, dict) or len(checks) != 1:
+        return None
+    check = checks[0]
+    evidence = check.get('integrity')
+    if check.get('status') != 'pass' or not isinstance(evidence, dict):
+        return None
+    counts, schema = conversion.get('row_counts'), conversion.get('schema')
+    if (not isinstance(counts, dict) or not 1 <= len(counts) <= 8
+            or not isinstance(schema, dict) or set(schema) != set(counts)
+            or any(not isinstance(name, str) or type(count) is not int or count < 0
+                   for name, count in counts.items()) or sum(counts.values()) > 1000):
+        return None
+    try:
+        schema_digest = hashlib.sha256(json.dumps(
+            schema, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    except (ValueError, TypeError):
+        return None
+    sql_digest = _digest(evidence.get('sql_sha256'))
+    if sql_digest is None:
+        return None
+    bundle_digest = hashlib.sha256(
+        b'0000_sky_sqlite_import.sql\0' + bytes.fromhex(sql_digest)).hexdigest()
+    if (evidence.get('protocol') != 'sqlite-snapshot-multiset-v1'
+            or _digest(job.get('source_digest')) is None
+            or evidence.get('source_revision') != job['source_digest']
+            or _digest(plan.get('source_digest')) is None
+            or evidence.get('prepared_revision') != plan['source_digest']
+            or _digest(conversion.get('source_sha256')) is None
+            or evidence.get('snapshot_sha256') != conversion['source_sha256']
+            or evidence.get('schema_sha256') != schema_digest
+            or evidence.get('row_counts') != counts
+            or evidence.get('bundle_digest') != bundle_digest
+            or result['migration'].get('bundle_digest') != bundle_digest):
+        return None
+    # Allowlist metadata; never include source SQL or raw application values.
+    return {key: evidence[key] for key in (
+        'protocol', 'source_revision', 'prepared_revision', 'snapshot_sha256',
+        'sql_sha256', 'schema_sha256', 'bundle_digest', 'row_counts')}
+
+
 def _release_rollback_verified(job: dict, result: dict) -> bool:
     """Check the saved result of restoring a prior ECS release, not a rehearsal."""
     record = job.get('release_rollback_verification')
@@ -413,8 +467,13 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                        'status': 'passed' if migration_verified else 'unverified',
                        'detail': ('소유한 ECS 일회성 SQL 태스크의 성공 결과와 작업 기록이 일치합니다. DB 내용을 독립 조회한 증거는 아닙니다.'
                                   if migration_verified else '소유한 ECS SQL 태스크의 성공 기록을 확인할 수 없습니다.')})
-        checks.append({'name': 'cross_environment_data_migration', 'status': 'unverified',
-                       'detail': '환경 간 기존 데이터 이전은 SQL 스키마 마이그레이션과 별도로 검증해야 합니다.'})
+        integrity = _sqlite_integrity_evidence(job, result) if completed else None
+        checks.append({'name': 'cross_environment_data_migration',
+                       'status': 'passed' if integrity else 'unverified',
+                       'evidence': integrity,
+                       'detail': ('승인한 SQLite 스냅샷의 스키마·행 수·값·중복 검사가 SQL 이전 트랜잭션에서 통과했습니다. '
+                                  '현재 DB 재조회나 이후 앱 쓰기 결과의 검증은 아닙니다.' if integrity else
+                                  '승인한 스냅샷의 값 검증과 실제 SQL 태스크를 연결한 기록이 없습니다.')})
     local_sqlite = job.get('local_sqlite_binding')
     if isinstance(local_sqlite, dict):
         mounted = bool(completed and result.get('sqlite_volume') == local_sqlite.get('volume_name')

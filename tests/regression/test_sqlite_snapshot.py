@@ -159,8 +159,14 @@ class SqliteSnapshotTests(unittest.TestCase):
             bundle = collect_sql_migrations(tools.work)
             policy = deployment_policy('aws-ecs-express', True, allow_data_migration=True)
             final_profile = inspect_infrastructure(tools.work)
-            self.assertEqual(check_sqlite_migration_consistency(
-                infrastructure_plan, final_profile, source, conversion, bundle, request, policy)['status'], 'pass')
+            checked = check_sqlite_migration_consistency(
+                infrastructure_plan, final_profile, source, conversion, bundle, request, policy)
+            self.assertEqual(checked['status'], 'pass')
+            self.assertEqual(checked['integrity']['protocol'], 'sqlite-snapshot-multiset-v1')
+            self.assertEqual(checked['integrity']['bundle_digest'], bundle.digest)
+            self.assertEqual(checked['integrity']['source_revision'], source_digest(source))
+            self.assertEqual(checked['integrity']['prepared_revision'], source_digest(tools.work))
+            self.assertEqual(checked['integrity']['row_counts'], conversion['row_counts'])
             with self.assertRaisesRegex(ValueError, 'CV-04.*approved'):
                 check_sqlite_migration_consistency(
                     infrastructure_plan, final_profile, source, conversion, bundle, request,

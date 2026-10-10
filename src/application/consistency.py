@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import hashlib
 import json
 import posixpath
+import re
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from adapters.aws.postgres import PostgresRequest
 from adapters.database.migrations import MigrationBundle
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
-from application.deployment_core import DeploymentPlan, SOURCE_FILENAMES, SOURCE_SUFFIXES
+from application.deployment_core import SOURCE_FILENAMES, SOURCE_SUFFIXES, DeploymentPlan, source_digest
 from engine.capability_registry import RESOURCE_CAPABILITY_IDS, target_capability_model
 from engine.compatibility import DATABASE_ENGINE_SOURCE, SQLITE_SOURCE, InfrastructureProfile
 from engine.deployment_policy import DeploymentPolicy
@@ -394,7 +394,16 @@ def check_sqlite_migration_consistency(
             or migrations.migrations[0].name != "0000_sky_sqlite_import.sql"
             or migrations.migrations[0].sha256 != expected_sql_hash):
         raise ValueError("CV-04: Scheduled SQL does not match the reviewed SQLite snapshot")
-    return {"id": "CV-04", "status": "pass", "source": "reviewed_sqlite_migration"}
+    return {"id": "CV-04", "status": "pass", "source": "reviewed_sqlite_migration",
+            "integrity": {"protocol": "sqlite-snapshot-multiset-v1",
+                          "source_revision": source_digest(original),
+                          "prepared_revision": source_digest(migrations.directory.parent),
+                          "snapshot_sha256": snapshot.source_sha256,
+                          "sql_sha256": expected_sql_hash,
+                          "bundle_digest": migrations.digest,
+                          "schema_sha256": hashlib.sha256(json.dumps(
+                              snapshot.schema, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                          "row_counts": snapshot.row_counts}}
 
 
 def health_result_matches_plan(plan: dict, result: dict) -> bool:
