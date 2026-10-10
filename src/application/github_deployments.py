@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import shutil
 import tempfile
@@ -43,13 +41,10 @@ class GitHubDeploymentsMixin:
     def restore_github_sources(self):
         self.github_sources = {}
         self.github_polling = set()
-        path = self.root / "github-sources.json"
-        if not path.exists():
-            return
         try:
-            if path.is_symlink() or path.stat().st_size > 65536:
-                raise ValueError("unsafe source record")
-            records = json.loads(path.read_text())
+            records = self.record_store.load_github_sources()
+            if records is None:
+                return
             if not isinstance(records, list) or len(records) > 20:
                 raise ValueError("invalid source records")
             for item in records:
@@ -82,23 +77,12 @@ class GitHubDeploymentsMixin:
                 self.github_sources[item["id"]] = item
             if len(self.github_sources) != len(records):
                 raise ValueError("duplicate source records")
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, KeyError):
             self.github_sources = {}
             self.recovery_warnings.append("GitHub 자동 배포 설정을 읽지 못해 자동 확인을 중단했습니다.")
 
     def save_github_sources(self):
-        path = self.root / "github-sources.json"
-        temporary = None
-        try:
-            descriptor, temporary = tempfile.mkstemp(prefix=".github-sources-", suffix=".tmp", dir=self.root)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                json.dump(list(self.github_sources.values()), output, ensure_ascii=False, indent=2)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, path)
-        finally:
-            if temporary is not None:
-                Path(temporary).unlink(missing_ok=True)
+        self.record_store.save_github_sources(list(self.github_sources.values()))
 
     def github_source_summaries(self):
         with self.lock:

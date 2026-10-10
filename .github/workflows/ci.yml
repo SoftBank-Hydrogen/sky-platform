@@ -11,12 +11,26 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sky_test
+          POSTGRES_PASSWORD: disposable-test-password
+          POSTGRES_DB: sky_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sky_test -d sky_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      SKY_TEST_POSTGRES_DSN: "host=127.0.0.1 port=5432 dbname=sky_test user=sky_test password=disposable-test-password sslmode=disable"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e '.[dev]'
+      - run: pip install -e '.[dev,state-postgres]'
       - name: Check distribution contents
         run: |
           python -m pip wheel --no-deps --wheel-dir /tmp/sky-wheels .
@@ -36,6 +50,9 @@ jobs:
               'adapters/database/sqlite_snapshot.py',
               'assets/static/index.html', 'assets/infra/postgres-migrator.js',
               'interfaces/service.py', 'adapters/state/service_volume.py',
+              'ports/state.py', 'adapters/state/records.py', 'adapters/state/postgres.py',
+              'ports/operations.py', 'ports/queue.py', 'adapters/state/operations.py',
+              'adapters/aws/job_queue.py', 'application/outbox.py',
           }
           assert required <= files, sorted(required - files)
           PY

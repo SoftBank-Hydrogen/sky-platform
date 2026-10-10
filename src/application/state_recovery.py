@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import shutil
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +52,7 @@ def postgres_request_from_job(job: dict) -> PostgresRequest | CloudSqlRequest | 
 class StateRecoveryMixin:
     """Load and save jobs while preserving interrupted-deployment state."""
 
-    def clean_uncommitted_uploads(self):
+    def clean_uncommitted_uploads(self, committed_job_ids: tuple[str, ...]):
         for directory in sorted(self.root.iterdir()):
             if not re.fullmatch(r'[a-f0-9]{16}', directory.name):
                 continue
@@ -63,7 +60,7 @@ class StateRecoveryMixin:
             if not marker.exists() and not marker.is_symlink():
                 continue
             job_file = directory / 'job.json'
-            if job_file.exists() or job_file.is_symlink():
+            if directory.name in committed_job_ids or job_file.exists() or job_file.is_symlink():
                 continue
             try:
                 if (directory.is_symlink() or not directory.is_dir()
@@ -94,10 +91,12 @@ class StateRecoveryMixin:
                 '접수된 작업의 업로드 표시를 정리하지 못했습니다: ' + directory.name)
 
     def restore(self):
-        self.clean_uncommitted_uploads()
-        for path in sorted(self.root.glob("*/job.json")):
+        job_ids = self.record_store.list_job_ids()
+        self.clean_uncommitted_uploads(job_ids)
+        for job_id in job_ids:
             try:
-                job = json.loads(path.read_text())
+                stored = self.record_store.load_job(job_id)
+                job = stored.record
                 if not isinstance(job, dict):
                     raise ValueError("Invalid job record")
                 if 'deployment_policy' in job:
@@ -109,14 +108,13 @@ class StateRecoveryMixin:
                 version = job.get('job_record_version', 0)
                 if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
                     raise ValueError('Unsupported job record version')
-                job_id = path.parent.name
                 if not re.fullmatch(r"[a-f0-9]{16}", job_id) or job.get("id") != job_id:
                     raise ValueError("Invalid job identity")
                 if ("application_id" in job and not re.fullmatch(
                         r"[a-z][a-z0-9-]{2,30}", job["application_id"])):
                     raise ValueError("Invalid application identity")
                 project = Path(job["project"]).resolve()
-                if not project.is_relative_to((path.parent / "source").resolve()):
+                if not project.is_relative_to((self.root / job_id / "source").resolve()):
                     raise ValueError("Invalid project path")
                 if job.get("plan") is not None:
                     DeploymentPlan(**job["plan"])
@@ -142,14 +140,13 @@ class StateRecoveryMixin:
                         not isinstance(event, dict) or any(not isinstance(event.get(key), str)
                         for key in ("time", "stage", "message")) for event in job["events"])):
                     raise ValueError("Invalid events")
-                job.setdefault("created_at", datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat())
+                job.setdefault("created_at", stored.modified_at)
                 if not isinstance(job["created_at"], str):
                     raise ValueError("Invalid timestamp")
                 self.jobs[job_id] = job
-                health_file = path.parent / 'health.json'
-                if health_file.is_file():
-                    try:
-                        history = json.loads(health_file.read_text())
+                try:
+                    history = self.record_store.load_health(job_id)
+                    if history is not None:
                         if (not isinstance(history, list) or len(history) > 20
                                 or any(not isinstance(item, dict)
                                        or type(item.get('healthy')) is not bool
@@ -159,8 +156,8 @@ class StateRecoveryMixin:
                                        for item in history)):
                             raise ValueError('Invalid health history')
                         self.health_history[job_id] = history
-                    except (OSError, ValueError, TypeError):
-                        self.recovery_warnings.append(f"상태 확인 기록을 불러오지 못했습니다: {job_id}")
+                except (OSError, ValueError, TypeError):
+                    self.recovery_warnings.append(f"상태 확인 기록을 불러오지 못했습니다: {job_id}")
                 if job["status"] == "running":
                     job["status"] = "cancelled" if job.get('cancel_requested') and not job.get('attempts') else "interrupted"
                     if job.get('aws_update_submitted') and not job.get('aws_update_failed_at'):
@@ -197,7 +194,7 @@ class StateRecoveryMixin:
                         job.setdefault('release_rollback_failed_at', datetime.now(timezone.utc).isoformat())
                     self.save(job_id)
             except (OSError, ValueError, KeyError, TypeError):
-                self.recovery_warnings.append(f"작업 기록을 불러오지 못했습니다: {path.parent.name}")
+                self.recovery_warnings.append(f"작업 기록을 불러오지 못했습니다: {job_id}")
         for job in self.jobs.values():
             rollback_target = self.jobs.get(job.get('release_rollback_target_id') or job.get('replaces_job_id'))
             legacy_rollback = 'release_rollback_restore_pending' not in job
@@ -234,20 +231,13 @@ class StateRecoveryMixin:
                 self.save(previous['id'])
 
     def save(self, job_id):
-        path = self.root / job_id / "job.json"
-        temporary = None
         try:
             job = self.jobs[job_id]
             version = job.get('job_record_version', 0)
             if type(version) is not int or version not in {0, JOB_RECORD_VERSION}:
                 raise ValueError('Unsupported job record version')
             record = {**job, 'job_record_version': JOB_RECORD_VERSION}
-            descriptor, temporary = tempfile.mkstemp(prefix='.job-', suffix='.tmp', dir=path.parent)
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
-                json.dump(record, output, ensure_ascii=False, indent=2)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, path)
+            self.record_store.save_job(job_id, record)
             job['job_record_version'] = JOB_RECORD_VERSION
         except OSError as exc:
             job = self.jobs[job_id]
@@ -259,6 +249,3 @@ class StateRecoveryMixin:
                     'time': datetime.now(timezone.utc).isoformat(), 'stage': 'error',
                     'message': '작업 기록을 저장하지 못했습니다. 배포 리소스 상태를 직접 확인하세요.'})
             raise RuntimeError('배포 작업 기록 저장에 실패했습니다.') from exc
-        finally:
-            if temporary is not None:
-                Path(temporary).unlink(missing_ok=True)
