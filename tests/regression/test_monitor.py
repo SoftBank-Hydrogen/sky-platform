@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from interfaces.http.server import App
+from application.operating_review import deployment_observation_binding
 
 
 JOB_ID = 'f' * 16
@@ -34,6 +35,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.app.jobs[JOB_ID]['status'], 'succeeded')
         self.assertEqual(self.app.summaries()[0]['last_health']['healthy'], False)
         self.assertEqual(self.app.health_history[JOB_ID][0]['source'], 'automatic')
+        self.assertEqual(self.app.health_history[JOB_ID][0]['deployment_binding'],
+                         deployment_observation_binding(self.app.jobs[JOB_ID]))
         recovered = App(self.root)
         self.assertEqual(recovered.health_history[JOB_ID], self.app.health_history[JOB_ID])
         self.assertEqual(recovered.jobs[JOB_ID]['status'], 'succeeded')
@@ -83,6 +86,15 @@ class MonitorTests(unittest.TestCase):
             return finding
         with patch('application.monitoring.check_deployment', side_effect=check):
             self.assertEqual(self.app.check_and_record_health(JOB_ID, 'automatic'), finding)
+        self.assertNotIn(JOB_ID, self.app.health_history)
+
+    def test_probe_started_before_source_revision_change_is_not_current_evidence(self):
+        finding = {'healthy': True, 'checked_at': '2026-09-30T00:00:00+00:00', 'reason': 'HTTP 200'}
+        def check(_snapshot):
+            self.app.jobs[JOB_ID]['source_digest'] = 'a' * 64
+            return finding
+        with patch('application.monitoring.check_deployment', side_effect=check):
+            self.app.check_and_record_health(JOB_ID)
         self.assertNotIn(JOB_ID, self.app.health_history)
 
 

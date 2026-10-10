@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from application.analysis import redact
 from application.health import check_deployment
+from application.operating_review import deployment_observation_binding
 from application.session_evidence import bind_session_rehearsal
 from application.websocket_probe import WebSocketProbeError, probe_sky_game
 
@@ -44,6 +45,7 @@ class MonitoringMixin:
             "checked_at": result.get("checked_at") or datetime.now(timezone.utc).isoformat(),
             "reason": redact(str(result.get("reason") or ""))[:300],
             "source": source,
+            "deployment_binding": deployment_observation_binding(snapshot),
         }
         with self.lock:
             current = self.jobs.get(job_id)
@@ -52,6 +54,7 @@ class MonitoringMixin:
                 or current.get("status") != "succeeded"
                 or current.get("deployment_state", "active") != "active"
                 or current.get("result") != snapshot["result"]
+                or deployment_observation_binding(current) != entry["deployment_binding"]
                 or (
                     source == "automatic"
                     and any(
