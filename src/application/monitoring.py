@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 from application.analysis import redact
 from application.health import check_deployment
@@ -53,22 +50,12 @@ class MonitoringMixin:
             ):
                 return result
             history = (self.health_history.get(job_id, []) + [entry])[-20:]
-            path = self.root / job_id / "health.json"
-            temporary = None
             try:
-                descriptor, temporary = tempfile.mkstemp(prefix=".health-", suffix=".tmp", dir=path.parent)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                    json.dump(history, output, ensure_ascii=False)
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(temporary, path)
+                self.record_store.save_health(job_id, history)
                 self.health_history[job_id] = history
                 self.monitor_errors.pop(job_id, None)
             except OSError as exc:
                 self.monitor_errors[job_id] = "상태 확인 기록 저장 실패: " + str(exc)[:200]
-            finally:
-                if temporary is not None:
-                    Path(temporary).unlink(missing_ok=True)
         return result
 
     def check_and_record_websocket(self, job_id: str) -> dict:

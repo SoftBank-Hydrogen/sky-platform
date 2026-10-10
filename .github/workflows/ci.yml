@@ -36,6 +36,7 @@ jobs:
               'adapters/database/sqlite_snapshot.py',
               'assets/static/index.html', 'assets/infra/postgres-migrator.js',
               'interfaces/service.py', 'adapters/state/service_volume.py',
+              'ports/state.py', 'adapters/state/records.py',
           }
           assert required <= files, sorted(required - files)
           PY

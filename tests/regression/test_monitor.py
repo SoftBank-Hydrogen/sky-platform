@@ -57,7 +57,7 @@ class MonitorTests(unittest.TestCase):
         finding = {'healthy': True, 'checked_at': '2026-09-30T00:00:00+00:00',
                    'reason': 'HTTP 200 confirmed'}
         with patch('application.monitoring.check_deployment', return_value=finding), \
-                patch('application.monitoring.tempfile.mkstemp', side_effect=OSError('disk full')):
+                patch.object(self.app.record_store, 'save_health', side_effect=OSError('disk full')):
             self.assertEqual(self.app.check_and_record_health(JOB_ID), finding)
         self.assertEqual(self.app.jobs[JOB_ID]['status'], 'succeeded')
         self.assertNotIn(JOB_ID, self.app.health_history)
