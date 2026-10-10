@@ -106,10 +106,11 @@ approval. New approval/preview revision semantics remain future work.
 Explicit initialize adds deployment_previews and preview_schema_versions version 1
 under the shared advisory lock. Runtime never migrates. Foundation initializers have
 separate commits; the new preview DDL itself is transactional. Coordinate maintenance
-migrations/ownership import with teammates. PR #22's existing `migrate` command
-applies metadata and operation schemas only; it does not yet initialize admission,
-approval or preview schemas. These require an explicit coordinated maintenance step
-through the preview initializer before enabling preparation.
+migrations/ownership import with teammates. `sky-service migrate` applies the
+metadata, operation, admission, approval and preview schemas in that order, so run it
+once as a coordinated maintenance step before enabling preparation (see
+b-runtime-entrypoints.md). It creates an empty `application_owners` table and does not
+import ownership for existing apps.
 
 Contract tests use disposable loopback PostgreSQL plus an in-memory S3 double.
 CI uses a small SQLite fixture; the full Unity ZIP is not copied into this repository.

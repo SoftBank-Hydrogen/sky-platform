@@ -3,6 +3,7 @@
 import json
 import sys
 import threading
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -156,7 +157,9 @@ def test_migrate_routes_without_local_state(worker_environment):
         patch("interfaces.b_runtime.run_migrations") as run,
     ):
         service_main()
-    run.assert_called_once_with(connection.return_value, "test")
+    run.assert_called_once_with(
+        connection.return_value, "test", account_id="977889523182", region="ap-northeast-2"
+    )
 
 
 @pytest.mark.parametrize(
@@ -165,6 +168,8 @@ def test_migrate_routes_without_local_state(worker_environment):
         ("SKY_DATABASE_HOST", ""),
         ("SKY_DATABASE_SECRET_ARN", "not-an-arn"),
         ("SKY_STATE_WORKSPACE", "bad/space"),
+        ("SKY_AWS_ACCOUNT_ID", ""),
+        ("SKY_AWS_ACCOUNT_ID", "97788952318"),
     ],
 )
 def test_migrate_rejects_invalid_configuration_without_connecting(
@@ -177,6 +182,43 @@ def test_migrate_rejects_invalid_configuration_without_connecting(
     ):
         main(["migrate"])
     assert error.value.code == 2
+
+
+def test_migrate_requires_account_without_connecting(worker_environment, monkeypatch):
+    monkeypatch.delenv("SKY_AWS_ACCOUNT_ID")
+    with (
+        patch("adapters.state.postgres.RotatingDatabaseConnection", side_effect=AssertionError("DB call")),
+        pytest.raises(SystemExit) as error,
+    ):
+        main(["migrate"])
+    assert error.value.code == 2
+
+
+def test_run_migrations_initializes_ledgers_in_order():
+    from interfaces.b_runtime import run_migrations
+
+    calls = []
+    names = (
+        "adapters.state.postgres.PostgresDeploymentRecordStore",
+        "adapters.state.operations.PostgresOperationStore",
+        "adapters.state.deployment_admission.PostgresDeploymentAdmission",
+        "adapters.state.deployment_approvals.PostgresDeploymentApprovals",
+        "adapters.state.deployment_previews.PostgresDeploymentPreviews",
+    )
+    with ExitStack() as stack:
+        for name in names:
+            stack.enter_context(
+                patch(f"{name}.initialize", autospec=True, side_effect=lambda self, n=name: calls.append(n))
+            )
+        stack.enter_context(patch("interfaces.b_runtime.schema_versions", return_value=_no_versions()))
+        run_migrations(Mock(), "test", account_id="977889523182", region="ap-northeast-2")
+    assert calls == list(names)
+
+
+def _no_versions():
+    from interfaces.b_runtime import _LEDGERS
+
+    return {name: () for name, _ in _LEDGERS}
 
 
 def test_migrate_rejects_extra_arguments():
