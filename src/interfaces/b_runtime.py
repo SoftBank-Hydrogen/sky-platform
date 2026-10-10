@@ -110,9 +110,13 @@ def main(argv):
         "--mode",
         dest="worker_mode",
         choices=("outbox", "build", "shared-database", "shared-database-queue",
-                 "dedicated-database", "dedicated-database-queue"),
+                 "dedicated-database", "dedicated-database-queue", "operating-review"),
         required=True,
         help="Select outbox or shared DB allocation execution; no app deployment consumer",
+    )
+    worker.add_argument(
+        "--collect-capacity-metrics", action="store_true",
+        help="Read app-scoped workload DB capacity during an operating review",
     )
     worker.add_argument("--pool-config")
     worker.add_argument("--dedicated-config")
@@ -237,6 +241,13 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.worker_mode == "operating-review":
+        from interfaces.operating_review_worker import run_operating_review
+
+        run_operating_review(args, parser)
+        return
+    if args.collect_capacity_metrics:
+        parser.error("Capacity collection requires operating review mode")
     if args.worker_mode in {"dedicated-database", "dedicated-database-queue"}:
         from interfaces.dedicated_database_worker import run_dedicated_database
 
