@@ -21,8 +21,9 @@ from ports.shared_database import (
 
 
 class PostgresSharedPool:
-    def __init__(self, pool: SharedDatabasePool, connect_admin, connect_application):
+    def __init__(self, pool: SharedDatabasePool, connect_admin, connect_application, *, rds_managed=False):
         self.pool = pool
+        self.rds_managed = rds_managed
         self.connect_admin = connect_admin
         self.connect_application = connect_application
         identity = [pool.id, pool.account_id, pool.region, pool.instance_id, pool.control_database]
@@ -72,6 +73,12 @@ class PostgresSharedPool:
                     )
             self._inventory(connection)
 
+    def check_registration(self):
+        """Read-only preflight; never initialize or adopt an unregistered pool."""
+        with self._locked() as connection:
+            self._registration(connection)
+            self._inventory(connection)
+
     def _registration(self, connection):
         if connection.execute("SELECT to_regclass('sky_pool.identity')").fetchone()[0] is None:
             raise PoolAllocationError("Workload pool is not registered")
@@ -82,6 +89,12 @@ class PostgresSharedPool:
     def _inventory(self, connection, *, public_check=True):
         rows = connection.execute("SELECT request FROM sky_pool.allocations").fetchall()
         allowed = {"postgres", "template0", "template1", self.pool.control_database}
+        if self.rds_managed:
+            internal = connection.execute("""SELECT r.rolname, r.rolsuper FROM pg_database d
+                JOIN pg_roles r ON r.oid=d.datdba WHERE d.datname='rdsadmin'""").fetchone()
+            if internal != ("rdsadmin", True):
+                raise PoolAllocationError("RDS internal database ownership is not verified")
+            allowed.add("rdsadmin")
         allowed.update(row[0]["database_name"] for row in rows)
         databases = connection.execute("""SELECT datname, datallowconn, EXISTS (
             SELECT 1 FROM aclexplode(COALESCE(datacl, acldefault('d', datdba)))

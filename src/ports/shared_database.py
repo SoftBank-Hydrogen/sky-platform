@@ -32,3 +32,7 @@ class AllocationCredentials:
 
 class SharedDatabaseAllocator(Protocol):
     def allocate(self, request: PoolAllocationRequest, credentials: AllocationCredentials) -> dict: ...
+
+
+class ManagedSharedDatabaseAllocator(Protocol):
+    def allocate(self, request: PoolAllocationRequest) -> dict: ...

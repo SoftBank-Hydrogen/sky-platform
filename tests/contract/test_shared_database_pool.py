@@ -192,3 +192,30 @@ def test_named_cross_tenant_grant_blocks_further_allocations(database):
         )
     with pytest.raises(PoolAllocationError, match="another"):
         adapter.allocate(first, credentials(first))
+
+
+def test_provider_database_is_never_adopted_as_an_application_database(database):
+    adapter, admin, application = database
+    with admin(adapter.pool.control_database) as connection:
+        connection.autocommit = True
+        connection.execute("CREATE ROLE rdsadmin SUPERUSER NOLOGIN")
+        connection.execute("CREATE DATABASE rdsadmin OWNER rdsadmin TEMPLATE template0")
+        connection.execute("REVOKE CONNECT ON DATABASE rdsadmin FROM PUBLIC")
+    try:
+        with pytest.raises(PoolAllocationError, match="Unregistered database"):
+            adapter.check_registration()
+        managed = PostgresSharedPool(adapter.pool, admin, application, rds_managed=True)
+        managed.check_registration()
+        request = PoolAllocationRequest(adapter.pool, "team-a", "game")
+        managed.allocate(request, credentials(request))
+        with pytest.raises(psycopg.OperationalError):
+            application("rdsadmin", request.login_role, credentials(request).password)
+        with admin(adapter.pool.control_database) as connection:
+            connection.execute("GRANT CONNECT ON DATABASE rdsadmin TO PUBLIC")
+        with pytest.raises(PoolAllocationError, match="PUBLIC database"):
+            managed.check_registration()
+    finally:
+        with admin(adapter.pool.control_database) as connection:
+            connection.autocommit = True
+            connection.execute("DROP DATABASE rdsadmin WITH (FORCE)")
+            connection.execute("DROP ROLE rdsadmin")
