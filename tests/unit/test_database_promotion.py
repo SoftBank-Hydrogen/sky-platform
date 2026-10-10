@@ -1,5 +1,7 @@
 """Shared-to-dedicated plans must not claim a safe cutover before verification."""
 
+from dataclasses import replace
+
 import pytest
 
 from engine.database_promotion import DatabaseBinding, PromotionTrigger, plan_database_promotion
@@ -42,6 +44,8 @@ def test_plan_is_source_bound_and_every_data_and_traffic_gate_starts_unverified(
     assert plan["approval_required"] is True
     assert plan["cost_estimate"] is None
     assert plan["source_retirement_status"] == "blocked_until_rollback_window_closes"
+    assert plan["source_retirement_scope"] == "application_logical_database_only"
+    assert plan["shared_instance_policy"] == "retain"
     assert {gate["name"] for gate in plan["required_gates"]} >= {
         "initial_copy_integrity",
         "continuous_sync_caught_up",
@@ -92,3 +96,19 @@ def test_plan_rejects_cross_app_and_unrecorded_trigger():
         plan_database_promotion(source, target, _trigger(), source_revision="c" * 64)
     with pytest.raises(ValueError, match="timezone"):
         PromotionTrigger("scheduled_review", "policy-30-days", "observation-123", "2026-10-10T12:00:00")
+
+
+def test_plan_identity_cannot_be_reused_across_account_or_session_requirements():
+    source = _binding("shared_workload", "shared-pool-1")
+    target = _binding("dedicated_workload", "game-a-rds")
+    baseline = plan_database_promotion(source, target, _trigger(), source_revision="d" * 64)
+    another_account = plan_database_promotion(
+        replace(source, account_id="222222222222"),
+        replace(target, account_id="222222222222"),
+        _trigger(),
+        source_revision="d" * 64,
+    )
+    sessions = plan_database_promotion(
+        source, target, _trigger(), source_revision="d" * 64, websocket_sessions=True
+    )
+    assert len({baseline["plan_id"], another_account["plan_id"], sessions["plan_id"]}) == 3

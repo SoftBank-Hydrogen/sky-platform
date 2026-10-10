@@ -23,8 +23,20 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U sky_test -d sky_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
+      postgres-pool:
+        image: postgres:17
+        env:
+          POSTGRES_USER: pool_owner
+          POSTGRES_PASSWORD: disposable-pool-password
+          POSTGRES_DB: sky_pool_control
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U pool_owner -d sky_pool_control"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       SKY_TEST_POSTGRES_DSN: "host=127.0.0.1 port=5432 dbname=sky_test user=sky_test password=disposable-test-password sslmode=disable"
+      SKY_TEST_POOL_POSTGRES_DSN: "host=127.0.0.1 port=5433 dbname=sky_pool_control user=pool_owner password=disposable-pool-password sslmode=disable"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -56,6 +68,8 @@ jobs:
               'ports/deployment_reads.py', 'adapters/state/deployment_reads.py',
               'application/deployment_reads.py', 'interfaces/http/deployment_reads.py',
               'application/deployment_writes.py',
+              'engine/shared_database.py', 'ports/shared_database.py',
+              'application/shared_database.py', 'adapters/database/shared_pool.py',
           }
           assert required <= files, sorted(required - files)
           PY

@@ -112,18 +112,14 @@ def plan_database_promotion(
         raise TypeError("WebSocket session requirement must be explicit")
 
     identity = json.dumps(
-        [
-            source.organization_id,
-            source.application_id,
-            source.instance_id,
-            source.database_name,
-            target.instance_id,
-            target.database_name,
-            source_revision,
-            trigger.policy_id,
-            trigger.evidence_ref,
-            trigger.observed_at,
-        ],
+        {
+            "source": asdict(source),
+            "target": asdict(target),
+            "trigger": asdict(trigger),
+            "source_revision": source_revision,
+            "websocket_sessions": websocket_sessions,
+        },
+        sort_keys=True,
         separators=(",", ":"),
     )
     gates = (*_GATES, "websocket_session_drain" if websocket_sessions else "")
@@ -166,5 +162,7 @@ def plan_database_promotion(
         "approval_required": True,
         "cost_estimate": None,
         "source_retirement_status": "blocked_until_rollback_window_closes",
+        "source_retirement_scope": "application_logical_database_only",
+        "shared_instance_policy": "retain",
         "ready_to_cutover": False,
     }
