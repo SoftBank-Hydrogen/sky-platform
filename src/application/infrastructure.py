@@ -10,6 +10,7 @@ from pathlib import Path
 from application.analysis import AISettings, AnalysisError, parse_response, redact, source_context
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
+from engine.target_selection_context import automatic_target_context
 
 
 from engine.compatibility import (
@@ -42,7 +43,10 @@ The supported infrastructure profile is one stateless HTTP container, with no du
 background worker, custom network, or migration. If the app needs any such resource, set workload to
 requires-unsupported-resources and explain the specific requirement. Never claim those resources exist.
 The public_access flag means internet exposure is permitted, not required. AWS ECS Express is only
-available when that permission was explicitly granted. Prefer the least complex/costly suitable target.
+available when that permission was explicitly granted. Compare only the supplied candidates and
+their Sky deployment facts. These facts describe the current Sky adapter configuration, not every
+provider capability. Cost drivers are not price estimates: never claim one target is cheaper without
+measured usage and prices. Do not infer a need for a public URL from public_access alone.
 If retry_invalid_evidence is true, your previous citation did not appear verbatim in the supplied
 file. Recheck every cited file and copy a short exact substring; keep the target decision grounded
 in the same supplied files.
@@ -227,6 +231,7 @@ class OpenAIInfrastructurePlanner:
         request_body = {
             'model': self.settings.model, 'store': False, 'instructions': INFRA_INSTRUCTIONS,
             'input': json.dumps({'files': files, 'available_targets': available_targets,
+                                 'candidates': automatic_target_context(available_targets, public_access),
                                  'public_access': public_access,
                                  'retry_invalid_evidence': retry_invalid_evidence}, ensure_ascii=False),
             'max_output_tokens': 1600,

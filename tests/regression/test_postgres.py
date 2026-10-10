@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -45,6 +46,8 @@ class PostgresTests(unittest.TestCase):
                          ['SecurityGroupIngress'][0]['SourceSecurityGroupId'],
                          {'Ref': 'ServiceSecurityGroupId'})
         role = template['Resources']['DatabaseExecutionRole']['Properties']
+        self.assertEqual(role['PermissionsBoundary'], {'Fn::If': [
+            'HasRoleBoundary', {'Ref': 'RoleBoundaryArn'}, {'Ref': 'AWS::NoValue'}]})
         self.assertEqual(role['AssumeRolePolicyDocument']['Statement'][0]['Principal'],
                          {'Service': 'ecs-tasks.amazonaws.com'})
         self.assertEqual(role['Policies'][0]['PolicyDocument']['Statement'], [{
@@ -224,6 +227,7 @@ class PostgresTests(unittest.TestCase):
     def test_create_uses_create_only_and_checks_output_after_wait(self):
         calls = []
         events = []
+        boundary = f'arn:aws:iam::{ACCOUNT}:policy/sky-dev-deployed-app-boundary'
         def aws(args, **_kwargs):
             calls.append(args[:2])
             if args[:2] == ['cloudformation', 'create-stack']:
@@ -237,13 +241,16 @@ class PostgresTests(unittest.TestCase):
                               payload['Parameters'])
                 self.assertIn({'ParameterKey': 'AvailabilityZone', 'ParameterValue': 'a'},
                               payload['Parameters'])
+                self.assertIn({'ParameterKey': 'RoleBoundaryArn', 'ParameterValue': boundary},
+                              payload['Parameters'])
                 self.assertEqual(json.loads(payload['TemplateBody'])['Resources']['Database']
                                  ['Properties']['PubliclyAccessible'], False)
                 return json.dumps({'StackId': STACK})
             if args[:2] == ['cloudformation', 'wait']:
                 return ''
             raise AssertionError(args)
-        with patch.object(self.provisioner, 'preflight', return_value={
+        with patch.dict(os.environ, {'SKY_ENVIRONMENT': 'dev', 'SKY_AWS_ROLE_BOUNDARY_ARN': boundary}), \
+                patch.object(self.provisioner, 'preflight', return_value={
                 'engine_version': '17.5', 'database_availability_zone': 'a',
                 'pricing': {'baseline_730h_usd': '20.87'}}), \
                 patch.object(self.provisioner.adapter, 'event',
@@ -388,6 +395,12 @@ class PostgresTests(unittest.TestCase):
             raise AssertionError(args)
         with patch.object(self.provisioner.adapter, 'aws', side_effect=aws):
             self.provisioner.verify_execution_role(ROLE, SECRET)
+            boundary = f'arn:aws:iam::{ACCOUNT}:policy/sky-dev-deployed-app-boundary'
+            with patch.dict(os.environ, {'SKY_ENVIRONMENT': 'dev', 'SKY_AWS_ROLE_BOUNDARY_ARN': boundary}):
+                with self.assertRaisesRegex(AwsConfigurationError, '소유권'):
+                    self.provisioner.verify_execution_role(ROLE, SECRET)
+                role['PermissionsBoundary'] = {'PermissionsBoundaryArn': boundary}
+                self.provisioner.verify_execution_role(ROLE, SECRET)
             role['AssumeRolePolicyDocument']['Statement'][0]['Principal'] = {'AWS': '*'}
             with self.assertRaisesRegex(AwsConfigurationError, '신뢰 정책'):
                 self.provisioner.verify_execution_role(ROLE, SECRET)

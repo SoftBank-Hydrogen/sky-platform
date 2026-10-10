@@ -17,13 +17,14 @@ from application.static_compilation import static_compilation, verify_static_com
 class StaticDeploymentsMixin:
     def create_static_job(
         self, job_id: str, project: Path, application_id: str, *, requested_target: str,
-        source: dict | None = None,
+        source: dict | None = None, public_url_required: bool = False,
     ) -> None:
         """Persist one static release before starting its cloud worker."""
         attempt_id = job_id + "-a1"
         preflight = AwsStaticSiteAdapter(self.aws_settings).preflight(project, application_id, attempt_id)
         records = static_compilation(
-            project, preflight["source_digest"], requested_target=requested_target
+            project, preflight["source_digest"], requested_target=requested_target,
+            public_url_required=public_url_required,
         )
         with self.lock:
             self.ensure_application_available(application_id, "aws-s3-cloudfront")
@@ -46,6 +47,7 @@ class StaticDeploymentsMixin:
             self.jobs[job_id] = {
                 "id": job_id, "mode": "static_site", "target": "aws-s3-cloudfront",
                 "requested_target": requested_target,
+                **({"public_url_required": True} if public_url_required else {}),
                 "application_id": application_id, "attempt_id": attempt_id,
                 "status": "running", "deployment_state": "active", "public": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),

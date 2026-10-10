@@ -172,6 +172,21 @@ class InfrastructureTests(unittest.TestCase):
         self.assertFalse(payload['store'])
         self.assertTrue(payload['text']['format']['strict'])
         self.assertEqual(json.loads(payload['input'])['available_targets'], ['local-docker'])
+        self.assertEqual(json.loads(payload['input'])['candidates'][0]['target'], 'local-docker')
+        self.assertIsNone(json.loads(payload['input'])['candidates'][0]['monthly_cost_estimate_usd'])
+
+    def test_planner_receives_backend_specific_facts_without_invented_price(self):
+        from engine.target_selection_context import automatic_target_context
+
+        candidates = automatic_target_context(['cloud-run', 'aws-ecs-express'], True)
+        self.assertEqual([item['backend'] for item in candidates], ['cloud_run', 'ecs_express'])
+        self.assertEqual([item['sky_deployment']['minimum_instances'] for item in candidates], [0, 1])
+        self.assertEqual([item['sky_deployment']['maximum_instances'] for item in candidates], [1, 1])
+        self.assertEqual([item['access_mode'] for item in candidates], ['public', 'public'])
+        self.assertTrue(all(not item['automatic_path_supports_database'] for item in candidates))
+        self.assertEqual([item['explicit_postgresql_binding'] for item in candidates], [False, True])
+        self.assertTrue(all(item['monthly_cost_estimate_usd'] is None for item in candidates))
+        self.assertEqual(automatic_target_context(['cloud-run'], False)[0]['access_mode'], 'authenticated')
 
     def test_planner_keeps_response_size_limit_error(self):
         with patch('application.infrastructure.urllib.request.build_opener') as opener:
@@ -683,6 +698,28 @@ class InfrastructureTests(unittest.TestCase):
             self.assertEqual(candidates['cloud-run']['status'], 'rejected')
             self.assertEqual(candidates['local-docker']['status'], 'eligible')
             self.assertTrue(candidates['local-docker']['selected'])
+
+    def test_required_public_url_never_falls_back_to_local_docker(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            bundle.writestr('Dockerfile', 'FROM node:22\n')
+            bundle.writestr('server.js', 'console.log("ready")')
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), AISettings('fixture-key', 'fixture-model'), monitor_interval=0)
+            handler = handler_for(app).__new__(handler_for(app))
+            handler.path = '/api/deployments'
+            handler.headers = {'X-Sky-Token': app.token,
+                               'Content-Length': str(len(archive.getvalue())),
+                               'X-Deploy-Target': 'auto', 'X-Public-Access': 'true',
+                               'X-Public-URL-Required': 'true'}
+            handler.rfile = io.BytesIO(archive.getvalue())
+            handler.json_response = Mock()
+            with patch('interfaces.http.server.AwsSettings.unavailable_reason', return_value='AWS unavailable'), \
+                    patch('interfaces.http.server.CloudRunSettings.unavailable_reason', return_value='GCP unavailable'):
+                handler.do_POST()
+            self.assertEqual(handler.json_response.call_args.args[0], 400)
+            self.assertIn('자동 배포 대상이 없습니다', handler.json_response.call_args.args[1]['error'])
+            self.assertFalse(app.jobs)
 
 
 if __name__ == '__main__':

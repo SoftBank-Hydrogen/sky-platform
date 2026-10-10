@@ -8,7 +8,11 @@
     "AvailabilityZone": {"Type": "AWS::EC2::AvailabilityZone::Name"},
     "VpcId": {"Type": "AWS::EC2::VPC::Id"},
     "SubnetIds": {"Type": "List<AWS::EC2::Subnet::Id>"},
-    "ServiceSecurityGroupId": {"Type": "AWS::EC2::SecurityGroup::Id"}
+    "ServiceSecurityGroupId": {"Type": "AWS::EC2::SecurityGroup::Id"},
+    "RoleBoundaryArn": {"Type": "String", "Default": ""}
+  },
+  "Conditions": {
+    "HasRoleBoundary": {"Fn::Not": [{"Fn::Equals": [{"Ref": "RoleBoundaryArn"}, ""]}]}
   },
   "Resources": {
     "DatabaseSecurityGroup": {
@@ -70,6 +74,7 @@
     "DatabaseExecutionRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
+        "PermissionsBoundary": {"Fn::If": ["HasRoleBoundary", {"Ref": "RoleBoundaryArn"}, {"Ref": "AWS::NoValue"}]},
         "AssumeRolePolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [{

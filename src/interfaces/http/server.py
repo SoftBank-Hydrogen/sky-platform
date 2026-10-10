@@ -1922,6 +1922,11 @@ def handler_for(app: App):
                     public_flag = self.headers.get('X-Public-Access', 'false')
                     if public_flag not in {'true', 'false'}:
                         raise ValueError('공개 접근 선택 값이 올바르지 않습니다.')
+                    public_url_required = self.headers.get('X-Public-URL-Required', 'false')
+                    if public_url_required not in {'true', 'false'}:
+                        raise ValueError('공개 URL 필수 선택 값이 올바르지 않습니다.')
+                    policy = deployment_policy('auto', public_flag == 'true',
+                                               public_url_required=public_url_required == 'true')
                     size = int(self.headers.get('Content-Length', '0'))
                     content_type = self.headers.get('Content-Type', '')
                     folder_upload = content_type.lower().startswith('multipart/form-data;')
@@ -1951,13 +1956,13 @@ def handler_for(app: App):
                                         'cloud-run': app.cloud_settings.unavailable_reason()}
                         reports, candidates = compare_targets(
                             profile, availability, public_access=public_flag == 'true',
+                            public_url_required=public_url_required == 'true',
                             local_sqlite=local_sqlite_binding is not None, include_compose=True)
                         static_configuration_reason = AwsStaticSiteAdapter.unavailable_reason(app.aws_settings)
                         candidates.append(static_hosting_candidate(
                             static_site, configured=static_configuration_reason is None,
                             public_access=public_flag == 'true',
                             configuration_reason=static_configuration_reason))
-                        policy = deployment_policy('auto', public_flag == 'true')
                     self.json_response(200, {'source_digest': digest,
                                              'application_ir': application_ir(profile, digest).as_dict(),
                                              'deployment_policy': policy.as_dict(),
@@ -2087,6 +2092,9 @@ def handler_for(app: App):
                     public_flag = self.headers.get("X-Public-Access", "false")
                     if public_flag not in {"true", "false"}:
                         raise ValueError("Invalid public access selection")
+                    public_url_required = self.headers.get('X-Public-URL-Required', 'false')
+                    if public_url_required not in {'true', 'false'}:
+                        raise ValueError('공개 URL 필수 선택 값이 올바르지 않습니다.')
                     if target == "cloud-run" and app.cloud_settings.unavailable_reason():
                         raise ValueError(app.cloud_settings.unavailable_reason())
                     if target == 'onprem-compose' and LocalComposeAdapter.unavailable_reason():
@@ -2128,6 +2136,7 @@ def handler_for(app: App):
                         requested_target, public_flag == 'true',
                         new_managed_database_approved=create_plan_id is not None,
                         allow_data_migration=sqlite_flag == 'true',
+                        public_url_required=public_url_required == 'true',
                     )
                     postgres_headers = ('X-Postgres-Vpc-Id', 'X-Postgres-Subnet-Ids')
                     supplied_postgres_network = tuple(name in self.headers for name in postgres_headers)
@@ -2194,7 +2203,8 @@ def handler_for(app: App):
                                 and AwsStaticSiteAdapter.unavailable_reason(app.aws_settings) is None
                                 and assess_static_site(project, infrastructure_profile).status == 'eligible'):
                             app.create_static_job(
-                                job_id, project, application_id, requested_target='auto'
+                                job_id, project, application_id, requested_target='auto',
+                                public_url_required=public_url_required == 'true',
                             )
                             app.clear_upload_marker(directory)
                             started = app.start_job_worker(job_id, app.run_static_site)
@@ -2232,7 +2242,8 @@ def handler_for(app: App):
                                             'aws-ecs-express': app.aws_settings.unavailable_reason(),
                                             'cloud-run': app.cloud_settings.unavailable_reason()}
                             _, candidates = compare_targets(infrastructure_profile, availability,
-                                                            public_access=public_flag == 'true')
+                                                            public_access=public_flag == 'true',
+                                                            public_url_required=public_url_required == 'true')
                             available_targets = [item['id'] for item in candidates if item['status'] == 'eligible']
                             if not available_targets:
                                 raise ValueError('현재 설정에서 감지된 요구와 호환되는 자동 배포 대상이 없습니다.')

@@ -86,6 +86,7 @@ test('environment preview shows target differences before deployment', async () 
   assert.ok(start >= 0 && end > start);
   const file = {name: 'app.zip'};
   const elements = {file: {files: [file]}, folder: {files: []}, public: {checked: true},
+                    publicRequired: {checked: true},
                     localSqlite: {checked: false},
                     compatibilityPreview: {}, compatibilityMap: {hidden: true, textContent: ''}};
   const calls = [];
@@ -114,6 +115,7 @@ test('environment preview shows target differences before deployment', async () 
   await elements.compatibilityPreview.onclick();
   assert.equal(calls[0][0], '/api/compatibility');
   assert.equal(calls[0][1].body, file);
+  assert.equal(calls[0][1].headers['X-Public-URL-Required'], 'true');
   assert.match(elements.compatibilityMap.textContent, /Local Docker · 감지된 요구 기준 배포 시도 가능/);
   assert.match(elements.compatibilityMap.textContent, /탐지한 요구: sqlite · 근거 파일: server.js/);
   assert.match(elements.compatibilityMap.textContent, /AWS ECS Express · 제약 위반/);
@@ -521,6 +523,7 @@ test('deploy button includes existing RDS headers in the upload request', async 
   const upload = requests.find(request => request.path === '/api/deployments');
   assert.ok(upload, element('error').textContent);
   assert.equal(upload.options.headers['X-Postgres-Existing'], 'true');
+  assert.equal(upload.options.headers['X-Public-URL-Required'], 'false');
   assert.equal(upload.options.headers['X-Postgres-Vpc-Id'], undefined);
   assert.equal(upload.options.headers['X-Postgres-Subnet-Ids'], undefined);
 });

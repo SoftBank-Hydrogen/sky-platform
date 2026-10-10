@@ -42,6 +42,13 @@ def test_static_compiler_binds_source_policy_and_backend():
         auto_records = static_compilation(project, digest, requested_target="auto")
         assert auto_records["architecture_decision"]["selection_mode"] == "auto_target"
         assert auto_records["infrastructure_plan"]["planner"] == "static-source-rule"
+        public_records = static_compilation(
+            project, digest, requested_target="auto", public_url_required=True
+        )
+        assert public_records["deployment_policy"]["public_url_required"]
+        assert verify_static_compilation(
+            {**public_records, "requested_target": "auto", "public_url_required": True}, project, digest
+        )
         with pytest.raises(ValueError, match="접근 범위"):
             deployment_policy("aws-s3-cloudfront", False).require("aws-s3-cloudfront", "public")
 

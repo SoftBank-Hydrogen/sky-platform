@@ -2,7 +2,7 @@
 
 import pytest
 
-from engine.deployment_policy import deployment_policy
+from engine.deployment_policy import deployment_policy, policy_from_record
 
 
 def test_auto_target_respects_public_permission():
@@ -50,3 +50,28 @@ def test_unknown_or_duplicate_target_is_rejected():
         deployment_policy(("local-docker", "local-docker"), False)
     with pytest.raises(ValueError, match="target scope"):
         deployment_policy("imaginary-cloud", False)
+
+
+def test_public_url_requirement_restricts_auto_selection_and_explicit_targets():
+    policy = deployment_policy("auto", True, public_url_required=True)
+    assert policy.schema_version == 2
+    assert policy.public_url_required
+    assert "local-docker" not in policy.allowed_targets
+    assert {"cloud-run", "aws-ecs-express", "aws-s3-cloudfront"}.issubset(policy.allowed_targets)
+    policy.require("aws-ecs-express", "public")
+    with pytest.raises(ValueError, match="허용 범위"):
+        policy.require("local-docker", "loopback")
+    with pytest.raises(ValueError, match="공개 URL"):
+        deployment_policy("local-docker", True, public_url_required=True)
+    with pytest.raises(ValueError, match="인터넷 공개"):
+        deployment_policy("auto", False, public_url_required=True)
+
+
+def test_public_url_requirement_preserves_legacy_policy_records():
+    legacy = deployment_policy("auto", True).as_dict()
+    assert "public_url_required" not in legacy
+    assert not policy_from_record(legacy).public_url_required
+    required = deployment_policy("auto", True, public_url_required=True).as_dict()
+    assert policy_from_record(required).as_dict() == required
+    with pytest.raises(ValueError, match="Invalid stored"):
+        policy_from_record({**legacy, "public_url_required": True})

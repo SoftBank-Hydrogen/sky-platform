@@ -389,6 +389,40 @@ class AwsTests(unittest.TestCase):
         self.assertIn('--capabilities', deploy)
         self.assertIn('CAPABILITY_IAM', deploy)
         self.assertTrue(Path(deploy[deploy.index('--template-file') + 1]).is_file())
+        self.assertNotIn('--parameter-overrides', deploy)
+
+    def test_shared_service_sends_boundary_to_cloudformation(self):
+        boundary = f'arn:aws:iam::{ACCOUNT}:policy/sky-dev-deployed-app-boundary'
+        outputs = [{'OutputKey': key, 'OutputValue': value} for key, value in {
+            'RepositoryUri': REPOSITORY,
+            'ExecutionRoleArn': f'arn:aws:iam::{ACCOUNT}:role/execution',
+            'InfrastructureRoleArn': f'arn:aws:iam::{ACCOUNT}:role/infrastructure'}.items()]
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            if args[:2] == ['sts', 'get-caller-identity']:
+                return json.dumps({'Account': ACCOUNT})
+            if args[:2] == ['cloudformation', 'describe-stacks']:
+                return json.dumps({'Stacks': [{'StackStatus': 'CREATE_COMPLETE', 'Outputs': outputs}]})
+            return ''
+        with patch.dict(os.environ, {'SKY_ENVIRONMENT': 'dev', 'SKY_AWS_ROLE_BOUNDARY_ARN': boundary}), \
+                patch('adapters.aws.ecs.shutil.which', return_value='/usr/bin/tool'), \
+                patch.object(self.adapter, 'aws', side_effect=aws):
+            self.adapter.prepare_infrastructure()
+        deploy = next(args for args in calls if args[:2] == ['cloudformation', 'deploy'])
+        self.assertEqual(deploy[deploy.index('--parameter-overrides') + 1], f'RoleBoundaryArn={boundary}')
+
+    def test_shared_service_rejects_missing_boundary_before_stack_mutation(self):
+        calls = []
+        def aws(args, **_kwargs):
+            calls.append(args)
+            return json.dumps({'Account': ACCOUNT})
+        with patch.dict(os.environ, {'SKY_ENVIRONMENT': 'dev', 'SKY_AWS_ROLE_BOUNDARY_ARN': ''}), \
+                patch('adapters.aws.ecs.shutil.which', return_value='/usr/bin/tool'), \
+                patch.object(self.adapter, 'aws', side_effect=aws):
+            with self.assertRaisesRegex(ValueError, 'SKY_AWS_ROLE_BOUNDARY_ARN'):
+                self.adapter.prepare_infrastructure()
+        self.assertEqual(calls, [['sts', 'get-caller-identity']])
 
     def test_deploy_creates_bounded_service_then_verifies_url(self):
         image = REPOSITORY + ':' + ATTEMPT
