@@ -96,14 +96,19 @@ def main(argv):
     )
     api.add_argument("--origin", help="Canonical HTTPS browser origin for preparation requests")
     worker = modes.add_parser(
-        "worker", help="Outbox publisher; NOT a deployment consumer", allow_abbrev=False
+        "worker", help="Outbox publisher or remote build/deployment worker", allow_abbrev=False
     )
     worker.add_argument(
         "--mode",
         dest="worker_mode",
         choices=("outbox", "build"),
         required=True,
-        help="Select outbox publisher or remote build consumer; neither executes ECS deployment",
+        help="Select outbox publisher or build consumer; ECS deployment requires --deploy-built-image",
+    )
+    worker.add_argument(
+        "--deploy-built-image",
+        action="store_true",
+        help="Opt in to verified ECS deployment after remote build",
     )
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
     worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
@@ -192,6 +197,8 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.deploy_built_image and args.worker_mode != "build":
+        parser.error("--deploy-built-image requires --mode build")
     if args.worker_mode == "build":
         from botocore.exceptions import BotoCoreError, ClientError
 

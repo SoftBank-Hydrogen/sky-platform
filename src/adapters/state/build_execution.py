@@ -1,5 +1,6 @@
 """Lease-fenced build progress and job projection commit in one transaction."""
 import json
+
 from adapters.state.operations import PostgresOperationStore
 
 
@@ -26,8 +27,33 @@ class PostgresBuildExecutionStore(PostgresOperationStore):
             raise ValueError("Build projection identity changed")
         return job
 
+    def deployment_complete(self, lease, checkpoint, result):
+        checkpoint, result = self._document(checkpoint), self._document(result)
+        if checkpoint.get("stage") != "deployed" or checkpoint.get("deployment_result") != result:
+            raise ValueError("Verified deployment checkpoint required")
+        with self.records._connection() as connection:
+            if not self._owned(connection, lease):
+                return False
+            operation = self._select(connection, lease.operation_id)
+            if operation.external_pending or operation.external_receipt != result:
+                raise ValueError("Observe the AWS deployment before completing")
+            job = self._job(connection, operation)
+            job.update(status="succeeded", deployment_state="deployed", result=result,
+                       build_result=checkpoint["build_result"])
+            connection.execute("""UPDATE sky_state.metadata_records SET document=%s,
+                revision=revision+1,modified_at=clock_timestamp()
+                WHERE workspace=%s AND kind='job' AND record_id=%s""",
+                (self._json(self._document(job)), self.workspace, c_job_id(operation)))
+            connection.execute("""UPDATE sky_state.operations SET checkpoint=%s,status='succeeded',result=%s,
+                lease_owner=NULL,lease_until=NULL,row_version=row_version+1 WHERE workspace=%s AND id=%s""",
+                (self._json(checkpoint), self._json(result), self.workspace, operation.id))
+            connection.execute("DELETE FROM sky_state.mutation_scopes WHERE workspace=%s AND operation_id=%s",
+                (self.workspace, operation.id))
+            self._event(connection, operation.id, "succeeded")
+            return True
+
     def build_progress(self, lease, checkpoint, *, stage):
-        if stage not in {"building", "waiting_build", "build_ready", "needs_attention", "failed"}:
+        if stage not in {"building", "waiting_build", "build_ready", "deploying", "needs_attention", "failed"}:
             raise ValueError("Invalid build stage")
         checkpoint = self._document(checkpoint)
         with self.records._connection() as connection:
@@ -35,6 +61,16 @@ class PostgresBuildExecutionStore(PostgresOperationStore):
                 return False
             operation = self._select(connection, lease.operation_id)
             job = self._job(connection, operation)
+            if stage == "deploying":
+                existing = connection.execute("""SELECT EXISTS(SELECT 1 FROM sky_state.metadata_records
+                    WHERE workspace=%s AND kind='job' AND record_id<>%s
+                    AND document->>'application_id'=%s AND document->>'organization_id'=%s
+                    AND document->>'status'='succeeded' AND document->'result' IS NOT NULL
+                    AND document->'result'<>'null'::jsonb)""",
+                    (self.workspace, c_job_id(operation), operation.application_id,
+                     operation.command["organization_id"])).fetchone()[0]
+                if existing:
+                    raise ValueError("Existing application deployment requires an update executor")
             terminal = stage in {"build_ready", "needs_attention", "failed"}
             if stage in {"build_ready", "failed"} and operation.external_pending:
                 raise ValueError("Verify the external build before settling")

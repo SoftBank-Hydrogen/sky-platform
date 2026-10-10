@@ -2,6 +2,7 @@
 import threading
 import time
 from contextlib import contextmanager
+
 from ports.remote_builds import digest, request_for, validate_result
 
 
@@ -11,8 +12,9 @@ class OwnershipLost(OSError):
 
 class BuildConsumer:
     def __init__(self, store, queue, builder, objects, verifier, settings, protection, owner,
-                 *, poll_seconds=5, timeout_seconds=2700, heartbeat_seconds=30, clock=time.monotonic):
+                 *, poll_seconds=5, timeout_seconds=2700, heartbeat_seconds=30, clock=time.monotonic, deployer=None, deployment_timeout_seconds=1800):
         self.store, self.queue, self.builder, self.objects = store, queue, builder, objects
+        self.deployer, self.deployment_timeout_seconds = deployer, deployment_timeout_seconds
         self.verifier, self.settings, self.protection, self.owner = verifier, settings, protection, owner
         self.poll_seconds, self.timeout_seconds, self.heartbeat_seconds, self.clock = poll_seconds, timeout_seconds, heartbeat_seconds, clock
 
@@ -62,7 +64,7 @@ class BuildConsumer:
             self.queue.extend(delivery, seconds=30)
             return "busy"
         request = request_for(operation, self.store.workspace, self.settings)
-        checkpoint = operation.checkpoint if operation.checkpoint.get("stage") in {"build_ready", "build_failed"} else {
+        checkpoint = operation.checkpoint if operation.checkpoint.get("stage") in {"build_ready", "build_failed", "deployed"} else {
             "stage": "building", "request": request, "request_digest": digest(request)}
         self.protection.set(True)
         try:
@@ -76,15 +78,28 @@ class BuildConsumer:
                     if not self.store.build_progress(lease, checkpoint, stage="building"):
                         raise OwnershipLost()
                     saved = operation.checkpoint
-                    if saved.get("stage") in {"build_ready", "build_failed"}:
+                    if saved.get("stage") in {"build_ready", "build_failed", "deployed"}:
                         if saved.get("request_digest") != digest(request):
                             raise ValueError("Recovered build request changed")
                         run = self.builder.observe(request)
                         if run != saved.get("verified_run"):
                             raise ValueError("Recovered workflow evidence changed")
-                        if saved["stage"] == "build_ready":
+                        if saved["stage"] in {"build_ready", "deployed"}:
                             result = validate_result(saved["build_result"], request, run["run_id"])
                             self.verifier.verify(request, result)
+                            if self.deployer is not None:
+                                if saved["stage"] == "deployed":
+                                    current = self.deployer.observe(saved["deployment_intent"])
+                                    if current != saved["deployment_result"]:
+                                        raise ValueError("Recovered deployment observation changed")
+                                    if not self.store.deployment_complete(lease, saved, current):
+                                        raise OwnershipLost()
+                                    self.queue.delete(delivery)
+                                    return "succeeded"
+                                from application.built_deployment import (
+                                    deploy_built_image,
+                                )
+                                return deploy_built_image(self, lease, request, saved, guard, stop, delivery)
                         if not self.store.build_progress(lease, saved, stage=("build_ready" if saved["stage"] == "build_ready" else "failed")):
                             raise OwnershipLost()
                         self.queue.delete(delivery)
@@ -121,6 +136,11 @@ class BuildConsumer:
                                 checkpoint.update(stage="build_ready", build_result=result, verified_run=run, reason="deployment_executor_required")
                                 if not self.store.observe_external(lease, run, checkpoint):
                                     raise OwnershipLost()
+                                if self.deployer is not None:
+                                    from application.built_deployment import (
+                                        deploy_built_image,
+                                    )
+                                    return deploy_built_image(self, lease, request, checkpoint, guard, stop, delivery)
                                 if not self.store.build_progress(lease, checkpoint, stage="build_ready"):
                                     raise OwnershipLost()
                                 self.queue.delete(delivery)
@@ -128,8 +148,9 @@ class BuildConsumer:
                         except OwnershipLost:
                             raise
                         except OSError:
+                            if checkpoint.get("stage") in {"deploying", "deployed"}:
+                                raise
                             # Read failures after dispatch never trigger a second workflow.
-                            pass
                         stop.wait(self.poll_seconds)
                     guard()
                     if self.store.build_progress(lease, {**checkpoint, "reason": "build_observation_incomplete"}, stage="needs_attention"):
@@ -140,7 +161,8 @@ class BuildConsumer:
                 except (OSError, ValueError):
                     guard()
                     # Includes uncertain dispatch/commit. Preserve request intent and app lock.
-                    if self.store.build_progress(lease, {**checkpoint, "reason": "build_requires_reconciliation"}, stage="needs_attention"):
+                    reason = "deployment_requires_reconciliation" if checkpoint.get("stage") in {"deploying", "deployed"} else "build_requires_reconciliation"
+                    if self.store.build_progress(lease, {**checkpoint, "reason": reason}, stage="needs_attention"):
                         self.queue.delete(delivery)
                     return "needs_attention"
         finally:
