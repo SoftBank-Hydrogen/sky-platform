@@ -306,6 +306,8 @@ def ingress_result_matches_target(plan: dict, parsed) -> bool:
         return False
     if target in {"local-docker", "onprem-compose"}:
         return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"}
+    if target == "onprem-vm":
+        return parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
     if target in {"aws-ecs-express", "cloud-run"}:
         return parsed.scheme == "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
     return False

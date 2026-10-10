@@ -52,13 +52,38 @@ class LocalComposeAdapter(LocalDockerAdapter):
         self.compose_file = None
         self.compose_digest = None
 
+    def _docker_environment(self) -> dict[str, str]:
+        return {}
+
+    def _host_port(self) -> int | None:
+        return self.available_loopback_port()
+
+    def _published_url(self, attempt_id: str, container_port: int, host_port: int | None) -> str:
+        return f"http://127.0.0.1:{host_port}"
+
+    def _result_identity(self) -> dict:
+        return {}
+
+    def _verify_result_identity(self, result: dict) -> None:
+        return None
+
+    @staticmethod
+    def _compose_variable(name: str) -> str:
+        # User-provided app variable names must not become Docker CLI controls.
+        return "SKY_COMPOSE_ENV_" + hashlib.sha256(name.encode()).hexdigest().upper()
+
     def _compose(self, attempt_id: str, *args: str, environment: dict | None = None) -> str:
         if self.compose_file is None:
             raise ValueError("Compose 설정 파일이 없습니다.")
         command = ["docker", "compose", "-p", f"sky-{attempt_id}", "-f", str(self.compose_file), *args]
         self.event("command", "docker compose " + " ".join(args))
         process_env = os.environ.copy()
-        process_env.update(environment or {})
+        docker_environment = self._docker_environment()
+        process_env.update(docker_environment)
+        if "DOCKER_HOST" in docker_environment:
+            process_env.pop("DOCKER_CONTEXT", None)
+        process_env.update({self._compose_variable(name): value
+                            for name, value in (environment or {}).items()})
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=300, env=process_env, check=False
         )
@@ -71,7 +96,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
         return result.stdout.strip()
 
     def _write_compose(
-        self, attempt_id: str, image: str, plan: DeploymentPlan, host_port: int, environment: dict
+        self, attempt_id: str, image: str, plan: DeploymentPlan, host_port: int | None, environment: dict
     ) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path = self.state_dir / f"compose-{attempt_id}.json"
@@ -82,8 +107,9 @@ class LocalComposeAdapter(LocalDockerAdapter):
             "container_name": f"sky-{attempt_id}",
             "labels": {"app": "sky", "sky-attempt": attempt_id},
             "network_mode": "bridge",
-            "ports": [f"127.0.0.1:{host_port}:{plan.port}"],
-            "environment": {"PORT": str(plan.port), **{name: "${" + name + ":?}" for name in environment}},
+            "ports": [f"127.0.0.1:{host_port}:{plan.port}" if host_port else f"0.0.0.0::{plan.port}"],
+            "environment": {**{name: "${" + self._compose_variable(name) + ":?}"
+                               for name in environment}, "PORT": str(plan.port)},
             "restart": "unless-stopped",
             "mem_limit": "256m",
             "cpus": 1,
@@ -120,7 +146,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
             raise ValueError("같은 이름의 Docker 리소스가 이미 있습니다.")
         ImageBuilder(self.command, self.event).build(project, plan, image)
         self.prepare_sqlite_volume()
-        host_port = self.available_loopback_port()
+        host_port = self._host_port()
         self._write_compose(attempt_id, image, plan, host_port, environment)
         self._compose(attempt_id, "config", "-q", environment=environment)
         self._compose(attempt_id, "up", "-d", "--no-build", environment=environment)
@@ -143,7 +169,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
                 for item in mounts
             ):
                 raise RuntimeError("Compose SQLite 볼륨 연결을 확인하지 못했습니다.")
-        url = f"http://127.0.0.1:{host_port}"
+        url = self._published_url(attempt_id, plan.port, host_port)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         for _ in range(30):
             try:
@@ -156,6 +182,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
                             "image": image,
                             "compose_project": name,
                             "compose_sha256": self.compose_digest,
+                            **self._result_identity(),
                             **(
                                 {
                                     "sqlite_volume": self.sqlite_binding["volume_name"],
@@ -214,6 +241,7 @@ class LocalComposeAdapter(LocalDockerAdapter):
             self.command(["docker", "image", "rm", image], timeout=30)
 
     def retire(self, result: dict, job_id: str) -> None:
+        self._verify_result_identity(result)
         attempt_id = result.get("container", "").removeprefix("sky-")
         if (
             not re.fullmatch(re.escape(job_id) + r"-a[1-3]", attempt_id)

@@ -3,6 +3,7 @@
 _DRIVERS = {
     "local-docker": ("현재 PC의 CPU·메모리·전력·디스크",),
     "onprem-compose": ("같은 호스트의 CPU·메모리·전력·디스크",),
+    "onprem-vm": ("원격 VM의 CPU·메모리·전력·디스크", "VM 네트워크 전송량"),
     "aws-ecs-express": (
         "ECS Fargate 실행 시간과 요청 자원",
         "로드 밸런서 사용량",

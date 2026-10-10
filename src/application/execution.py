@@ -162,4 +162,21 @@ def execute(request: ExecutionRequest, state: ExecutionState) -> dict:
             or result.get("sqlite_mount") != request.sqlite_binding.get("mount_path")
         ):
             raise ValueError("로컬 배포 결과의 SQLite 볼륨이 요청과 다릅니다.")
+    if request.target == "onprem-vm":
+        expected = f"sky-{request.attempt_id}"
+        url = result.get("url") if isinstance(result, dict) else None
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            valid_url = (parsed and parsed.scheme == "http" and parsed.hostname
+                         and parsed.hostname == result.get("vm_public_host")
+                         and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                         and parsed.port is not None and not parsed.username and not parsed.password
+                         and not parsed.path and not parsed.query and not parsed.fragment)
+        except ValueError:
+            valid_url = False
+        if (not valid_url or result.get("container") != expected
+                or result.get("image") != f"sky/{request.attempt_id}:latest"
+                or result.get("compose_project") != expected
+                or not re.fullmatch(r"[a-f0-9]{64}", result.get("compose_sha256", ""))):
+            raise ValueError("원격 VM 배포 결과의 소유권 또는 주소가 올바르지 않습니다.")
     return result

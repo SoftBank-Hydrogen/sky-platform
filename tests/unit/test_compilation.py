@@ -63,6 +63,24 @@ def test_compilation_binds_both_outputs_to_one_decision():
         verify_compilation(record, decision, ir, policy, plan)
 
 
+def test_remote_vm_compiles_as_public_remote_compose_not_loopback():
+    profile = InfrastructureProfile("unconfirmed", (), 0)
+    ir = application_ir(profile, "d" * 64).as_dict()
+    policy = deployment_policy("onprem-vm", True)
+    plan = {
+        "target": "onprem-vm",
+        "planner": "user",
+        "resources": ["Docker image", "remote Linux VM Compose service"],
+        "compatibility": infrastructure_compatibility(profile, "onprem-vm", public_access=True),
+    }
+    decision = architecture_decision(ir, policy, plan).as_dict()
+    compiled = compile_decision(decision, ir, policy, plan)
+    assert compiled["target_plan"]["execution_configuration"]["access_mode"] == "public"
+    assert compiled["target_plan"]["execution_configuration"]["database_mode"] == "none"
+    assert lower_target_configuration(plan, compiled["deployment_ir"])["access_mode"] == "public"
+    verify_compilation(compiled, decision, ir, policy, plan)
+
+
 @pytest.mark.parametrize(
     "binding,resource,mode",
     [

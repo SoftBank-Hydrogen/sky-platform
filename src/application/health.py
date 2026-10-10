@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import urllib.error
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from adapters.aws.ecs import AwsExpressAdapter, AwsSettings
 from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
+from adapters.onprem.vm import VmSettings
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -41,12 +43,25 @@ def check_deployment(job: dict) -> dict:
     if job.get('deployment_state') == 'superseded':
         return {'healthy': False, 'checked_at': checked_at, 'reason': 'A newer release uses this service'}
     try:
-        if target in {'local-docker', 'onprem-compose'}:
+        if target in {'local-docker', 'onprem-compose', 'onprem-vm'}:
             name = result.get('container', '')
             # Legacy deployments use the job ID; agent deployments use a bounded attempt ID.
             if name not in {f'sky-{job_id}', *(f'sky-{job_id}-a{i}' for i in range(1, 4))}:
                 raise ValueError('Container identity is missing or unexpected')
-            inspect = subprocess.run(['docker', 'inspect', name], capture_output=True, text=True, timeout=10)
+            command_env = None
+            if target == 'onprem-vm':
+                settings = VmSettings(**job['vm'])
+                settings.validate()
+                if (result.get('vm_ssh_host') != settings.ssh_host
+                        or result.get('vm_ssh_user') != settings.ssh_user
+                        or result.get('vm_public_host') != settings.public_host):
+                    raise ValueError('저장된 배포의 VM과 현재 설정이 다릅니다.')
+                command_env = {**os.environ, 'DOCKER_HOST': settings.docker_host}
+                command_env.pop('DOCKER_CONTEXT', None)
+            inspect_args = {'capture_output': True, 'text': True, 'timeout': 10}
+            if command_env is not None:
+                inspect_args['env'] = command_env
+            inspect = subprocess.run(['docker', 'inspect', name], **inspect_args)
             if inspect.returncode:
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'Container is missing'}
             containers = json.loads(inspect.stdout)
@@ -54,7 +69,7 @@ def check_deployment(job: dict) -> dict:
                     or containers[0].get('Config', {}).get('Labels', {}).get('app') != 'sky'
                     or containers[0].get('Config', {}).get('Image') != result.get('image')):
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'Container identity or state changed'}
-            if target == 'onprem-compose' and (
+            if target in {'onprem-compose', 'onprem-vm'} and (
                     result.get('compose_project') != name
                     or containers[0].get('Config', {}).get('Labels', {}).get('com.docker.compose.project') != name):
                 return {'healthy': False, 'checked_at': checked_at, 'reason': 'Compose project identity changed'}
@@ -71,7 +86,8 @@ def check_deployment(job: dict) -> dict:
                             'reason': 'SQLite volume mount identity changed'}
             url = result.get('url', '')
             parsed = urllib.parse.urlsplit(url)
-            if (parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port
+            expected_host = settings.public_host if target == 'onprem-vm' else '127.0.0.1'
+            if (parsed.scheme != 'http' or parsed.hostname != expected_host or not parsed.port
                     or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password):
                 raise ValueError('Stored local URL is invalid')
             healthy = probe(url + health_path)

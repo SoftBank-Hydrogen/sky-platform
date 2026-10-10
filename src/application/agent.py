@@ -223,7 +223,7 @@ class DeploymentTools:
         self.emit, self.checkpoint = event, checkpoint
         self.cancel_check = cancel_check or (lambda: False)
         self.attempts, self.adapter_factory = attempts, adapter_factory
-        if target not in {"local-docker", "onprem-compose", "cloud-run", "aws-ecs-express"}:
+        if target not in {"local-docker", "onprem-compose", "onprem-vm", "cloud-run", "aws-ecs-express"}:
             raise ValueError("Unsupported deployment target")
         self.target = target
         if postgres_request is not None:
@@ -536,10 +536,12 @@ class DeploymentTools:
         )
         self.event("deploying", f"실제 배포 시도 {self.attempts}/3")
         try:
-            if self.target in {"local-docker", "onprem-compose"}:
+            if self.target in {"local-docker", "onprem-compose", "onprem-vm"}:
                 self.result = execute(ExecutionRequest(
                     target=self.target, project=context, plan=self.plan, attempt_id=attempt_id,
                     environment=self.environment, sqlite_binding=self.local_sqlite_binding,
+                    access_mode="public" if self.target == "onprem-vm" else "loopback",
+                    remote_host=self.target == "onprem-vm",
                     postgresql_binding=self.postgres_request is not None,
                     compiled_target=compiled_target,
                     source_transform=resolved_source_transform,

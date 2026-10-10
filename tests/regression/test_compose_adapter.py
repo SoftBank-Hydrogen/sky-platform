@@ -23,7 +23,8 @@ class ComposeAdapterTests(unittest.TestCase):
             )
             content = adapter.compose_file.read_text()
             service = json.loads(content)["services"]["app"]
-            self.assertEqual(service["environment"]["SESSION_SECRET"], "${SESSION_SECRET:?}")
+            self.assertEqual(service["environment"]["SESSION_SECRET"],
+                             "${" + adapter._compose_variable("SESSION_SECRET") + ":?}")
             self.assertEqual(service["ports"], ["127.0.0.1:12345:8080"])
             self.assertNotIn("synthetic-private-value", content)
             self.assertEqual(stat.S_IMODE(adapter.compose_file.stat().st_mode), 0o600)

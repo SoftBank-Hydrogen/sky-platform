@@ -116,6 +116,7 @@ PROCESS_LOCAL_MAP = re.compile(r"\b(?:const|let|var)\s+\w+\s*=\s*new\s+(?:Map|Se
 TARGET_RESOURCES = {
     "local-docker": ["Docker image", "local container"],
     "onprem-compose": ["Docker image", "same-host Compose service", "optional SQLite volume"],
+    "onprem-vm": ["Docker image", "remote Linux VM Compose service"],
     "cloud-run": ["Artifact Registry repository", "runtime service account", "Cloud Run service"],
     "aws-ecs-express": ["CloudFormation base stack", "ECR repository", "ECS Express service"],
 }
@@ -142,6 +143,17 @@ TARGET_CAPABILITIES = {
         "background_worker": False,
         "image_platform": None,
         "access_modes": ["loopback"],
+    },
+    "onprem-vm": {
+        "postgresql_binding": False,
+        "existing_rds_binding": False,
+        "new_rds_provisioning": False,
+        "sqlite_volume": False,
+        "remote_host": True,
+        "durable_files": False,
+        "background_worker": False,
+        "image_platform": None,
+        "access_modes": ["public"],
     },
     "cloud-run": {
         "postgresql_binding": False,

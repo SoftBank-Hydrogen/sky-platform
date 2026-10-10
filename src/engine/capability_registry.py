@@ -12,6 +12,7 @@ RESOURCE_CAPABILITY_IDS = {
     "Docker image": "docker_image",
     "local container": "local_container",
     "same-host Compose service": "compose_service",
+    "remote Linux VM Compose service": "compose_service",
     "optional SQLite volume": "sqlite_volume",
     "Artifact Registry repository": "artifact_registry_repository",
     "runtime service account": "runtime_service_account",
@@ -29,6 +30,7 @@ RESOURCE_CAPABILITY_IDS = {
 _IMPLEMENTED_RESOURCE_CAPABILITIES = {
     "local-docker": {"docker_image", "local_container"},
     "onprem-compose": {"docker_image", "compose_service", "sqlite_volume"},
+    "onprem-vm": {"docker_image", "compose_service"},
     "cloud-run": {"artifact_registry_repository", "runtime_service_account", "cloud_run_service"},
     "aws-ecs-express": {
         "cloudformation_base_stack",

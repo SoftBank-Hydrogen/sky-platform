@@ -1,0 +1,1 @@
+"""On-premises deployment adapters."""

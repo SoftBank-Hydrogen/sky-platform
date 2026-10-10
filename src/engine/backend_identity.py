@@ -24,6 +24,7 @@ BACKENDS = {
     for item in (
         BackendIdentity("local-docker", "local", "docker", "implemented", "automatic"),
         BackendIdentity("onprem-compose", "onprem", "compose_same_host", "implemented", "explicit_only"),
+        BackendIdentity("onprem-vm", "onprem", "compose_remote_vm", "implemented", "explicit_only"),
         BackendIdentity("cloud-run", "gcp", "cloud_run", "implemented", "automatic"),
         BackendIdentity("aws-ecs-express", "aws", "ecs_express", "implemented", "automatic"),
         BackendIdentity("aws-s3-cloudfront", "aws", "static_hosting", "implemented", "automatic"),

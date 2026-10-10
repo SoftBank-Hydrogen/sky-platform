@@ -20,7 +20,11 @@ def compare_targets(
 ) -> tuple[list[dict], list[dict]]:
     """Evaluate target variants; Compose is explicit-only until auto selection is verified."""
     reports = []
-    targets = (*SUPPORTED_TARGETS, "onprem-compose") if include_compose else SUPPORTED_TARGETS
+    targets = (
+        (*SUPPORTED_TARGETS, "onprem-compose", "onprem-vm")
+        if include_compose and "onprem-vm" in availability
+        else ((*SUPPORTED_TARGETS, "onprem-compose") if include_compose else SUPPORTED_TARGETS)
+    )
     for target in targets:
         report = infrastructure_compatibility(
             profile,

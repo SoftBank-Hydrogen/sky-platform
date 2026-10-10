@@ -44,6 +44,7 @@ from application.source_secrets import (reject_plaintext_cloud_secret_names,
 from application.verification_gates import static_consistency_gate
 from adapters.local.docker import LocalDockerAdapter
 from adapters.local.compose import LocalComposeAdapter
+from adapters.onprem.vm import RemoteVmComposeAdapter, VmSettings
 from application.health import check_deployment
 from application.monitoring import MonitoringMixin
 from application.static_deployments import StaticDeploymentsMixin
@@ -603,6 +604,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             if target == 'onprem-compose':
                 adapter_factory = lambda event: LocalComposeAdapter(
                     event, self.root / job_id, sqlite_binding=job.get('local_sqlite_binding'))
+            if target == 'onprem-vm':
+                adapter_factory = lambda event: RemoteVmComposeAdapter(
+                    event, self.root / job_id, VmSettings(**job['vm']))
             if target == "cloud-run":
                 settings = CloudRunSettings(**job["cloud"])
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
@@ -810,7 +814,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         """Explicitly restart a job that never reached an AI step or deployment attempt."""
         def eligible(job):
             return (job and job.get('mode') == 'agent' and job.get('status') == 'interrupted'
-                    and job.get('target') in {'local-docker', 'onprem-compose', 'cloud-run', 'aws-ecs-express'}
+                    and job.get('target') in {'local-docker', 'onprem-compose', 'onprem-vm', 'cloud-run', 'aws-ecs-express'}
                     and job.get('attempts') == 0 and job.get('steps') == 0
                     and job.get('changes') == [] and job.get('plan') is None
                     and job.get('result') is None and not job.get('cancel_requested')
@@ -955,6 +959,34 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                 self.jobs[job_id].pop('retire_error', None)
                 self.save(job_id)
             self.event(job_id, 'retired', 'Compose 서비스와 이미지 태그의 삭제를 확인했습니다.')
+
+    def retire_vm(self, job_id):
+        try:
+            with self.lock:
+                job = json.loads(json.dumps(self.jobs[job_id]))
+            adapter = RemoteVmComposeAdapter(
+                lambda stage, message: self.event(job_id, stage, message),
+                self.root / job_id, VmSettings(**job['vm']))
+            if job['status'] == 'succeeded' and job.get('result'):
+                adapter.retire(job['result'], job_id)
+            elif job.get('status') in {'failed', 'interrupted'} and not job.get('result'):
+                for number in range(1, job['attempts'] + 1):
+                    adapter.retire_orphan(f'{job_id}-a{number}')
+            else:
+                raise ValueError('정리할 VM 배포가 아닙니다.')
+        except Exception as exc:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'delete_failed'
+                self.jobs[job_id]['retire_error'] = str(exc)[:300]
+                self.save(job_id)
+            self.event(job_id, 'retire_failed', str(exc)[:300])
+        else:
+            with self.lock:
+                self.jobs[job_id]['deployment_state'] = 'deleted'
+                self.jobs[job_id]['retired_at'] = datetime.now(timezone.utc).isoformat()
+                self.jobs[job_id].pop('retire_error', None)
+                self.save(job_id)
+            self.event(job_id, 'retired', 'VM Compose 서비스와 이미지 태그의 삭제를 확인했습니다.')
 
     def retire_cloud(self, job_id):
         try:
@@ -1475,6 +1507,9 @@ def handler_for(app: App):
                                 {"id": "onprem-compose", "name": "On-prem Compose (same PC)",
                                  "available": LocalComposeAdapter.unavailable_reason() is None,
                                  "reason": LocalComposeAdapter.unavailable_reason()},
+                                {"id": "onprem-vm", "name": "On-prem Linux VM (SSH)",
+                                 "available": RemoteVmComposeAdapter.unavailable_reason() is None,
+                                 "reason": RemoteVmComposeAdapter.unavailable_reason()},
                                 {"id": "cloud-run", "name": "Google Cloud Run",
                                  "available": app.cloud_settings.unavailable_reason() is None,
                                  "reason": app.cloud_settings.unavailable_reason()},
@@ -1839,7 +1874,7 @@ def handler_for(app: App):
                     with app.lock:
                         job = app.jobs.get(job_id)
                         orphan_local = (job and job.get('mode') == 'agent'
-                                        and job.get('target') in {'local-docker', 'onprem-compose'}
+                                        and job.get('target') in {'local-docker', 'onprem-compose', 'onprem-vm'}
                                         and job.get('status') in {'failed', 'interrupted'}
                                         and not job.get('result')
                                         and type(job.get('attempts')) is int
@@ -1848,7 +1883,7 @@ def handler_for(app: App):
                                          and job.get('status') in {'failed', 'interrupted'}
                                          and job.get('static_stack_id'))
                         successful = (job and job.get('status') == 'succeeded'
-                                      and job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront', 'local-docker', 'onprem-compose', 'cloud-run'}
+                                      and job.get('target') in {'aws-ecs-express', 'aws-s3-cloudfront', 'local-docker', 'onprem-compose', 'onprem-vm', 'cloud-run'}
                                       and job.get('result'))
                         if (not (orphan_local or orphan_static or successful)
                                 or job.get('deployment_state', 'active') not in (
@@ -1875,7 +1910,8 @@ def handler_for(app: App):
                     threading.Thread(target=app.retire_static_site if target == 'aws-s3-cloudfront' else
                                      app.retire_aws if target == 'aws-ecs-express' else
                                      app.retire_cloud if target == 'cloud-run' else
-                                     app.retire_compose if target == 'onprem-compose' else app.retire_local,
+                                     app.retire_compose if target == 'onprem-compose' else
+                                     app.retire_vm if target == 'onprem-vm' else app.retire_local,
                                      args=(job_id,), daemon=True).start()
                     self.json_response(202, {'id': job_id, 'deployment_state': 'deleting'})
                     return
@@ -1907,6 +1943,7 @@ def handler_for(app: App):
                         digest = source_digest(project)
                         availability = {'local-docker': None,
                                         'onprem-compose': LocalComposeAdapter.unavailable_reason(),
+                                        'onprem-vm': RemoteVmComposeAdapter.unavailable_reason(),
                                         'aws-ecs-express': app.aws_settings.unavailable_reason(),
                                         'cloud-run': app.cloud_settings.unavailable_reason()}
                         reports, candidates = compare_targets(
@@ -2041,7 +2078,7 @@ def handler_for(app: App):
                         self.json_response(503, {"error": "AI 배포를 사용하려면 서버에 OPENAI_API_KEY를 설정하세요."})
                         return
                     requested_target = self.headers.get("X-Deploy-Target", "local-docker")
-                    if requested_target not in {"auto", "local-docker", "onprem-compose", "cloud-run", "aws-ecs-express"}:
+                    if requested_target not in {"auto", "local-docker", "onprem-compose", "onprem-vm", "cloud-run", "aws-ecs-express"}:
                         raise ValueError("Unsupported deployment target")
                     target = requested_target
                     public_flag = self.headers.get("X-Public-Access", "false")
@@ -2051,6 +2088,8 @@ def handler_for(app: App):
                         raise ValueError(app.cloud_settings.unavailable_reason())
                     if target == 'onprem-compose' and LocalComposeAdapter.unavailable_reason():
                         raise ValueError(LocalComposeAdapter.unavailable_reason())
+                    if target == 'onprem-vm' and RemoteVmComposeAdapter.unavailable_reason():
+                        raise ValueError(RemoteVmComposeAdapter.unavailable_reason())
                     if target == "aws-ecs-express":
                         if app.aws_settings.unavailable_reason():
                             raise ValueError(app.aws_settings.unavailable_reason())
@@ -2286,6 +2325,8 @@ def handler_for(app: App):
                             app.jobs[job_id]['source_digest'] = digest
                             if target == "cloud-run":
                                 app.jobs[job_id]["cloud"] = asdict(app.cloud_settings)
+                            elif target == "onprem-vm":
+                                app.jobs[job_id]["vm"] = asdict(VmSettings.from_environment())
                             elif target == "aws-ecs-express":
                                 app.jobs[job_id]["aws"] = asdict(aws_settings_for_job)
                                 if postgres_request is not None:
