@@ -65,7 +65,7 @@ from application.postgres_retirement_operations import PostgresRetirementOperati
 from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
-from domain.access import ResourceOwner
+from domain.access import AccessResult, Action, LoginSource, ResourceOwner, Role, permitted, record_access
 from interfaces.http.auth import LocalTokenAuthenticator
 
 
@@ -121,7 +121,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
 
 
 
-    def summaries(self):
+    def summaries(self, principal=None):
         with self.lock:
             return [{"id": job["id"], "status": job["status"], "created_at": job.get("created_at"),
                      "application_id": job.get("application_id", job["id"]),
@@ -131,7 +131,22 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                      "result": job.get("result"),
                      "last_health": (self.health_history.get(job['id']) or [None])[-1],
                      "monitor_error": self.monitor_errors.get(job['id'])}
-                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)]
+                    for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
+                    if principal is None or record_access(principal, Action.READ, job) is AccessResult.GRANTED]
+
+    def application_access(self, principal, application_id, action):
+        with self.lock:
+            records = [job for job in self.jobs.values() if job.get('application_id') == application_id]
+            records.extend(source for source in self.github_sources.values()
+                           if source.get('application_id') == application_id)
+        if not records:
+            if principal.login_source is LoginSource.LOCAL and principal.role is Role.ADMIN:
+                return AccessResult.GRANTED
+            return AccessResult.NOT_FOUND
+        decisions = [record_access(principal, action, record) for record in records]
+        if AccessResult.NOT_FOUND in decisions:
+            return AccessResult.NOT_FOUND
+        return AccessResult.FORBIDDEN if AccessResult.FORBIDDEN in decisions else AccessResult.GRANTED
 
     def releases(self, application_id):
         with self.lock:
@@ -1494,6 +1509,66 @@ def handler_for(app: App):
         def request_owner(self):
             return ResourceOwner(self.principal.organization_id, self.principal.user_id)
 
+        def require_access(self, decision):
+            if decision is AccessResult.GRANTED:
+                return True
+            if decision is AccessResult.FORBIDDEN:
+                self.json_response(403, {'error': 'Insufficient permission'})
+            else:
+                self.json_response(404, {'error': 'Not found'})
+            return False
+
+        def authorize_resource(self, method):
+            parts = self.path.split('/')
+            if len(parts) < 3 or parts[1] != 'api':
+                return True
+            if method == 'POST' and self.path in {
+                    '/api/analyze', '/api/deployments', '/api/static-deployments',
+                    '/api/deployment-groups', '/api/github/deployments'}:
+                if not permitted(self.principal, Action.DEPLOY, self.request_owner()):
+                    return self.require_access(AccessResult.FORBIDDEN)
+            if len(parts) < 4:
+                return True
+            kind, identifier = parts[2], parts[3]
+            action = Action.READ if method == 'GET' else Action.DEPLOY
+            if kind == 'jobs' or kind == 'deployments':
+                if not re.fullmatch(r'[a-f0-9]{16}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and (self.path.endswith('/retire')
+                                         or self.path.endswith('/migration/cleanup')):
+                    action = Action.RETIRE
+                with app.lock:
+                    record = app.jobs.get(identifier)
+                return self.require_access(record_access(self.principal, action, record))
+            if kind == 'deployment-groups':
+                if not re.fullmatch(r'[a-f0-9]{16}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                with app.lock:
+                    records = [job for job in app.jobs.values() if job.get('group_id') == identifier]
+                decisions = [record_access(self.principal, action, record) for record in records]
+                if not decisions or AccessResult.NOT_FOUND in decisions:
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if AccessResult.FORBIDDEN in decisions:
+                    return self.require_access(AccessResult.FORBIDDEN)
+                return True
+            if kind == 'github' and len(parts) >= 5 and parts[3] == 'sources':
+                source_id = parts[4]
+                if not re.fullmatch(r'[a-f0-9]{16}', source_id):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and self.path.endswith('/disconnect'):
+                    action = Action.RETIRE
+                with app.lock:
+                    record = app.github_sources.get(source_id)
+                return self.require_access(record_access(self.principal, action, record))
+            if kind == 'applications':
+                if not re.fullmatch(r'[a-z][a-z0-9-]{2,30}', identifier):
+                    return self.require_access(AccessResult.NOT_FOUND)
+                if method == 'POST' and ('/retirement/start' in self.path
+                                         or '/failed-create/start' in self.path):
+                    action = Action.RETIRE
+                return self.require_access(app.application_access(self.principal, identifier, action))
+            return True
+
         def do_GET(self):
             if self.path == "/health":
                 # Service liveness only; user-app readiness is checked separately.
@@ -1510,6 +1585,8 @@ def handler_for(app: App):
                 self.wfile.write(payload)
                 return
             if not self.authenticate_api():
+                return
+            if not self.authorize_resource('GET'):
                 return
             if self.path == "/api/config":
                 self.json_response(200, {"ai_available": app.ai_settings.available,
@@ -1536,10 +1613,10 @@ def handler_for(app: App):
                     "recovery_warnings": app.recovery_warnings})
                 return
             if self.path == "/api/jobs":
-                self.json_response(200, app.summaries())
+                self.json_response(200, app.summaries(self.principal))
                 return
             if self.path == "/api/github/sources":
-                self.json_response(200, app.github_source_summaries())
+                self.json_response(200, app.github_source_summaries(self.principal))
                 return
             if re.fullmatch(r'/api/deployment-groups/[a-f0-9]{16}', self.path):
                 try:
@@ -1647,6 +1724,8 @@ def handler_for(app: App):
         def do_POST(self):
             if not self.authenticate_api():
                 return
+            if not self.authorize_resource('POST'):
+                return
             try:
                 if re.fullmatch(r"/api/jobs/[a-f0-9]{16}/websocket-probe", self.path):
                     if int(self.headers.get('Content-Length', '0')) != 0:
@@ -1662,6 +1741,9 @@ def handler_for(app: App):
                             'repository_url', 'branch', 'application_id', 'targets',
                             'public', 'auto_deploy'}):
                         raise ValueError('GitHub 저장소와 배포 설정이 필요합니다.')
+                    if not self.require_access(app.application_access(
+                            self.principal, payload['application_id'], Action.DEPLOY)):
+                        return
                     self.json_response(202, app.create_github_deployment(
                         payload['repository_url'], payload['branch'], payload['application_id'],
                         payload['targets'], payload['public'], payload['auto_deploy'],
@@ -2001,6 +2083,9 @@ def handler_for(app: App):
                         return
                     targets = self.headers.get('X-Deploy-Targets', '').split(',')
                     application_id = self.headers.get('X-Application-Id', '')
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     public_flag = self.headers.get('X-Public-Access', 'false')
                     if public_flag not in {'true', 'false'}:
                         raise ValueError('공개 접근 선택이 올바르지 않습니다.')
@@ -2058,6 +2143,9 @@ def handler_for(app: App):
                     application_id = self.headers.get("X-Application-Id", "")
                     if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
                         raise ValueError("앱 ID는 소문자로 시작하는 3~31자의 소문자·숫자·하이픈이어야 합니다.")
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     size = int(self.headers.get("Content-Length", "0"))
                     content_type = self.headers.get("Content-Type", "")
                     folder_upload = content_type.lower().startswith("multipart/form-data;")
@@ -2128,6 +2216,9 @@ def handler_for(app: App):
                     application_id = self.headers.get("X-Application-Id", "app-" + job_id)
                     if not re.fullmatch(r"[a-z][a-z0-9-]{2,30}", application_id):
                         raise ValueError("Application ID must be 3-31 lowercase letters, digits or hyphens, starting with a letter")
+                    if not self.require_access(app.application_access(
+                            self.principal, application_id, Action.DEPLOY)):
+                        return
                     postgres_flag = self.headers.get('X-Postgres-Existing', 'false')
                     if postgres_flag not in {'true', 'false'}:
                         raise ValueError('기존 PostgreSQL 선택 값이 올바르지 않습니다.')

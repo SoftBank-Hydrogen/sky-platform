@@ -35,7 +35,7 @@ from engine.architecture_decision import architecture_decision
 from engine.compilation import compile_decision
 from engine.deployment_policy import deployment_policy
 from engine.static_site import assess_static_site
-from domain.access import ResourceOwner, owner_from_record
+from domain.access import AccessResult, Action, ResourceOwner, owner_from_record, record_access
 
 TARGETS = {"auto", "local-docker", "aws-ecs-express", "cloud-run"}
 
@@ -103,10 +103,12 @@ class GitHubDeploymentsMixin:
             if temporary is not None:
                 Path(temporary).unlink(missing_ok=True)
 
-    def github_source_summaries(self):
+    def github_source_summaries(self, principal=None):
         with self.lock:
             summaries = []
             for item in self.github_sources.values():
+                if principal is not None and record_access(principal, Action.READ, item) is not AccessResult.GRANTED:
+                    continue
                 summary = dict(item)
                 statuses = [
                     self.jobs[job_id]["status"] if job_id in self.jobs else "missing"

@@ -33,6 +33,12 @@ class Action(StrEnum):
     MANAGE_MEMBERS = "manage_members"
 
 
+class AccessResult(StrEnum):
+    GRANTED = "granted"
+    FORBIDDEN = "forbidden"
+    NOT_FOUND = "not_found"
+
+
 _GRANTS = {
     Role.VIEWER: frozenset({Action.READ}),
     Role.DEPLOYER: frozenset({Action.READ, Action.DEPLOY}),
@@ -87,3 +93,24 @@ def permitted(principal: Principal, action: Action, owner: ResourceOwner | None)
     if not isinstance(principal, Principal) or not isinstance(action, Action) or owner is None:
         return False
     return principal.organization_id == owner.organization_id and action in _GRANTS[principal.role]
+
+
+def record_access(principal: Principal, action: Action, record: Mapping[str, object] | None) -> AccessResult:
+    """Hide foreign records; allow ownerless legacy records only in single-user local mode."""
+    if not isinstance(principal, Principal) or not isinstance(action, Action) or record is None:
+        return AccessResult.NOT_FOUND
+    owner = owner_from_record(record)
+    if owner is None:
+        legacy = "organization_id" not in record and "created_by" not in record
+        if (
+            legacy
+            and principal.login_source is LoginSource.LOCAL
+            and principal.role is Role.ADMIN
+            and principal.organization_id == "local_workspace"
+            and principal.user_id == "local_operator"
+        ):
+            return AccessResult.GRANTED
+        return AccessResult.NOT_FOUND
+    if owner.organization_id != principal.organization_id:
+        return AccessResult.NOT_FOUND
+    return AccessResult.GRANTED if permitted(principal, action, owner) else AccessResult.FORBIDDEN
