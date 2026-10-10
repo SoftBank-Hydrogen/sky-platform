@@ -7,6 +7,7 @@ A failed allocation retains its secret and database for reconciliation.
 import json
 import re
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,7 @@ class AwsSharedPoolSettings:
 
     def __post_init__(self):
         if not isinstance(self.pool, SharedDatabasePool):
-            raise ValueError("A registered workload pool is required")
+            raise ValueError("A registered workload pool is required")  # noqa: TRY004 -- configuration error
         if not re.fullmatch(r"db-[A-Za-z0-9]{1,64}", self.resource_id):
             raise ValueError("Immutable RDS resource ID is required")
         if not re.fullmatch(r"vpc-[a-f0-9]{8,17}", self.vpc_id):
@@ -236,7 +237,17 @@ class AwsSharedDatabaseAllocator:
                 if _error_code(error) != "ResourceExistsException":
                     raise
             # Read the winner after a concurrent create. Never overwrite or rotate it.
-            metadata = client.describe_secret(SecretId=name)
+            # A successful CreateSecret may precede visibility in DescribeSecret.
+            # Retry only this read, not creation or SQL with uncertain effects.
+            for attempt in range(4):
+                try:
+                    metadata = client.describe_secret(SecretId=name)
+                except Exception as error:
+                    if _error_code(error) != "ResourceNotFoundException" or attempt == 3:
+                        raise
+                    time.sleep(0.5 * 2**attempt)
+                else:
+                    break
         arn = metadata.get("ARN", "")
         prefix = f"arn:aws:secretsmanager:{pool.region}:{pool.account_id}:secret:{name}-"
         owned = _tags(metadata.get("Tags", []))
@@ -307,7 +318,7 @@ class AwsSharedDatabaseAllocator:
             self._allocator(endpoint, self._admin_credentials(endpoint[2])).initialize()
         except PoolAllocationError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- preserve uncertain effects without exposing credentials
             raise PoolAllocationError(
                 "Unable to register AWS workload pool; outcome requires review"
             ) from None
@@ -336,7 +347,7 @@ class AwsSharedDatabaseAllocator:
             }
         except PoolAllocationError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- redact AWS/SQL diagnostics containing credentials
             raise PoolAllocationError(
                 "AWS pool allocation failed; retained resources require review"
             ) from None

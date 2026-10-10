@@ -140,6 +140,54 @@ def test_valid_allocation_creates_and_reuses_app_secret_and_returns_only_referen
     connect.assert_not_called()
 
 
+def test_created_secret_metadata_visibility_lag_retries_only_reads(aws):
+    adapter, request, clients, records, *_ = aws
+    client = clients["secretsmanager"]
+    describe = client.describe_secret.side_effect
+    missing_reads = 2
+
+    def delayed(SecretId):
+        nonlocal missing_reads
+        if SecretId in records and missing_reads:
+            missing_reads -= 1
+            raise ServiceError("ResourceNotFoundException")
+        return describe(SecretId)
+
+    client.describe_secret.side_effect = delayed
+    with patch("adapters.aws.shared_database.time.sleep") as sleep:
+        credential = adapter._app_credentials(request)
+    assert credential.secret_ref in records
+    assert client.create_secret.call_count == 1
+    assert [call.args for call in sleep.call_args_list] == [(0.5,), (1.0,)]
+    client.put_secret_value.assert_not_called()
+    client.delete_secret.assert_not_called()
+
+
+@pytest.mark.parametrize("code", ["ResourceNotFoundException", "AccessDeniedException"])
+def test_post_create_metadata_retry_is_bounded_and_never_repeats_sql(aws, code):
+    adapter, request, clients, records, *_ = aws
+    client = clients["secretsmanager"]
+    client.describe_secret.side_effect = ServiceError(code)
+    if code == "AccessDeniedException":
+        initial = True
+
+        def denied_after_create(SecretId):
+            nonlocal initial
+            if initial:
+                initial = False
+                raise ServiceError("ResourceNotFoundException")
+            raise ServiceError(code)
+
+        client.describe_secret.side_effect = denied_after_create
+    with patch("adapters.aws.shared_database.time.sleep") as sleep, pytest.raises(ServiceError):
+        adapter._app_credentials(request)
+    assert client.create_secret.call_count == 1
+    assert sleep.call_count == (3 if code == "ResourceNotFoundException" else 0)
+    assert len(records) == 3
+    client.get_secret_value.assert_not_called()
+    client.put_secret_value.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "change",
     [
