@@ -1,6 +1,7 @@
 """Uploaded sources to durable previews; no uploaded code, Docker, AI or SQL execution."""
 
 import hashlib
+import re
 from dataclasses import asdict
 
 from application.analysis import redact
@@ -12,8 +13,6 @@ from domain.access import Action, Principal, ResourceOwner, permitted
 def _options(port, health_path):
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError("Invalid container port")
-    import re
-
     if (
         not isinstance(health_path, str)
         or len(health_path) > 200
@@ -25,8 +24,27 @@ def _options(port, health_path):
     return {"port": port, "health_path": health_path, "analyzer": "static"}
 
 
+def _automatic_port(project):
+    """Read literal container declarations without executing uploaded code."""
+    dockerfile = project / "Dockerfile"
+    if not dockerfile.is_file():
+        return 3000  # Generated launchers receive this PORT; execution verifies it.
+    ports = set()
+    for line in dockerfile.read_text().splitlines():
+        if re.match(r"^\s*EXPOSE\s", line, re.IGNORECASE):
+            for token in line.split("#", 1)[0].split()[1:]:
+                if not re.fullmatch(r"[0-9]{4,5}(?:/tcp)?", token):
+                    raise ValueError("Dockerfile HTTP port cannot be determined safely")
+                ports.add(int(token.split("/")[0]))
+    if len(ports) != 1:
+        raise ValueError("Dockerfile must declare one unambiguous HTTP port")
+    return _options(ports.pop(), "/")["port"]
+
+
 def _plan(project, options):
     initial = analyze(project)
+    automatic = options.get("analyzer") == "automatic"
+    port = _automatic_port(project) if automatic else options["port"]
     if initial.runtime == "custom-dockerfile":
         selector = "dockerfile"
     elif initial.runtime == "nodejs":
@@ -50,13 +68,18 @@ def _plan(project, options):
     }
     warnings = [warning for warning in initial.warnings if "PORT=3000" not in warning]
     warnings.append(
-        "포트와 HTTP 검사 경로는 요청에서 선택한 값입니다. 실제 빌드·응답·WebSocket 검증은 아직 수행하지 않았습니다."
+        (
+            "실행 설정은 소스 선언과 생성된 실행 규약에서 결정했습니다. "
+            if automatic
+            else "포트와 HTTP 검사 경로는 요청에서 선택한 값입니다. "
+        )
+        + "실제 빌드·응답·WebSocket 검증은 아직 수행하지 않았습니다."
     )
     plan = make_plan(
         project,
         selector,
         "build" if initial.build_command == "npm run build" else None,
-        port=options["port"],
+        port=port,
         health_path=options["health_path"],
         warnings=warnings,
         **metadata,
@@ -77,7 +100,11 @@ class DeploymentPreparationService:
             raise PermissionError("Deployment preparation access denied")
         if not isinstance(upload, bytes) or not 0 < len(upload) <= MAX_UPLOAD:
             raise ValueError("ZIP upload exceeds 20 MiB limit")
-        options = _options(port, health_path)
+        options = (
+            {"port": None, "health_path": "/", "analyzer": "automatic"}
+            if port is None
+            else _options(port, health_path)
+        )
         lease, preview = self.previews.reserve(
             principal, application_id, request_key, hashlib.sha256(upload).hexdigest(), options
         )
@@ -149,3 +176,12 @@ class DeploymentPreparationService:
 
     def approve(self, principal, preview_id, expected_digest):
         return self.previews.approve(principal, preview_id, expected_digest)
+
+    def deploy(self, principal, application_id, request_key, upload):
+        """Deploy intent admits the exact server-validated snapshot, once."""
+        preview = self.prepare(principal, application_id, request_key, upload, port=None)
+        if preview["blockers"]:
+            return {"status": "blocked", "preview_id": preview["id"], "blockers": preview["blockers"]}
+        approval = self.approve(principal, preview["id"], preview["preview_digest"])
+        receipt = self.previews.approvals.submit(principal, approval.id, "preview:" + preview["id"])
+        return {"status": "accepted", **asdict(receipt)}
