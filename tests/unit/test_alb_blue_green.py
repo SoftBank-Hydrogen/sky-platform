@@ -184,3 +184,23 @@ def test_route_ownership_changed_while_waiting_never_reports_success():
         router.probe(plan["target"])
     client.modify_listener.assert_called_once()
     assert probe.call_count == 1
+
+
+def test_fenced_old_route_503_is_pending_until_real_verified_reads():
+    router, client, _, plan, probe = fixture()
+    router.switch(plan["source"], plan["target"])
+    pending = {"http_status": 503, "binding": None, "revision": None}
+    ready = {"http_status": 200, "binding": plan["target"], "revision": router.revisions[1]}
+    probe.side_effect = [ready, pending, ready, ready, ready]
+    assert router.probe(plan["target"]) == ready
+    assert probe.call_count == 5
+    client.modify_listener.assert_called_once()
+
+
+def test_persistently_unavailable_route_is_not_database_read_evidence():
+    router, _, _, plan, probe = fixture()
+    router.switch(plan["source"], plan["target"])
+    probe.side_effect = None
+    probe.return_value = {"http_status": 503, "binding": None, "revision": None}
+    with pytest.raises(ValueError, match="probe limit"):
+        router.probe(plan["target"])

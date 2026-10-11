@@ -219,6 +219,18 @@ class AwsAlbBlueGreenRouter:
             if self.uncertain or self._audit() != expected_binding:
                 raise ValueError("Confirmed listener route required")
             receipt = self.entrypoint_probe(expected_binding)
+            if (isinstance(receipt, dict)
+                and set(receipt) == {"http_status", "binding", "revision"}
+                and type(receipt["http_status"]) is int
+                and receipt["http_status"] in {502, 503, 504}
+                and receipt["binding"] is None and receipt["revision"] is None):
+                # A fenced previous app may stop reading before ALB finishes
+                # switching. This is pending, never database/readiness evidence.
+                self.guard()
+                confirmed = 0
+                if attempt + 1 < self.probe_attempts:
+                    self.wait(1)
+                continue
             if (
                 not isinstance(receipt, dict)
                 or set(receipt) != {"http_status", "binding", "revision"}
