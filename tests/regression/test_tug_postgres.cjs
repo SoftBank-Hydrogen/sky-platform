@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 let config;
 let unavailable = false;
+let sum = "100";
 const queries = [];
 class Pool {
   constructor(options) { config = options; }
@@ -10,7 +11,7 @@ class Pool {
   async query(sql, args) {
     queries.push({sql,args});
     if (unavailable) throw new Error("Database unavailable");
-    if (sql.includes('COUNT')) return { rows: [{ rounds: 13, wins_a: 4, wins_b: 5, draws: 4, taps: 100, best_round_taps: 30 }] };
+    if (sql.includes('COUNT')) return { rows: [{ rounds: 13, wins_a: 4, wins_b: 5, draws: 4, taps: sum, best_round_taps: 30 }] };
     if (sql.includes('ORDER BY')) return { rows: [{ id: 13, started_at: 10, ended_at: 20, winner: 'A', taps_a: 2, taps_b: 1, players_a: 1, players_b: 1 }] };
     return {rows: []};
   }
@@ -42,6 +43,11 @@ vm.runInNewContext(fs.readFileSync('src/assets/infra/tug-postgres-db.cjs','utf8'
   assert.ok(!insert.sql.includes("O'Reilly"));
   assert.equal(insert.args[2],"O'Reilly");
   assert.equal((await scores.summary()).rounds,13);
+  assert.equal((await scores.summary()).totalTaps,100);
+  sum = "9007199254740992";
+  await assert.rejects(scores.summary());
+  sum = null;
+  assert.equal((await scores.summary()).totalTaps,0);
   assert.equal((await scores.recentRounds(-1))[0].id,13);
   assert.equal(queries.at(-1).args[0],1);
   await scores.close();

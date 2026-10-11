@@ -48,7 +48,7 @@ function openScores() {
         SUM(taps_a+taps_b) AS taps, MAX(taps_a+taps_b) AS best_round_taps FROM rounds`);
       const t = result.rows[0];
       return { rounds: t.rounds, wins: { A: t.wins_a || 0, B: t.wins_b || 0 }, draws: t.draws || 0,
-        totalTaps: t.taps || 0, bestRoundTaps: t.best_round_taps || 0 };
+        totalTaps: safeInteger(String(t.taps || 0)), bestRoundTaps: t.best_round_taps || 0 };
     },
     async close() { await pool.end(); },
   };
