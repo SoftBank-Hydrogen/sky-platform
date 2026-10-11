@@ -615,6 +615,18 @@ class AwsTests(unittest.TestCase):
                                           ['ecr', 'batch-delete-image']) for args in calls))
 
     def test_second_release_updates_owned_service_and_keeps_url(self):
+        self._owned_update_availability()
+
+    def test_publishes_verified_url_during_bake_before_cleanup(self):
+        self._owned_update_availability(early=True)
+
+    def test_never_publishes_url_after_failed_http_check(self):
+        self._owned_update_availability(early=True, http_failure=True)
+
+    def test_rollback_during_observation_withdraws_published_url(self):
+        self._owned_update_availability(early=True, rollback=True)
+
+    def _owned_update_availability(self, early=False, http_failure=False, rollback=False):
         second_attempt = 'b' * 16 + '-a1'
         old_image = REPOSITORY + ':' + ATTEMPT
         new_image = REPOSITORY + ':' + second_attempt
@@ -622,9 +634,11 @@ class AwsTests(unittest.TestCase):
         prior = {'account': ACCOUNT, 'region': REGION, 'target': 'aws-ecs-express',
                  'service': SERVICE, 'service_arn': ARN, 'image': old_image, 'url': url}
         checkpoints = []
+        published = []
         adapter = AwsExpressAdapter(lambda stage, message: self.events.append((stage, message)),
                                     AwsSettings(REGION), existing=prior,
-                                    checkpoint=lambda **updates: checkpoints.append(updates))
+                                    checkpoint=lambda **updates: checkpoints.append(updates),
+                                    on_available=(lambda result: published.append((updated_describes[0], result))) if early else None)
         calls = []
         updated_describes = [0]
         def aws(args, **_kwargs):
@@ -633,7 +647,7 @@ class AwsTests(unittest.TestCase):
                 updated = any(call[:2] == ['ecs', 'update-express-gateway-service'] for call in calls)
                 if updated:
                     updated_describes[0] += 1
-                current_deployment = 'new-deployment' if updated and updated_describes[0] == 1 else None
+                current_deployment = 'new-deployment' if updated and updated_describes[0] <= (2 if early else 1) else None
                 active = [{'primaryContainer': {'image': new_image if updated else old_image},
                     'taskDefinitionArn': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{SERVICE}:{2 if updated else 1}',
                     'ingressPaths': [{'accessType': 'PUBLIC', 'endpoint': url.removeprefix('https://')}]}]
@@ -646,6 +660,14 @@ class AwsTests(unittest.TestCase):
                              {'key': 'sky-attempt', 'value': ATTEMPT}],
                     'activeConfigurations': active}})
             if args[:2] == ['ecs', 'describe-service-deployments']:
+                if rollback and updated_describes[0] >= 3:
+                    status = 'ROLLBACK_IN_PROGRESS' if updated_describes[0] == 3 else 'ROLLBACK_SUCCESSFUL'
+                    return json.dumps({'serviceDeployments': [{'status': status}]})
+                if early and updated_describes[0] in {1, 2}:
+                    return json.dumps({'serviceDeployments': [{'status': 'IN_PROGRESS',
+                        'lifecycleStage': 'PRODUCTION_TRAFFIC_SHIFT' if updated_describes[0] == 1 else 'BAKE_TIME',
+                        'targetServiceRevision': {'requestedProductionTrafficWeight': 100,
+                            'requestedTaskCount': 1, 'runningTaskCount': 1, 'pendingTaskCount': 0}}]})
                 return json.dumps({'serviceDeployments': [{'status': 'SUCCESSFUL'}]})
             if args[:2] == ['ecs', 'list-service-deployments']:
                 return json.dumps({'serviceDeployments': [{'serviceDeploymentArn': 'old-deployment',
@@ -670,6 +692,19 @@ class AwsTests(unittest.TestCase):
                 patch('adapters.aws.ecs.ImageBuilder.build'), patch.object(adapter, 'command', side_effect=command), \
                 patch.object(adapter, 'aws', side_effect=aws), patch.object(adapter, 'verify') as verify, \
                 patch('adapters.aws.ecs.time.sleep'):
+            if rollback:
+                with self.assertRaisesRegex(RuntimeError, 'ROLLBACK_SUCCESSFUL'):
+                    adapter.deploy(self.project, self.plan, second_attempt)
+                self.assertEqual(len(published), 1)
+                self.assertTrue(any(item.get('availability', {}).get('status') == 'withdrawn'
+                                    for item in checkpoints))
+                return
+            if http_failure:
+                verify.side_effect = RuntimeError('HTTP is not ready')
+                with self.assertRaisesRegex(RuntimeError, 'HTTP is not ready'):
+                    adapter.deploy(self.project, self.plan, second_attempt)
+                self.assertEqual(published, [])
+                return
             result = adapter.deploy(self.project, self.plan, second_attempt)
         self.assertEqual(result['url'], url)
         self.assertEqual(result['service'], SERVICE)
@@ -678,7 +713,16 @@ class AwsTests(unittest.TestCase):
         self.assertTrue(result['previous_task_definition_arn'].endswith(':1'))
         self.assertGreaterEqual(updated_describes[0], 2)
         self.assertTrue(result['task_definition_arn'].endswith(':2'))
-        verify.assert_called_once_with(url + '/')
+        if early:
+            self.assertEqual(verify.call_count, 2)
+            verify.assert_called_with(url + '/')
+        else:
+            verify.assert_called_once_with(url + '/')
+        if early:
+            self.assertEqual(len(published), 1)
+            self.assertEqual(published[0][0], 2)  # after completed traffic shift, before AWS cleanup
+            self.assertEqual(published[0][1]['image'], new_image)
+            self.assertEqual(published[0][1]['url'], result['url'])
         self.assertFalse(any(args[:2] == ['ecs', 'create-express-gateway-service'] for args in calls))
 
     def test_retire_updated_service_deletes_both_release_images(self):

@@ -682,8 +682,15 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
             elif target == "aws-ecs-express":
                 settings = AwsSettings(**job["aws"])
+                def publish_available(result):
+                    if job.get('shared_postgres') is not None:
+                        result = self.verify_shared_result(job_id, result, settings, checkpoint)
+                    checkpoint(available_result=result,
+                               availability={'status': 'ready', 'checked_at': datetime.now(timezone.utc).isoformat(),
+                                             'aws_finalization': 'running'})
+                    self.event(job_id, 'available', '배포 완료 · 접속 가능합니다. AWS가 관찰·정리를 계속합니다.')
                 adapter_factory = lambda event: AwsExpressAdapter(event, settings, existing=job.get('prior_result'),
-                                                                    checkpoint=checkpoint,
+                                                                    checkpoint=checkpoint, on_available=publish_available,
                                                                     **({'rehearsal': True} if job.get('postgres') is None and job.get('shared_postgres') is None else {}))
             tools = DeploymentTools(Path(job["project"]), self.root / job_id / "work", job_id,
                                     environment, lambda s, m: self.event(job_id, s, m), checkpoint,
@@ -708,7 +715,16 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                                      steps=job.get("steps", 0),
                                      max_steps=40 if job.get('sqlite_conversion') else 24).run()
             if job.get('shared_postgres') is not None:
-                result = self.verify_shared_result(job_id, result, settings, checkpoint)
+                available = job.get('available_result') or {}
+                if (available.get('image') == result.get('image')
+                        and available.get('task_definition_arn') == result.get('task_definition_arn')
+                        and available.get('database') == result.get('database')
+                        and (available.get('database_verification') or {}).get('status') == 'passed'):
+                    result['database_verification'] = available['database_verification']
+                else:
+                    result = self.verify_shared_result(job_id, result, settings, checkpoint)
+            if job.get('availability'):
+                checkpoint(availability={**job['availability'], 'aws_finalization': 'succeeded'})
             checkpoint(status="succeeded", result=result, missing_environment=[], deployment_state="active")
             if job.get('replaces_job_id'):
                 with self.lock:
@@ -751,6 +767,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                     message = message.replace(value, "[REDACTED]")
             self.event(job_id, "error", message)
             try:
+                if self.jobs[job_id].get('availability'):
+                    checkpoint(availability={**self.jobs[job_id]['availability'],
+                                             'status': 'withdrawn', 'aws_finalization': 'failed'})
                 checkpoint(status="failed")
             except DeploymentCancelled:
                 checkpoint(status="cancelled", missing_environment=[], cancel_requested=False)

@@ -889,3 +889,38 @@ test('RDS retirement requires reviewed plan and exact database ID', async () => 
   assert.equal(JSON.parse(start.options.body).confirm_database_id, 'sky-demo-app');
   assert.match(element('retirementOperationInfo').textContent, /final-abcdef123456/);
 });
+
+test('verified availability shows the URL during AWS finalization and withdraws it on failure', async () => {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: '', checked: false, files: [], hidden: false, disabled: false,
+      textContent: '', replaceChildren() {}, querySelectorAll() { return []; },
+    });
+    return elements.get(id);
+  };
+  const context = {
+    document: {getElementById: element, hidden: false},
+    fetch: async path => ({ok: true, json: async () => path === '/api/config'
+      ? {ai_available: true, ai_model: 'test', targets: [], recovery_warnings: []} : []}),
+    setInterval() {}, setTimeout, FormData, Set, Error, Date,
+  };
+  runInNewContext(html.split('<script>', 2)[1].split('</script>', 1)[0], context);
+  await new Promise(resolve => setImmediate(resolve));
+  const job = {id: 'a'.repeat(16), mode: 'agent', target: 'aws-ecs-express',
+    status: 'running', attempts: 1, events: [],
+    availability: {status: 'ready', aws_finalization: 'running'},
+    available_result: {url: 'https://game.example.test', database_verification: {status: 'passed'}}};
+  context.show(job);
+  assert.match(element('status').textContent, /배포 완료.*AWS 마무리/);
+  assert.equal(element('result').hidden, false);
+  assert.equal(element('url').href, job.available_result.url);
+  assert.match(element('jobId').textContent, /HTTP·DB 읽기\/쓰기 검증 완료/);
+  assert.equal(element('retire').hidden, true); // still one active update operation
+  context.show({...job, status: 'failed', availability: {status: 'withdrawn'}});
+  assert.equal(element('result').hidden, true);
+  assert.equal(element('url').href, '');
+  assert.doesNotMatch(element('status').textContent, /배포 완료/);
+  context.show({...job, status: 'interrupted'});
+  assert.equal(element('result').hidden, true);
+});

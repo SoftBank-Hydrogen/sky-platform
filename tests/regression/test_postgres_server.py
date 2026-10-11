@@ -525,7 +525,7 @@ class PostgresServerTests(unittest.TestCase):
         calls = []
         class Adapter:
             execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
-            def __init__(self, event, settings, existing=None, checkpoint=None):
+            def __init__(self, event, settings, existing=None, checkpoint=None, on_available=None):
                 pass
             def deploy(self, project, plan, attempt_id, environment,
                        postgres=None, migrations=None):
@@ -585,7 +585,7 @@ class PostgresServerTests(unittest.TestCase):
         calls = []
         class Adapter:
             execution_capabilities = staticmethod(AwsExpressAdapter.execution_capabilities)
-            def __init__(self, event, settings, existing=None, checkpoint=None):
+            def __init__(self, event, settings, existing=None, checkpoint=None, on_available=None):
                 pass
             def deploy(self, project, plan, attempt_id, environment,
                        postgres=None, migrations=None):

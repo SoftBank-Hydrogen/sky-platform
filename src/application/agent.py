@@ -623,6 +623,8 @@ class DeploymentTools:
                 require_health_result(asdict(self.plan), self.result)
             return {"verified": True, **self.result}
         except Exception as exc:
+            if getattr(adapter, 'on_available', None) is not None:
+                self.checkpoint(availability={'status': 'withdrawn', 'aws_finalization': 'failed'})
             self.event("attempt_failed", str(exc))
             try:
                 adapter.cleanup_failure(attempt_id)

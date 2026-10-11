@@ -165,12 +165,13 @@ class AwsExpressAdapter:
         )
 
     def __init__(self, event, settings: AwsSettings, existing=None, checkpoint=None,
-                 rehearsal=False, promoted_image=None):
+                 rehearsal=False, promoted_image=None, on_available=None):
         if rehearsal and promoted_image is not None:
             raise ValueError('로컬 이미지 승격과 AWS 자체 리허설을 동시에 실행할 수 없습니다.')
         self.output, self.settings = event, settings
         self.existing = existing
         self.checkpoint = checkpoint
+        self.on_available = on_available
         self.sensitive = []
         self.service_arn = None
         self.service_created = False
@@ -507,9 +508,55 @@ class AwsExpressAdapter:
             raise AwsConfigurationError('ECS 서비스 ARN이 예상과 다릅니다. 생성된 리소스를 확인하세요.')
         if self.updated_existing:
             self.event('update_accepted', 'AWS가 기존 서비스 업데이트 요청을 수락했습니다.')
+        def checked_result(ready, paths, probe=True):
+            endpoint = paths[0].rstrip('/')
+            url = endpoint if endpoint.startswith('https://') else 'https://' + endpoint
+            self.validate_url(url, service, self.settings.region)
+            if self.existing is not None and url != self.existing['url'].rstrip('/'):
+                raise AwsConfigurationError('기존 ECS 서비스의 공개 URL이 변경됐습니다.')
+            self.event('verifying', f'ECS Express HTTPS URL에서 실제 HTTP 응답 확인: {url}')
+            if probe:
+                self.verify(url + plan.health_path)
+            if self.image_digest:
+                details = json.loads(self.aws(['ecr', 'describe-images', '--repository-name',
+                                               'sky-managed', '--image-ids',
+                                               'imageTag=' + attempt_id], private=True))
+                images = details.get('imageDetails', [])
+                if len(images) != 1 or images[0].get('imageDigest') != self.image_digest:
+                    raise AwsConfigurationError('배포 중 ECR 이미지 태그의 다이제스트가 변경됐습니다.')
+            active_configs = [config for config in ready.get('activeConfigurations', [])
+                              if config.get('primaryContainer', {}).get('image') == self.image]
+            task_definition = active_configs[0].get('taskDefinitionArn') if len(active_configs) == 1 else None
+            expected_task_prefix = f'arn:aws:ecs:{self.settings.region}:{account}:task-definition/'
+            if (not isinstance(task_definition, str) or not task_definition.startswith(expected_task_prefix)
+                    or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_definition.removeprefix(expected_task_prefix))):
+                raise AwsConfigurationError('배포된 ECS 태스크 정의 ARN을 확인할 수 없습니다.')
+            identity = None
+            if self.image_digest and (self.rehearsal_result or self.promoted_image):
+                identity = verify_runtime_image(
+                    self.aws, account=account, region=self.settings.region, service=service,
+                    task_definition=task_definition, image=self.image, manifest_digest=self.image_digest,
+                    local_image_id=(self.rehearsal_result or self.promoted_image)['image_id'])
+            return {'url': url, 'health_url': url + plan.health_path, 'service': service,
+                    'service_arn': self.service_arn, 'image': self.image, 'target': 'aws-ecs-express',
+                    'region': self.settings.region, 'account': account, 'public': True,
+                    'service_security_group': self.settings.service_security_group,
+                    **({'vpc_id': self.settings.vpc_id, 'subnet_ids': list(self.settings.subnet_ids)}
+                       if self.settings.vpc_id else {}),
+                    'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
+                    **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
+                    **({'promotion': self.promoted_image} if self.promoted_image else {}),
+                    **({'image_digest': self.image_digest} if self.image_digest else {}),
+                    **({'image_identity': identity} if identity else {}),
+                    **({'database': database} if database is not None else {}),
+                    **({'migration': migration_result} if migration_result is not None else {}),
+                    'task_definition_arn': task_definition,
+                    'previous_task_definition_arn': previous_task_definition}
+
         ready = None
         new_deployment = created.get('service', {}).get('currentDeployment')
         last_deployment_status = None
+        availability_published = False
         for _ in range(360 if self.existing is not None else 180):
             described = json.loads(self.aws(['ecs', 'describe-express-gateway-service', '--service-arn', self.service_arn], private=True, quiet=True))
             ready = described.get('service', {})
@@ -519,6 +566,7 @@ class AwsExpressAdapter:
                      if path.get('accessType') == 'PUBLIC' and path.get('endpoint')
                      and (self.existing is None or config.get('primaryContainer', {}).get('image') == self.image)]
             deployment_ready = False
+            deployment_details = {}
             deployment_arn = ready.get('currentDeployment') or new_deployment
             if not deployment_arn:
                 deployments = json.loads(self.aws(['ecs', 'list-service-deployments', '--cluster', 'default',
@@ -531,10 +579,17 @@ class AwsExpressAdapter:
                 deployments = json.loads(self.aws(['ecs', 'describe-service-deployments',
                                                    '--service-deployment-arns', deployment_arn], private=True, quiet=True))
                 items = deployments.get('serviceDeployments', [])
-                deployment_status = items[0].get('status') if len(items) == 1 else None
+                deployment_details = items[0] if len(items) == 1 else {}
+                deployment_status = deployment_details.get('status')
                 if deployment_status and deployment_status != last_deployment_status:
                     self.event('deploying', 'ECS 새 리비전 상태: ' + deployment_status)
                     last_deployment_status = deployment_status
+                if (availability_published and deployment_status
+                        and deployment_status not in {'IN_PROGRESS', 'SUCCESSFUL'}):
+                    if self.checkpoint:
+                        self.checkpoint(availability={'status': 'withdrawn',
+                            'aws_finalization': 'needs_attention', 'aws_status': deployment_status})
+                    self.event('availability_withdrawn', 'AWS가 전환을 중단하거나 롤백 중입니다. 완료 표시를 철회했습니다.')
                 deployment_ready = deployment_status == 'SUCCESSFUL'
                 if deployment_status in {'STOPPED', 'ROLLBACK_SUCCESSFUL', 'ROLLBACK_FAILED'}:
                     raise RuntimeError(f'ECS 새 리비전 배포에 실패했습니다: {deployment_status}')
@@ -550,6 +605,34 @@ class AwsExpressAdapter:
             if settled and not database_configuration_matches(
                     active[0], database, postgres_ssl_environment(plan.runtime) if database else None):
                 raise AwsConfigurationError('ECS 서비스의 PostgreSQL 역할·비밀·접속 설정이 예상과 다릅니다.')
+            # A desired traffic weight alone is not proof of a completed traffic shift.
+            # BAKE_TIME/CLEAN_UP follow the production switch while AWS still observes/cleans up.
+            revision = deployment_details.get('targetServiceRevision') or {}
+            candidates = [config for config in active
+                          if config.get('primaryContainer', {}).get('image') == self.image]
+            traffic_ready = (
+                deployment_details.get('status') == 'IN_PROGRESS'
+                and deployment_details.get('lifecycleStage') in {'BAKE_TIME', 'CLEAN_UP'}
+                and revision.get('requestedProductionTrafficWeight') == 100
+                and isinstance(revision.get('requestedTaskCount'), int)
+                and revision['requestedTaskCount'] > 0
+                and revision.get('runningTaskCount', 0) >= revision['requestedTaskCount']
+                and revision.get('pendingTaskCount') == 0)
+            if (self.on_available is not None and not availability_published
+                    and state == 'ACTIVE' and paths and traffic_ready and len(candidates) == 1):
+                candidate = candidates[0]
+                network = candidate.get('networkConfiguration') or {}
+                if (self.settings.service_security_group
+                        and self.settings.service_security_group not in network.get('securityGroups', [])):
+                    raise AwsConfigurationError('ECS 서비스에 추가 보안 그룹이 적용되지 않았습니다.')
+                if self.settings.subnet_ids and set(network.get('subnets', [])) != set(self.settings.subnet_ids):
+                    raise AwsConfigurationError('ECS 서비스에 등록된 서브넷이 적용되지 않았습니다.')
+                if not database_configuration_matches(
+                        candidate, database, postgres_ssl_environment(plan.runtime) if database else None):
+                    raise AwsConfigurationError('ECS 서비스의 PostgreSQL 역할·비밀·접속 설정이 예상과 다릅니다.')
+                available = checked_result(ready, paths)
+                self.on_available(available)
+                availability_published = True
             if state == 'ACTIVE' and paths and deployment_ready and settled:
                 break
             if state in {'FAILED', 'INACTIVE'}:
@@ -557,48 +640,7 @@ class AwsExpressAdapter:
             time.sleep(5)
         else:
             raise RuntimeError('ECS Express 서비스 준비 시간 제한을 초과했습니다.')
-        endpoint = paths[0].rstrip('/')
-        url = endpoint if endpoint.startswith('https://') else 'https://' + endpoint
-        self.validate_url(url, service, self.settings.region)
-        if self.existing is not None and url != self.existing['url'].rstrip('/'):
-            raise AwsConfigurationError('기존 ECS 서비스의 공개 URL이 변경됐습니다.')
-        self.event('verifying', f'ECS Express HTTPS URL에서 실제 HTTP 응답 확인: {url}')
-        self.verify(url + plan.health_path)
-        if self.image_digest:
-            details = json.loads(self.aws(['ecr', 'describe-images', '--repository-name',
-                                           'sky-managed', '--image-ids',
-                                           'imageTag=' + attempt_id], private=True))
-            images = details.get('imageDetails', [])
-            if len(images) != 1 or images[0].get('imageDigest') != self.image_digest:
-                raise AwsConfigurationError('배포 중 ECR 이미지 태그의 다이제스트가 변경됐습니다.')
-        active_configs = [config for config in ready.get('activeConfigurations', [])
-                          if config.get('primaryContainer', {}).get('image') == self.image]
-        task_definition = active_configs[0].get('taskDefinitionArn') if len(active_configs) == 1 else None
-        expected_task_prefix = f'arn:aws:ecs:{self.settings.region}:{account}:task-definition/'
-        if (not isinstance(task_definition, str) or not task_definition.startswith(expected_task_prefix)
-                or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_definition.removeprefix(expected_task_prefix))):
-            raise AwsConfigurationError('배포된 ECS 태스크 정의 ARN을 확인할 수 없습니다.')
-        identity = None
-        if self.image_digest and (self.rehearsal_result or self.promoted_image):
-            identity = verify_runtime_image(
-                self.aws, account=account, region=self.settings.region, service=service,
-                task_definition=task_definition, image=self.image, manifest_digest=self.image_digest,
-                local_image_id=(self.rehearsal_result or self.promoted_image)['image_id'])
-        return {'url': url, 'health_url': url + plan.health_path, 'service': service,
-                'service_arn': self.service_arn, 'image': self.image, 'target': 'aws-ecs-express',
-                'region': self.settings.region, 'account': account, 'public': True,
-                'service_security_group': self.settings.service_security_group,
-                **({'vpc_id': self.settings.vpc_id, 'subnet_ids': list(self.settings.subnet_ids)}
-                   if self.settings.vpc_id else {}),
-                'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
-                **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
-                **({'promotion': self.promoted_image} if self.promoted_image else {}),
-                **({'image_digest': self.image_digest} if self.image_digest else {}),
-                **({'image_identity': identity} if identity else {}),
-                **({'database': database} if database is not None else {}),
-                **({'migration': migration_result} if migration_result is not None else {}),
-                'task_definition_arn': task_definition,
-                'previous_task_definition_arn': previous_task_definition}
+        return checked_result(ready, paths)
 
     @staticmethod
     def validate_url(url, service, region):

@@ -16,6 +16,54 @@ from interfaces.http.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
+    def test_shared_readiness_requires_db_check_and_reuses_the_verified_release(self):
+        self._availability_flow(fail_after_ready=False)
+
+    def test_failed_aws_finalization_withdraws_published_availability(self):
+        self._availability_flow(fail_after_ready=True)
+
+    def _availability_flow(self, fail_after_ready):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_id = 'd' * 16
+            source = root / job_id / 'source'
+            shutil.copytree('tests/fixtures/apps/hello-node', source)
+            app = App(root, AISettings('fixture-key', 'fixture-model'),
+                      monitor_interval=0, github_poll_interval=0)
+            app.jobs[job_id] = {'id': job_id, 'mode': 'agent', 'status': 'running',
+                                'target': 'aws-ecs-express', 'project': str(source),
+                                'plan': None, 'events': [], 'attempts': 1,
+                                'aws': {'region': 'ap-northeast-2'}, 'shared_postgres': {},
+                                'source_digest': source_digest(source)}
+            result = {'url': 'https://example.test', 'image': 'owned-image',
+                      'task_definition_arn': 'owned-definition', 'database': {'id': 'app-db'}}
+            verified = {**result, 'database_verification': {'status': 'passed'}}
+            def run():
+                adapter = tools.call_args.kwargs['adapter_factory'](lambda *_: None)
+                self.assertNotIn('availability', app.jobs[job_id])
+                adapter.on_available(dict(result))
+                self.assertEqual(app.jobs[job_id]['availability']['status'], 'ready')
+                self.assertEqual(app.jobs[job_id]['status'], 'running')
+                if fail_after_ready:
+                    raise RuntimeError('AWS rolled back during bake')
+                return dict(result)
+            with patch('interfaces.http.server.DeploymentTools') as tools, \
+                    patch('interfaces.http.server.DeploymentAgent') as agent, \
+                    patch('interfaces.http.server.postgres_request_from_job', return_value=None), \
+                    patch.object(app, 'verify_shared_result', return_value=verified) as verify_db:
+                agent.return_value.run.side_effect = run
+                app.run_agent(job_id)
+            verify_db.assert_called_once()
+            job = app.jobs[job_id]
+            if fail_after_ready:
+                self.assertEqual(job['status'], 'failed')
+                self.assertEqual(job['availability']['status'], 'withdrawn')
+                self.assertEqual(job['availability']['aws_finalization'], 'failed')
+            else:
+                self.assertEqual(job['status'], 'succeeded')
+                self.assertEqual(job['availability']['aws_finalization'], 'succeeded')
+                self.assertEqual(job['result']['database_verification'], {'status': 'passed'})
+
     def test_approved_sqlite_preparation_runs_before_agent_actions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
