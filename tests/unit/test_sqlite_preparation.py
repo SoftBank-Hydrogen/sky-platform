@@ -115,6 +115,19 @@ def test_changed_working_snapshot_rejected(projects):
     assert not (work / "migrations").exists()
 
 
+def test_workspace_parent_alias_allowed_but_project_root_link_rejected(projects, tmp_path):
+    original, work, conversion = projects
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    result = stage_sqlite_migration(alias / original.name, alias / work.name, conversion)
+    assert result["prepared"] is True
+    assert (original / "data/scores.db").is_file()
+    root_link = tmp_path / "project-link"
+    root_link.symlink_to(original, target_is_directory=True)
+    with pytest.raises(ValueError, match="plain project"):
+        stage_sqlite_migration(root_link, work, conversion)
+
+
 def test_artifact_stage_is_deterministic_and_remains_blocked(projects):
     original, _, conversion = projects
     sources, principal, artifact = capture(original)
