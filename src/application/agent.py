@@ -512,7 +512,7 @@ class DeploymentTools:
             check_postgres_node_dependency(self.work)
             check_postgres_numeric_parsers(self.work)
             check_async_database_callers(self.original, self.work,
-                                         include_factories=self.target == "cloud-run")
+                                         include_factories=True)
         if self.deployment_policy is not None:
             access_mode = (self.infrastructure_plan or {}).get('compatibility', {}).get('access_mode')
             self.deployment_policy.require(

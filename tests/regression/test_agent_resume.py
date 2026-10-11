@@ -16,6 +16,28 @@ from interfaces.http.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
+    def test_approved_sqlite_preparation_runs_before_agent_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            job_id = 'f' * 16
+            source = root / job_id / 'source'
+            shutil.copytree('tests/fixtures/apps/hello-node', source)
+            app = App(root, AISettings('fixture-key', 'fixture-model'),
+                      monitor_interval=0, github_poll_interval=0)
+            app.jobs[job_id] = {'id': job_id, 'mode': 'agent', 'status': 'running',
+                                'target': 'local-docker', 'project': str(source),
+                                'plan': None, 'events': [], 'attempts': 0,
+                                'source_digest': source_digest(source)}
+            app.jobs[job_id]['sqlite_conversion'] = {'approved': True}
+            order = []
+            with patch('interfaces.http.server.DeploymentTools') as tools, \
+                    patch('interfaces.http.server.DeploymentAgent') as agent:
+                tools.return_value.prepare_sqlite_migration.side_effect = lambda: order.append('prepare')
+                agent.return_value.run.side_effect = lambda: (order.append('agent') or {'url': 'http://example.test'})
+                app.run_agent(job_id)
+            self.assertEqual(order, ['prepare', 'agent'])
+            self.assertEqual(app.jobs[job_id]['status'], 'succeeded')
+
     def test_compose_environment_pause_survives_restart_and_uses_compose_adapter(self):
         actions = [
             ('read_project_files', {'paths': ['package.json', 'server.js']}),

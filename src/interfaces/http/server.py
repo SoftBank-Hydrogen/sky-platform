@@ -700,6 +700,9 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                                     cancel_check=lambda: self.cancel_requested(job_id),
                                     require_existing_work=bool(job.get('steps', 0)),
                                     expected_work_digest=job.get('work_digest'))
+            # Approved data preparation is mandatory orchestration, not an optional AI action.
+            if job.get('sqlite_conversion') is not None:
+                tools.prepare_sqlite_migration()
             self.event(job_id, "starting", "AI가 작업용 소스에서 배포를 준비합니다.")
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0),
