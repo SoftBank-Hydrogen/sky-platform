@@ -912,7 +912,11 @@ test('verified availability shows the URL during AWS finalization and withdraws 
     availability: {status: 'ready', aws_finalization: 'running'},
     available_result: {url: 'https://game.example.test', database_verification: {status: 'passed'}}};
   context.show(job);
-  assert.match(element('status').textContent, /배포 완료.*AWS 마무리/);
+  assert.equal(element('status').textContent, '배포 완료');
+  assert.match(element('accessInfo').textContent, /AWS 관찰/);
+  context.show({...job, availability: {...job.availability, serving_revision: 'previous'}});
+  assert.equal(element('status').textContent, '배포 완료');
+  assert.match(element('accessInfo').textContent, /기존 배포 주소.*새 버전 갱신/);
   assert.equal(element('result').hidden, false);
   assert.equal(element('url').href, job.available_result.url);
   assert.match(element('jobId').textContent, /HTTP·DB 읽기\/쓰기 검증 완료/);

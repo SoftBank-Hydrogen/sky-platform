@@ -622,6 +622,26 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             return False
         return True
 
+    def publish_existing_access(self, job_id, checkpoint):
+        """Expose a live existing release without claiming the uploaded revision is ready."""
+        job = self.jobs[job_id]
+        previous = self.jobs.get(job.get('replaces_job_id'))
+        if (not previous or previous.get('status') != 'succeeded'
+                or previous.get('deployment_state', 'active') != 'active'
+                or previous.get('application_id') != job.get('application_id')
+                or previous.get('target') != job.get('target')
+                or previous.get('aws') != job.get('aws')
+                or not job.get('prior_result')
+                or previous.get('result') != job['prior_result']):
+            return
+        health = check_deployment(previous)
+        if not health.get('healthy'):
+            return
+        checkpoint(available_result=dict(previous['result']),
+                   availability={'status': 'ready', 'checked_at': health['checked_at'],
+                                 'serving_revision': 'previous', 'aws_finalization': 'running'})
+        self.event(job_id, 'available', '배포 완료 · 기존 주소로 접속 가능합니다. 새 버전 갱신은 계속 진행합니다.')
+
     def run_agent(self, job_id, environment=None):
         environment = {} if environment is None else environment
         tools = None
@@ -682,6 +702,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                 adapter_factory = lambda event: CloudRunAdapter(event, settings, public=job.get("public", False))
             elif target == "aws-ecs-express":
                 settings = AwsSettings(**job["aws"])
+                self.publish_existing_access(job_id, checkpoint)
                 def publish_available(result):
                     if job.get('shared_postgres') is not None:
                         result = self.verify_shared_result(job_id, result, settings, checkpoint)

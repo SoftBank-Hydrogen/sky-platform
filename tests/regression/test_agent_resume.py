@@ -16,6 +16,34 @@ from interfaces.http.server import App, handler_for
 
 
 class AgentResumeTests(unittest.TestCase):
+    def test_existing_access_requires_matching_owner_and_live_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = App(Path(directory), monitor_interval=0, github_poll_interval=0)
+            previous = {'id': 'a' * 16, 'status': 'succeeded', 'application_id': 'game',
+                        'target': 'aws-ecs-express', 'aws': {'region': 'ap-northeast-2'},
+                        'result': {'url': 'https://owned.example.test'}}
+            job = {'id': 'b' * 16, 'status': 'running', 'application_id': 'game',
+                   'target': previous['target'], 'aws': previous['aws'],
+                   'prior_result': previous['result'], 'replaces_job_id': previous['id'],
+                   'events': []}
+            app.jobs.update({previous['id']: previous, job['id']: job})
+            (Path(directory) / job['id']).mkdir()
+            checkpoint = Mock()
+            with patch('interfaces.http.server.check_deployment',
+                       return_value={'healthy': True, 'checked_at': 'now'}) as check:
+                app.publish_existing_access(job['id'], checkpoint)
+                check.assert_called_once_with(previous)
+                self.assertEqual(checkpoint.call_args.kwargs['availability']['serving_revision'], 'previous')
+                self.assertEqual(job['status'], 'running')
+                checkpoint.reset_mock()
+                check.return_value = {'healthy': False}
+                app.publish_existing_access(job['id'], checkpoint)
+                checkpoint.assert_not_called()
+                check.reset_mock()
+                job['application_id'] = 'someone-else'
+                app.publish_existing_access(job['id'], checkpoint)
+                check.assert_not_called()
+
     def test_shared_readiness_requires_db_check_and_reuses_the_verified_release(self):
         self._availability_flow(fail_after_ready=False)
 
