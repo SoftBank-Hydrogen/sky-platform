@@ -225,7 +225,7 @@ class AwsMigrationRunner:
                     'environment': [
                         {'name': 'PGHOST', 'value': db['endpoint']},
                         {'name': 'PGPORT', 'value': str(db['port'])},
-                        {'name': 'PGDATABASE', 'value': 'appdb'},
+                        {'name': 'PGDATABASE', 'value': self.database.get('database_name', 'appdb')},
                         {'name': 'PGSSLMODE', 'value': 'require'}],
                     'secrets': [
                         {'name': 'PGUSER', 'valueFrom': db['secret_arn'] + ':username::'},

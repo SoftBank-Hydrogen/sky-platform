@@ -28,6 +28,25 @@ def postgres_request_from_job(job: dict) -> PostgresRequest | CloudSqlRequest | 
                 or request.project != cloud.get('project') or request.region != cloud.get('region')):
             raise ValueError('저장된 Cloud SQL 프로젝트·리전이 배포 대상과 다릅니다.')
         return request
+    if job.get('shared_postgres') is not None:
+        from adapters.aws.shared_application import SharedPostgresRequest
+        if job.get('postgres') is not None or job.get('cloud_sql') is not None:
+            raise ValueError('Shared and dedicated PostgreSQL bindings cannot coexist')
+        values = dict(job['shared_postgres'])
+        values['subnet_ids'] = tuple(values['subnet_ids'])
+        request = SharedPostgresRequest(**values)
+        request.validate()
+        aws = job.get('aws', {})
+        if (job.get('target') != 'aws-ecs-express'
+                or request.application_id != job.get('application_id')
+                or request.organization_id != job.get('organization_id')
+                or request.account != aws.get('expected_account')
+                or request.region != aws.get('region')
+                or request.vpc_id != aws.get('vpc_id')
+                or request.subnet_ids != tuple(aws.get('subnet_ids', []))
+                or request.service_security_group != aws.get('service_security_group')):
+            raise ValueError('Shared allocation owner or network differs from deployment record')
+        return request
     configuration = job.get('postgres')
     if configuration is None:
         return None

@@ -588,6 +588,10 @@ def check_database_consistency(
             raise ValueError("CV-03: Invalid target database binding")
         if postgres_request is None or database.get("database_id") != postgres_request.database_id:
             raise ValueError("CV-03: Target database identity differs from execution binding")
+        if callable(getattr(postgres_request, 'allocation', None)):
+            from dataclasses import asdict
+            if database.get('workload_binding') != asdict(postgres_request.allocation().binding()):
+                raise ValueError('CV-03: Shared logical database ownership differs from execution binding')
         resource = "new RDS PostgreSQL" if database["binding"] == "create" else "existing RDS PostgreSQL"
         if plan.get('target') == 'cloud-run':
             if database['binding'] != 'existing':

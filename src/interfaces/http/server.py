@@ -69,6 +69,7 @@ from application.snapshot_operations import SnapshotOperations
 from adapters.state.directory import StateDirectoryLock
 from adapters.state.records import DirectoryDeploymentRecordStore
 from ports.state import DeploymentRecordStore
+from application.local_shared_deployments import LocalSharedDeploymentsMixin
 from application.state_recovery import StateRecoveryMixin, postgres_request_from_job
 from domain.access import AccessResult, Action, LoginSource, ResourceOwner, Role, permitted, record_access
 from interfaces.http.alb_identity import AlbRequestAuthenticator
@@ -83,7 +84,7 @@ def dockerfile_diff(source: Path, plan: dict) -> str:
                                         tofile="Dockerfile"))
 
 
-class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDeploymentsMixin):
+class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDeploymentsMixin, LocalSharedDeploymentsMixin):
     def __init__(self, root: Path, ai_settings: AISettings | None = None, agent_factory=OpenAIDeployAgent,
                  cloud_settings: CloudRunSettings | None = None, aws_settings: AwsSettings | None = None,
                  monitor_interval: int = 300, infrastructure_planner_factory=OpenAIInfrastructurePlanner,
@@ -120,6 +121,10 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
         self.infrastructure_planner_factory = infrastructure_planner_factory
         self.cloud_settings = cloud_settings if cloud_settings is not None else CloudRunSettings.from_environment()
         self.aws_settings = aws_settings if aws_settings is not None else AwsSettings.from_environment()
+        self.local_shared_registration = None
+        if not self.hosted and os.environ.get('SKY_LOCAL_SHARED_POOL_REGISTRATION'):
+            from adapters.aws.shared_application import load_local_registration
+            self.local_shared_registration = load_local_registration(os.environ['SKY_LOCAL_SHARED_POOL_REGISTRATION'])
         self.recovery_warnings = []
         self.application_registry = ApplicationRegistry(self.root)
         self.postgres_operations = PostgresOperations(self.root / 'database-operations', self.aws_settings,
@@ -679,7 +684,7 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                 settings = AwsSettings(**job["aws"])
                 adapter_factory = lambda event: AwsExpressAdapter(event, settings, existing=job.get('prior_result'),
                                                                     checkpoint=checkpoint,
-                                                                    **({'rehearsal': True} if job.get('postgres') is None else {}))
+                                                                    **({'rehearsal': True} if job.get('postgres') is None and job.get('shared_postgres') is None else {}))
             tools = DeploymentTools(Path(job["project"]), self.root / job_id / "work", job_id,
                                     environment, lambda s, m: self.event(job_id, s, m), checkpoint,
                                     attempts=job.get("attempts", 0), adapter_factory=adapter_factory, target=target,
@@ -699,6 +704,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
             result = DeploymentAgent(self.agent_factory(self.ai_settings), tools,
                                      steps=job.get("steps", 0),
                                      max_steps=40 if job.get('sqlite_conversion') else 24).run()
+            if job.get('shared_postgres') is not None:
+                result = self.verify_shared_result(job_id, result, settings, checkpoint)
             checkpoint(status="succeeded", result=result, missing_environment=[], deployment_state="active")
             if job.get('replaces_job_id'):
                 with self.lock:
@@ -1647,6 +1654,9 @@ def handler_for(app: App):
             if self.path == "/api/config":
                 self.json_response(200, {"ai_available": app.ai_settings.available,
                     "ai_model": app.ai_settings.model if app.ai_settings.available else None,
+                    "shared_database_auto": app.local_shared_registration is not None,
+                    "default_public_access": (not app.hosted and app.local_shared_registration is not None
+                                               and os.environ.get('SKY_LOCAL_PUBLIC_ACCESS') == 'true'),
                     "monitor_interval": app.monitor_interval,
                     "github_poll_interval": app.github_poll_interval,
                     "targets": [{"id": "auto", "name": "자동 선택 (AI·정적 규칙)", "available": app.ai_settings.available},
@@ -2268,7 +2278,9 @@ def handler_for(app: App):
                     if requested_target not in {"auto", "local-docker", "onprem-compose", "onprem-vm", "cloud-run", "aws-ecs-express"}:
                         raise ValueError("Unsupported deployment target")
                     target = requested_target
-                    public_flag = self.headers.get("X-Public-Access", "false")
+                    public_flag = self.headers.get("X-Public-Access", "true" if (
+                        not app.hosted and app.local_shared_registration is not None
+                        and os.environ.get('SKY_LOCAL_PUBLIC_ACCESS') == 'true') else "false")
                     if public_flag not in {"true", "false"}:
                         raise ValueError("Invalid public access selection")
                     public_url_required = self.headers.get('X-Public-URL-Required', 'false')
@@ -2393,6 +2405,19 @@ def handler_for(app: App):
                         finally:
                             archive.unlink(missing_ok=True)
                         infrastructure_profile = inspect_infrastructure(project)
+                        if (app.local_shared_registration
+                                and (infrastructure_profile.storage == 'sqlite'
+                                     or infrastructure_profile.database_engines == ('postgresql',))
+                                and target in {'auto', 'aws-ecs-express'} and public_flag == 'true'
+                                and postgres_request is None and create_plan_id is None
+                                and local_sqlite_mount is None):
+                            app.create_shared_job(job_id, project, application_id, infrastructure_profile,
+                                self.request_owner(), True, requested_target=requested_target,
+                                public_url_required=public_url_required == 'true')
+                            app.clear_upload_marker(directory)
+                            started = app.start_job_worker(job_id, app.run_shared_then_agent)
+                            self.json_response(202, {'id': job_id, 'status': 'running' if started else 'interrupted'})
+                            return
                         if (target == 'auto' and public_flag == 'true'
                                 and postgres_request is None and local_sqlite_mount is None
                                 and sqlite_flag == 'false'

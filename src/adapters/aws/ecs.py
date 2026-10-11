@@ -68,7 +68,7 @@ def database_configuration_matches(configuration, database, expected_ssl_environ
     expected_environment = [
         {'name': 'PGHOST', 'value': database['endpoint']},
         {'name': 'PGPORT', 'value': str(database['port'])},
-        {'name': 'PGDATABASE', 'value': 'appdb'}]
+        {'name': 'PGDATABASE', 'value': database.get('database_name', 'appdb')}]
     ssl_profiles = ([expected_ssl_environment] if expected_ssl_environment is not None else [
         [{'name': 'PGSSLMODE', 'value': 'require'}],
         postgres_ssl_environment('python')])
@@ -99,6 +99,8 @@ class AwsSettings:
     expected_account: str = ''
     account_pin_required: bool = False
     service_security_group: str = ''
+    vpc_id: str = ''
+    subnet_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_environment(cls):
@@ -111,7 +113,9 @@ class AwsSettings:
                 region = ''
         return cls(region or '', expected_account=os.getenv('SKY_AWS_ACCOUNT_ID', ''),
                    account_pin_required=True,
-                   service_security_group=os.getenv('SKY_AWS_SERVICE_SECURITY_GROUP', ''))
+                   service_security_group=os.getenv('SKY_AWS_SERVICE_SECURITY_GROUP', ''),
+                   vpc_id=os.getenv('SKY_AWS_VPC_ID', ''),
+                   subnet_ids=tuple(filter(None, os.getenv('SKY_AWS_SUBNET_IDS', '').split(','))))
 
     def validate(self):
         if not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', self.region):
@@ -124,6 +128,18 @@ class AwsSettings:
             raise AwsConfigurationError('AWS 배포 전에 SKY_AWS_ACCOUNT_ID로 대상 계정을 지정하세요.')
         if self.service_security_group and not re.fullmatch(r'sg-[a-f0-9]{8,17}', self.service_security_group):
             raise AwsConfigurationError('SKY_AWS_SERVICE_SECURITY_GROUP에 유효한 보안 그룹 ID를 설정하세요.')
+
+        if bool(self.vpc_id) != bool(self.subnet_ids):
+            raise AwsConfigurationError('사용자 VPC와 서브넷은 함께 등록해야 합니다.')
+        if self.vpc_id:
+            if (not re.fullmatch(r'vpc-[a-f0-9]{8,17}', self.vpc_id)
+                    or not self.service_security_group
+                    or not isinstance(self.subnet_ids, (tuple, list))
+                    or not 2 <= len(self.subnet_ids) <= 8
+                    or len(set(self.subnet_ids)) != len(self.subnet_ids)
+                    or any(not re.fullmatch(r'subnet-[a-f0-9]{8,17}', item)
+                           for item in self.subnet_ids)):
+                raise AwsConfigurationError('등록된 VPC·서브넷·서비스 보안 그룹이 필요합니다.')
 
     def unavailable_reason(self):
         try:
@@ -201,14 +217,29 @@ class AwsExpressAdapter:
         if not group_id:
             return
         self.settings.validate()
-        vpcs = json.loads(self.aws(['ec2', 'describe-vpcs', '--filters', 'Name=isDefault,Values=true'],
+        vpc_args = (['--vpc-ids', self.settings.vpc_id] if self.settings.vpc_id else
+                    ['--filters', 'Name=isDefault,Values=true'])
+        vpcs = json.loads(self.aws(['ec2', 'describe-vpcs', *vpc_args],
                                    private=True, quiet=True)).get('Vpcs', [])
         if len(vpcs) != 1 or not re.fullmatch(r'vpc-[a-f0-9]{8,17}', vpcs[0].get('VpcId', '')):
             raise AwsConfigurationError('AWS 기본 VPC를 하나로 확인하지 못했습니다.')
+        if self.settings.vpc_id:
+            if vpcs[0]['VpcId'] != self.settings.vpc_id or vpcs[0].get('OwnerId') != self.settings.expected_account:
+                raise AwsConfigurationError('등록된 VPC의 소유권이 다릅니다.')
+            subnets = json.loads(self.aws(['ec2', 'describe-subnets', '--subnet-ids',
+                *self.settings.subnet_ids], private=True, quiet=True)).get('Subnets', [])
+            if (len(subnets) != len(self.settings.subnet_ids)
+                    or {item.get('SubnetId') for item in subnets} != set(self.settings.subnet_ids)
+                    or len({item.get('AvailabilityZone') for item in subnets}) < 2
+                    or any(item.get('VpcId') != self.settings.vpc_id
+                           or item.get('OwnerId') != self.settings.expected_account
+                           or item.get('State') != 'available' for item in subnets)):
+                raise AwsConfigurationError('등록된 서브넷의 VPC·계정·가용 영역이 다릅니다.')
         groups = json.loads(self.aws(['ec2', 'describe-security-groups', '--group-ids', group_id],
                                      private=True, quiet=True)).get('SecurityGroups', [])
         if (len(groups) != 1 or groups[0].get('GroupId') != group_id
                 or groups[0].get('VpcId') != vpcs[0]['VpcId']
+                or (self.settings.vpc_id and groups[0].get('OwnerId') != self.settings.expected_account)
                 or not service_group_ingress_is_restricted(groups[0])):
             raise AwsConfigurationError('추가 서비스 보안 그룹은 기본 VPC에 있어야 하며 인바운드는 단일 보안 그룹의 앱 포트만 허용해야 합니다.')
         self.event('infrastructure', '추가 ECS 서비스 보안 그룹의 VPC와 인바운드 규칙을 확인했습니다.')
@@ -289,7 +320,8 @@ class AwsExpressAdapter:
                 raise ValueError('PostgreSQL 접속 환경변수는 배포 시스템이 설정합니다.')
             environment = validate_environment(environment, [name for name in plan.required_env
                                                                if name not in managed_names])
-            database = AwsPostgresProvisioner(postgres).inspect_current()
+            database = (postgres.inspect(self) if callable(getattr(postgres, 'inspect', None))
+                        else AwsPostgresProvisioner(postgres).inspect_current())
         else:
             environment = validate_environment(environment, plan.required_env)
         reject_supplied_secrets_in_source(project, environment)
@@ -356,6 +388,8 @@ class AwsExpressAdapter:
             if (self.settings.service_security_group and self.settings.service_security_group not in
                     previous_configs[0].get('networkConfiguration', {}).get('securityGroups', [])):
                 raise AwsConfigurationError('기존 ECS 서비스의 보안 그룹 구성이 배포 기록과 다릅니다.')
+            if self.settings.subnet_ids and set(previous_configs[0].get('networkConfiguration', {}).get('subnets', [])) != set(self.settings.subnet_ids):
+                raise AwsConfigurationError('기존 ECS 서비스의 서브넷 구성이 등록된 네트워크와 다릅니다.')
             if not database_configuration_matches(previous_configs[0], database):
                 raise AwsConfigurationError('기존 ECS 서비스의 PostgreSQL 연결 구성이 배포 기록과 다릅니다.')
             previous_task_definition = previous_configs[0].get('taskDefinitionArn')
@@ -430,7 +464,7 @@ class AwsExpressAdapter:
             payload['primaryContainer']['environment'].extend([
                 {'name': 'PGHOST', 'value': database['endpoint']},
                 {'name': 'PGPORT', 'value': str(database['port'])},
-                {'name': 'PGDATABASE', 'value': 'appdb'}]
+                {'name': 'PGDATABASE', 'value': database.get('database_name', 'appdb')}]
                 + postgres_ssl_environment(plan.runtime))
             payload['primaryContainer']['secrets'] = [
                 {'name': 'PGUSER', 'valueFrom': database['secret_arn'] + ':username::'},
@@ -444,6 +478,8 @@ class AwsExpressAdapter:
             if self.settings.service_security_group:
                 payload['networkConfiguration'] = {
                     'securityGroups': [self.settings.service_security_group]}
+                if self.settings.subnet_ids:
+                    payload['networkConfiguration']['subnets'] = list(self.settings.subnet_ids)
         else:
             payload['serviceArn'] = self.service_arn
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='sky-aws-service-', encoding='utf-8') as spec:
@@ -509,6 +545,8 @@ class AwsExpressAdapter:
                     and self.settings.service_security_group not in
                     active[0].get('networkConfiguration', {}).get('securityGroups', [])):
                 raise AwsConfigurationError('ECS 서비스에 추가 보안 그룹이 적용되지 않았습니다.')
+            if settled and self.settings.subnet_ids and set(active[0].get('networkConfiguration', {}).get('subnets', [])) != set(self.settings.subnet_ids):
+                raise AwsConfigurationError('ECS 서비스에 등록된 서브넷이 적용되지 않았습니다.')
             if settled and not database_configuration_matches(
                     active[0], database, postgres_ssl_environment(plan.runtime) if database else None):
                 raise AwsConfigurationError('ECS 서비스의 PostgreSQL 역할·비밀·접속 설정이 예상과 다릅니다.')
@@ -550,6 +588,8 @@ class AwsExpressAdapter:
                 'service_arn': self.service_arn, 'image': self.image, 'target': 'aws-ecs-express',
                 'region': self.settings.region, 'account': account, 'public': True,
                 'service_security_group': self.settings.service_security_group,
+                **({'vpc_id': self.settings.vpc_id, 'subnet_ids': list(self.settings.subnet_ids)}
+                   if self.settings.vpc_id else {}),
                 'owner_attempt': owner_attempt, 'images': [*previous_images, self.image],
                 **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
                 **({'promotion': self.promoted_image} if self.promoted_image else {}),
