@@ -10,6 +10,7 @@ from pathlib import Path
 from application.analysis import AISettings, AnalysisError, parse_response, redact, source_context
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
+from application.sqlite_preparation import migration_manifest
 from engine.target_selection_context import automatic_target_context
 
 
@@ -217,7 +218,7 @@ def preflight_sqlite_conversion(project: Path, profile: InfrastructureProfile) -
                                       profile.source_signals)
     return ({'path': files[0].relative_to(project).as_posix(),
              'source_sha256': snapshot.source_sha256, 'row_counts': snapshot.row_counts,
-             'schema': snapshot.schema}, projected)
+             'schema': snapshot.schema, 'migration': migration_manifest(snapshot)}, projected)
 
 
 class OpenAIInfrastructurePlanner:

@@ -35,7 +35,7 @@ from application.infrastructure import inspect_infrastructure, validate_infrastr
 from application.local_sqlite import preflight_local_sqlite
 from application.npm_lockfile import sync_npm_lockfile
 from adapters.database.migrations import collect_sql_migrations
-from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
+from application.sqlite_preparation import stage_sqlite_migration
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.aws.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 from adapters.gcp.postgres import CloudSqlRequest
@@ -337,45 +337,15 @@ class DeploymentTools:
         conversion = self.sqlite_conversion
         if conversion is None or self.postgres_request is None:
             raise ValueError('검토된 SQLite → PostgreSQL 배포에서만 사용할 수 있습니다.')
-        relative = PurePosixPath(conversion['path'])
-        if relative.is_absolute() or '..' in relative.parts:
-            raise ValueError('SQLite 경로가 올바르지 않습니다.')
-        source = self.work.joinpath(*relative.parts)
-        migration_dir = self.work / 'migrations'
-        migration = migration_dir / '0000_sky_sqlite_import.sql'
-        if migration.is_file() and not source.exists():
-            original_snapshot = compile_sqlite_snapshot(self.original.joinpath(*relative.parts))
-            if (original_snapshot.source_sha256 != conversion['source_sha256']
-                    or original_snapshot.schema != conversion['schema']
-                    or migration.read_text(encoding='utf-8') != original_snapshot.sql):
-                raise ValueError('SQLite 이전 SQL이 준비 후 변경됐습니다.')
-            collect_sql_migrations(self.work)
-            return {'prepared': True, 'row_counts': conversion['row_counts']}
-        if migration_dir.exists() or not source.is_file() or source.is_symlink():
-            raise ValueError('작업용 SQLite 파일 또는 마이그레이션 경로가 예상과 다릅니다.')
-        snapshot = compile_sqlite_snapshot(source)
-        if (snapshot.source_sha256 != conversion['source_sha256']
-                or snapshot.row_counts != conversion['row_counts']
-                or snapshot.schema != conversion['schema']):
-            raise ValueError('SQLite 스냅샷이 업로드 사전 검사 후 변경됐습니다.')
-        migration_dir.mkdir(mode=0o700)
-        try:
-            with migration.open('x', encoding='utf-8') as output:
-                output.write(snapshot.sql)
-            collect_sql_migrations(self.work)
-            source.unlink()
-        except Exception:
-            migration.unlink(missing_ok=True)
-            migration_dir.rmdir()
-            raise
+        result = stage_sqlite_migration(self.original, self.work, conversion)
+        if result['resumed']:
+            return result
         self.plan = None
         self.source_transform = None
         self.event('editing', 'SQLite 스냅샷을 PostgreSQL 마이그레이션으로 변환했습니다.')
         self.checkpoint(change={'path': conversion['path'], 'diff': 'SQLite 데이터 파일 → PostgreSQL 마이그레이션'},
                         plan=None, source_transform=None)
-        return {'prepared': True, 'row_counts': snapshot.row_counts,
-                'source_sha256': snapshot.source_sha256,
-                'next': '앱의 SQLite 코드와 의존성을 PostgreSQL로 바꾸고 다시 설정하세요.'}
+        return result
 
     def sync_npm_lockfile(self):
         record = sync_npm_lockfile(self.original, self.work)
