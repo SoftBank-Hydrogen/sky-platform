@@ -244,10 +244,11 @@ def test_completion_commit_ack_loss_is_not_reexecuted(pipeline):
         assert consumer.consume_once() == "duplicate"
 
 
-def test_saved_prepared_result_requires_identical_fresh_artifact(pipeline):
+@pytest.mark.parametrize("reverse_delivery", [False, True])
+def test_saved_prepared_result_requires_identical_fresh_artifact(pipeline, reverse_delivery):
     from ports.remote_builds import digest
 
-    jobs, _, _, consumer, publisher = pipeline
+    jobs, _, queue, consumer, publisher = pipeline
     receipt = submit(pipeline)
     operation = jobs.operations.get(receipt["id"])
     lease = jobs.operations.claim(operation.id, operation.attempt_id, "dead-worker")
@@ -261,9 +262,12 @@ def test_saved_prepared_result_requires_identical_fresh_artifact(pipeline):
         },
     )
     publisher.dispatch_once()
-    # A published old attempt is discarded before the recovered attempt runs.
-    assert consumer.consume_once() == "duplicate"
-    assert consumer.consume_once() == "failed"
+    # Old and recovered attempts may be published in either order.
+    assert len(queue.messages) == 2
+    if reverse_delivery:
+        queue.messages.reverse()
+    assert sorted([consumer.consume_once(), consumer.consume_once()]) == ["duplicate", "failed"]
+    assert len(queue.deleted) == 2
     assert jobs.detail(principal(), receipt["id"])["result"]["reason"] == "invalid_source_or_review"
 
 
