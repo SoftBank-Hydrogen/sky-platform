@@ -98,10 +98,21 @@ def test_pool_admin_database_can_fence_when_app_database_connection_limit_is_ful
         root.execute(
             sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(app_role), sql.Literal(marker))
         )
-        held = psycopg.connect(**{**params, "dbname": binding.database_name, "user": app_role})
+        held = psycopg.connect(
+            **{**params, "dbname": binding.database_name, "user": app_role, "password": "validation-only"}
+        )
         with pytest.raises(psycopg.OperationalError):
-            psycopg.connect(**{**params, "dbname": binding.database_name, "user": admin_role})
-        admin_connect = lambda: psycopg.connect(**{**params, "dbname": control, "user": admin_role})
+            psycopg.connect(
+                **{
+                    **params,
+                    "dbname": binding.database_name,
+                    "user": admin_role,
+                    "password": "validation-only",
+                }
+            )
+        admin_connect = lambda: psycopg.connect(
+            **{**params, "dbname": control, "user": admin_role, "password": "validation-only"}
+        )
         fence = PostgresApplicationFence(
             admin_connect, binding, app_role, marker, administrative_database=control
         )
