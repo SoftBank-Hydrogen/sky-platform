@@ -154,3 +154,78 @@ def test_registration_audit_requires_real_private_routes_and_issued_certificate(
     session.certificate_status = "PENDING_VALIDATION"
     with pytest.raises(ValueError, match="Issued HTTPS"):
         audit_service_registration(spec(), session=session)
+
+
+def database_spec():
+    from adapters.aws.blue_green_services import DatabaseServiceAccess, PrivateControlAccess
+    from domain.database import DatabaseBinding
+
+    base = spec()
+    prefix = "arn:aws:secretsmanager:ap-northeast-2:977889523182:secret:"
+    access = tuple(
+        DatabaseServiceAccess(
+            DatabaseBinding(
+                "validation-org",
+                "validation-app",
+                role,
+                base.account_id,
+                base.region,
+                "source-instance" if index == 0 else "target-instance",
+                "app_db",
+                "owned-app",
+            ),
+            "sg-11111111" if index == 0 else "sg-22222222",
+            prefix + colour + "-abcdef",
+            colour + ".aaa.ap-northeast-2.rds.amazonaws.com",
+        )
+        for index, (role, colour) in enumerate((("shared_workload", "blue"), ("dedicated_workload", "green")))
+    )
+    return replace(
+        base,
+        database_access=access,
+        private_control=PrivateControlAccess(
+            "sg-33333333", (prefix + "blue-control-abcdef", prefix + "green-control-abcdef")
+        ),
+    )
+
+
+def test_database_and_control_access_are_scoped_and_not_exposed_through_public_alb():
+    registered = database_spec()
+    resources = service_template(registered)["Resources"]
+    control = resources["ControlSecurityGroup"]["Properties"]
+    assert control["SecurityGroupIngress"] == [
+        {"IpProtocol": "tcp", "FromPort": 8443, "ToPort": 8443, "SourceSecurityGroupId": "sg-33333333"}
+    ]
+    for index, colour in enumerate(("Blue", "Green")):
+        access = registered.database_access[index]
+        assert resources[colour + "DatabaseIngress"]["Properties"]["GroupId"] == access.security_group_id
+        container = resources[colour + "Task"]["Properties"]["ContainerDefinitions"][0]
+        environment = {value["Name"]: value["Value"] for value in container["Environment"]}
+        assert environment["SKY_DATABASE_SECRET_ARN"] == access.secret_arn
+        assert environment["SKY_CONTROL_SECRET_ARN"] == registered.private_control.secret_arns[index]
+        assert resources[colour + "Group"]["Properties"]["Port"] == 8080
+        assert resources[colour + "Service"]["Properties"]["LoadBalancers"][0]["ContainerPort"] == 8080
+    assert not any(
+        "password" in value["Name"].lower()
+        for colour in ("Blue", "Green")
+        for value in resources[colour + "Task"]["Properties"]["ContainerDefinitions"][0]["Environment"]
+    )
+
+
+def test_foreign_database_binding_or_public_control_port_is_rejected():
+    registered = database_spec()
+    with pytest.raises(ValueError, match="scope"):
+        service_template(
+            replace(
+                registered,
+                database_access=(
+                    replace(
+                        registered.database_access[0],
+                        binding=replace(registered.database_access[0].binding, application_id="foreign"),
+                    ),
+                    registered.database_access[1],
+                ),
+            )
+        )
+    with pytest.raises(ValueError, match="private control"):
+        service_template(replace(registered, private_control=replace(registered.private_control, port=8080)))

@@ -189,3 +189,34 @@ def test_repeated_parameter_page_cannot_prove_tls(prepared):
     with pytest.raises(ValueError, match='Ambiguous'):
         adapter.prepare(plan, operation_id=operation, guard=Mock())
     clients['rds'].create_db_instance.assert_not_called()
+
+
+def test_runtime_clients_preserve_provisioning_digest_and_require_ownership_guard(prepared):
+    old, plan, operation, clients, _, _ = prepared
+    session = Mock(client=Mock(side_effect=lambda name, **_: clients[name]))
+    guard = Mock(side_effect=ValueError('Foreign runtime client'))
+    adapter = AwsDedicatedDatabasePreparer(old.settings, session=session,
+        source_client_groups=('sg-22222222', 'sg-44444444'),
+        target_client_groups=('sg-22222222', 'sg-55555555'), network_guard=guard)
+    assert adapter.settings.digest == plan['target_configuration_digest']
+    assert adapter.audit.settings.allowed_client_groups == ('sg-22222222', 'sg-44444444')
+    assert adapter.network.settings.allowed_client_groups == ('sg-22222222', 'sg-55555555')
+    with pytest.raises(ValueError, match='Foreign runtime client'):
+        adapter.prepare(plan, operation_id=operation, guard=Mock())
+    guard.assert_called_once()
+    clients['rds'].create_db_instance.assert_not_called()
+    clients['ec2'].describe_security_groups.assert_not_called()
+
+
+@pytest.mark.parametrize('groups,guard', [
+    (('sg-22222222', 'sg-44444444'), None),
+    (('sg-44444444',), Mock()),
+    (('sg-22222222', 'sg-22222222'), Mock()),
+])
+def test_runtime_clients_cannot_be_implicit_remove_existing_or_duplicate(prepared, groups, guard):
+    old, _, _, clients, _, _ = prepared
+    session = Mock(client=Mock(side_effect=lambda name, **_: clients[name]))
+    with pytest.raises(ValueError):
+        AwsDedicatedDatabasePreparer(old.settings, session=session,
+            source_client_groups=groups, network_guard=guard)
+    clients['rds'].create_db_instance.assert_not_called()

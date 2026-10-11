@@ -53,7 +53,8 @@ class DedicatedDatabaseSettings:
 
 
 class AwsDedicatedDatabasePreparer:
-    def __init__(self, settings, *, session=None, connect=None, sleep=time.sleep, monotonic=time.monotonic):
+    def __init__(self, settings, *, session=None, connect=None, sleep=time.sleep, monotonic=time.monotonic,
+                 source_client_groups=None, target_client_groups=None, network_guard=None):
         if not isinstance(settings, DedicatedDatabaseSettings):
             raise TypeError("Dedicated settings required")
         if session is None:
@@ -62,10 +63,26 @@ class AwsDedicatedDatabasePreparer:
             session = boto3.Session(region_name=settings.source.pool.region)
         from botocore.config import Config
 
+        # Runtime app clients are separate from the immutable provisioning intent.
+        # An operator must register them explicitly and revalidate their ownership
+        # before each preflight. Never discover/accept arbitrary ingress sources.
+        runtime_clients = source_client_groups is not None or target_client_groups is not None
+        if runtime_clients and not callable(network_guard):
+            raise ValueError("Runtime database clients require an ownership guard")
+        if not runtime_clients and network_guard is not None:
+            raise ValueError("Network guard requires explicit runtime client registration")
+        self.network_guard = network_guard
         self.settings, self.sleep, self.monotonic = settings, sleep, monotonic
-        self.audit = AwsSharedDatabaseAllocator(settings.source, session=session, connect=connect)
-        self.network = AwsSharedDatabaseAllocator(replace(settings.source,
-            database_security_group=settings.database_security_group), session=session, connect=connect)
+        source_network = replace(settings.source, allowed_client_groups=(
+            settings.source.allowed_client_groups if source_client_groups is None else source_client_groups))
+        target_network = replace(settings.source, database_security_group=settings.database_security_group,
+            allowed_client_groups=(settings.source.allowed_client_groups
+                                   if target_client_groups is None else target_client_groups))
+        for network in (source_network, target_network):
+            if not set(settings.source.allowed_client_groups).issubset(network.allowed_client_groups):
+                raise ValueError("Runtime registration cannot discard existing database clients")
+        self.audit = AwsSharedDatabaseAllocator(source_network, session=session, connect=connect)
+        self.network = AwsSharedDatabaseAllocator(target_network, session=session, connect=connect)
         # Creation has no client token: don't let SDK retries repeat an uncertain mutation.
         self.rds = session.client("rds", region_name=settings.source.pool.region,
                                   config=Config(retries={"total_max_attempts": 1}))
@@ -88,6 +105,8 @@ class AwsDedicatedDatabasePreparer:
                 or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", target.database_name)
                 or not re.fullmatch(r"DBP-[a-f0-9]{16}", plan.get("plan_id", ""))):
             raise ValueError("Dedicated intent differs from the approved source/configuration")
+        if self.network_guard is not None:
+            self.network_guard()
         self.audit._audit()
         self.network._audit_network(5432)
         group = self.rds.describe_db_subnet_groups(DBSubnetGroupName=self.settings.subnet_group)["DBSubnetGroups"]

@@ -6,12 +6,29 @@ one task per colour is deliberate: multi-writer drain and scaling are separate
 contracts. Traffic remains 100/0 until the cutover controller changes it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import json
+from domain.database import DatabaseBinding
 import re
 
 
 def _match(value, pattern):
     return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+@dataclass(frozen=True)
+class DatabaseServiceAccess:
+    binding: DatabaseBinding
+    security_group_id: str
+    secret_arn: str
+    host: str
+
+
+@dataclass(frozen=True)
+class PrivateControlAccess:
+    worker_security_group_id: str
+    secret_arns: tuple[str, str]
+    port: int = 8443
 
 
 @dataclass(frozen=True)
@@ -30,12 +47,14 @@ class BlueGreenServiceSpec:
     images: tuple[str, str]
     port: int = 8080
     health_path: str = "/health"
+    database_access: tuple[DatabaseServiceAccess, DatabaseServiceAccess] | None = None
+    private_control: PrivateControlAccess | None = None
 
     def validate(self):
         if not _match(self.account_id, r"\d{12}") or not _match(self.region, r"[a-z]{2}(?:-[a-z]+)+-\d+"):
             raise ValueError("Pinned AWS account and region required")
         for identity in (self.application_id, self.organization_id):
-            if not _match(identity, r"[a-z][a-z0-9-]{2,47}"):
+            if not _match(identity, r"[a-z][a-z0-9_-]{2,127}"):
                 raise ValueError("Scoped application and organization identifiers required")
         if not _match(self.vpc_id, r"vpc-[a-f0-9]{8,17}"):
             raise ValueError("Registered VPC required")
@@ -74,6 +93,59 @@ class BlueGreenServiceSpec:
             raise ValueError("Unprivileged application port required")
         if not _match(self.health_path, r"/[A-Za-z0-9/_-]{0,127}"):
             raise ValueError("Bounded health check path required")
+
+        def secret_matches(arn):
+            return _match(
+                arn, f"arn:aws:secretsmanager:{self.region}:{self.account_id}:secret:[A-Za-z0-9/_+=.@!-]+"
+            )
+
+        if self.database_access is not None:
+            if not isinstance(self.database_access, tuple) or len(self.database_access) != 2:
+                raise ValueError("Two fixed database access registrations required")
+            for index, access in enumerate(self.database_access):
+                if not isinstance(access, DatabaseServiceAccess) or not isinstance(
+                    access.binding, DatabaseBinding
+                ):
+                    raise ValueError("Typed database binding registration required")
+                binding = access.binding
+                if (
+                    (
+                        binding.account_id,
+                        binding.region,
+                        binding.organization_id,
+                        binding.application_id,
+                        binding.role,
+                    )
+                    != (
+                        self.account_id,
+                        self.region,
+                        self.organization_id,
+                        self.application_id,
+                        ("shared_workload", "dedicated_workload")[index],
+                    )
+                    or not _match(access.security_group_id, r"sg-[a-f0-9]{8,17}")
+                    or not secret_matches(access.secret_arn)
+                    or not _match(access.host, r"[a-z0-9.-]+\.rds\.amazonaws\.com")
+                ):
+                    raise ValueError("Database scope, role or secret registration mismatch")
+            if self.database_access[0].binding.instance_id == self.database_access[1].binding.instance_id:
+                raise ValueError("Distinct source and target instances required")
+            if self.database_access[0].secret_arn == self.database_access[1].secret_arn:
+                raise ValueError("Distinct application database credentials required")
+        if self.private_control is not None:
+            control = self.private_control
+            if (
+                self.database_access is None
+                or not isinstance(control, PrivateControlAccess)
+                or not _match(control.worker_security_group_id, r"sg-[a-f0-9]{8,17}")
+                or type(control.port) is not int
+                or not 1024 <= control.port <= 65535
+                or control.port == self.port
+                or len(control.secret_arns) != 2
+                or control.secret_arns[0] == control.secret_arns[1]
+                or any(not secret_matches(arn) for arn in control.secret_arns)
+            ):
+                raise ValueError("Separate private control scope and per-colour secrets required")
 
 
 def service_template(spec: BlueGreenServiceSpec):
@@ -255,6 +327,81 @@ def service_template(spec: BlueGreenServiceSpec):
             "Tags": tags,
         },
     }
+    if spec.private_control is not None:
+        control = spec.private_control
+        resources["ControlSecurityGroup"] = {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Authenticated TLS application control, worker ingress only",
+                "VpcId": spec.vpc_id,
+                "Tags": tags,
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": control.port,
+                        "ToPort": control.port,
+                        "SourceSecurityGroupId": control.worker_security_group_id,
+                    }
+                ],
+                "SecurityGroupEgress": [
+                    {"IpProtocol": "tcp", "FromPort": 1, "ToPort": 1, "CidrIp": "127.0.0.1/32"}
+                ],
+            },
+        }
+    if spec.database_access is not None:
+        for index, colour in enumerate(("Blue", "Green")):
+            access = spec.database_access[index]
+            group = colour + "DatabaseSecurityGroup"
+            resources[group] = {
+                "Type": "AWS::EC2::SecurityGroup",
+                "Properties": {
+                    "GroupDescription": "Colour-specific fixed database access",
+                    "VpcId": spec.vpc_id,
+                    "Tags": tags,
+                    "SecurityGroupEgress": [
+                        {
+                            "IpProtocol": "tcp",
+                            "FromPort": 5432,
+                            "ToPort": 5432,
+                            "DestinationSecurityGroupId": access.security_group_id,
+                        }
+                    ],
+                },
+            }
+            resources[colour + "DatabaseIngress"] = {
+                "Type": "AWS::EC2::SecurityGroupIngress",
+                "Properties": {
+                    "GroupId": access.security_group_id,
+                    "IpProtocol": "tcp",
+                    "FromPort": 5432,
+                    "ToPort": 5432,
+                    "SourceSecurityGroupId": ref(group),
+                    "Description": "Sky owned fixed-binding app access",
+                },
+            }
+            resources[colour + "Service"]["DependsOn"] = ["Listener", colour + "DatabaseIngress"]
+            network = resources[colour + "Service"]["Properties"]["NetworkConfiguration"][
+                "AwsvpcConfiguration"
+            ]
+            network["SecurityGroups"].append(ref(group))
+            container = resources[colour + "Task"]["Properties"]["ContainerDefinitions"][0]
+            container["Environment"] += [
+                {"Name": "SKY_DATABASE_SECRET_ARN", "Value": access.secret_arn},
+                {
+                    "Name": "SKY_APPLICATION_BINDING_JSON",
+                    "Value": json.dumps(asdict(access.binding), sort_keys=True),
+                },
+                {"Name": "SKY_DATABASE_HOST", "Value": access.host},
+            ]
+            if spec.private_control is not None:
+                network["SecurityGroups"].append(ref("ControlSecurityGroup"))
+                container["PortMappings"].append(
+                    {"ContainerPort": spec.private_control.port, "Protocol": "tcp"}
+                )
+                container["Environment"] += [
+                    {"Name": "SKY_CONTROL_SECRET_ARN", "Value": spec.private_control.secret_arns[index]},
+                    {"Name": "SKY_CONTROL_PORT", "Value": str(spec.private_control.port)},
+                ]
     outputs = {
         name: {"Value": ref(name)}
         for name in (
@@ -321,6 +468,28 @@ def audit_service_registration(spec, *, session):
         )
         if public != (subnet in spec.public_subnets):
             raise ValueError("Registered public/private placement differs from effective routes")
+    if spec.database_access is not None or spec.private_control is not None:
+        groups = {access.security_group_id for access in (spec.database_access or ())}
+        if spec.private_control is not None:
+            groups.add(spec.private_control.worker_security_group_id)
+        described = ec2.describe_security_groups(GroupIds=sorted(groups))["SecurityGroups"]
+        if {group["GroupId"] for group in described} != groups or any(
+            group["VpcId"] != spec.vpc_id for group in described
+        ):
+            raise ValueError("DB and worker groups must belong to the registered VPC")
+        for access in spec.database_access or ():
+            instance = session.client("rds").describe_db_instances(
+                DBInstanceIdentifier=access.binding.instance_id
+            )["DBInstances"]
+            if (
+                len(instance) != 1
+                or instance[0]["DBInstanceStatus"] != "available"
+                or instance[0]["Endpoint"]["Address"] != access.host
+                or instance[0]["Endpoint"]["Port"] != 5432
+                or access.security_group_id
+                not in {group["VpcSecurityGroupId"] for group in instance[0]["VpcSecurityGroups"]}
+            ):
+                raise ValueError("Actual database endpoint/security group differs from fixed binding")
     certificate = session.client("acm").describe_certificate(CertificateArn=spec.certificate_arn)[
         "Certificate"
     ]
