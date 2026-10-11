@@ -1,11 +1,10 @@
 """Real HTTPS transport; application/DB rebind callbacks are controlled fixtures."""
 
 import ipaddress
-import json
 import secrets
 import ssl
 from datetime import UTC, datetime, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -58,27 +57,24 @@ def https_app(tmp_path):
     token = secrets.token_urlsafe(32)
     calls = []
 
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
-            pass
+    from interfaces.http.application_control import application_control_handler
 
+    original = gate.control
+
+    def observed(command):
+        calls.append(command)
+        return original(command)
+
+    gate.control = observed
+
+    class Handler(application_control_handler(gate, token)):
         def do_POST(self):
             if self.path == "/redirect":
                 self.send_response(307)
                 self.send_header("Location", "/control")
                 self.end_headers()
                 return
-            if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token):
-                self.send_response(401)
-                self.end_headers()
-                return
-            command = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            calls.append(command)
-            body = json.dumps(gate.control(command)).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            return super().do_POST()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.socket = server_tls.wrap_socket(server.socket, server_side=True)
@@ -128,3 +124,41 @@ def test_tls_or_redirect_failure_never_reaches_application_gate(https_app, failu
     with pytest.raises(RuntimeError, match="reconciliation"):
         controller.quiesce(plan["source"])
     assert not calls and not gate.blocked and controller.uncertain
+
+
+@pytest.mark.parametrize("failure", [None, "untrusted_ca", "redirect", "wrong_identity"])
+def test_pinned_private_transport_preserves_tls_identity_and_never_redirects(https_app, failure):
+    from adapters.database.pinned_control_https import PinnedHTTPSControlTransport
+
+    _, plan, gate, traffic, calls, url, trust = https_app
+    controller = traffic()
+    endpoint = url + ("/redirect" if failure == "redirect" else "/control")
+    if failure == "wrong_identity":
+        endpoint = endpoint.replace("127.0.0.1", "wrong.control.internal")
+    context = ssl.create_default_context() if failure == "untrusted_ca" else trust
+    controller.transport = PinnedHTTPSControlTransport(
+        endpoint, controller._token, address="127.0.0.1", ssl_context=context, guard=lambda: None
+    )
+    if failure:
+        with pytest.raises(RuntimeError, match="reconciliation"):
+            controller.quiesce(plan["source"])
+        assert not calls and not gate.blocked
+    else:
+        controller.quiesce(plan["source"])
+        assert gate.blocked and len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "headers,data",
+    [
+        ({"Content-Type": "text/plain"}, b"{}"),
+        ({"Content-Type": "application/json", "Transfer-Encoding": "chunked"}, b"{}"),
+        ({"Content-Type": "application/json"}, b"x" * 16385),
+    ],
+)
+def test_authenticated_invalid_framing_never_reaches_gate(https_app, headers, data):
+    _, _, gate, traffic, calls, url, trust = https_app
+    headers = {**headers, "Authorization": "Bearer " + traffic()._token}
+    with pytest.raises(HTTPError) as error:
+        urlopen(Request(url + "/control", data=data, headers=headers), context=trust, timeout=5)
+    assert error.value.code == 400 and not calls and not gate.blocked
