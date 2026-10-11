@@ -65,8 +65,8 @@ def evaluate(records, criteria):
     )
 
 
-def test_sustained_pressure_creates_evidence_bound_capacity_proposal(setup):
-    records, policy, service = setup
+def test_sustained_pressure_creates_evidence_bound_capacity_proposal(operating_review_setup):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     samples(records)
     proposal = service.review(principal(), ID, policy, now=NOW)
@@ -81,8 +81,8 @@ def test_sustained_pressure_creates_evidence_bound_capacity_proposal(setup):
 @pytest.mark.parametrize(
     "change", ["spike", "gap", "foreign-db", "foreign-revision", "collector", "missing", "below"]
 )
-def test_spikes_gaps_unknown_and_foreign_metrics_do_not_trigger(setup, change):
-    records, policy, service = setup
+def test_spikes_gaps_unknown_and_foreign_metrics_do_not_trigger(operating_review_setup, change):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     history = samples(records)
     if change == "spike":
@@ -105,8 +105,8 @@ def test_spikes_gaps_unknown_and_foreign_metrics_do_not_trigger(setup, change):
     assert records.save_calls == 0
 
 
-def test_auto_consent_and_budget_record_approval_without_running_resources(setup):
-    records, policy, service = setup
+def test_auto_consent_and_budget_record_approval_without_running_resources(operating_review_setup):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     samples(records)
     consent = service.grant_automation(
@@ -136,8 +136,8 @@ def test_auto_consent_and_budget_record_approval_without_running_resources(setup
         ("policy", "consent_expired_or_scope_changed"),
     ],
 )
-def test_ineligible_automation_keeps_manual_approval(setup, change, reason):
-    records, policy, service = setup
+def test_ineligible_automation_keeps_manual_approval(operating_review_setup, change, reason):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     samples(records)
     service.grant_automation(
@@ -161,8 +161,10 @@ def test_ineligible_automation_keeps_manual_approval(setup, change, reason):
     assert proposal["decision"]["automatic_approval"]["reason"] == reason
 
 
-def test_time_only_cannot_enable_automation_and_missing_quote_cannot_be_manually_approved(setup):
-    records, policy, service = setup
+def test_time_only_cannot_enable_automation_and_missing_quote_cannot_be_manually_approved(
+    operating_review_setup,
+):
+    records, policy, service = operating_review_setup
     with pytest.raises(ValueError, match="Elapsed time"):
         service.grant_automation(
             principal(),
@@ -179,16 +181,16 @@ def test_time_only_cannot_enable_automation_and_missing_quote_cannot_be_manually
         service.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
 
 
-def test_isolation_policy_is_independent_of_capacity(setup):
-    _, policy, service = setup
+def test_isolation_policy_is_independent_of_capacity(operating_review_setup):
+    _, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, replace(policy, isolation_required=True), now=NOW)
     assert proposal["plan"]["trigger"]["kind"] == "isolation_review"
     assert proposal["decision"]["reason"] == "isolation_required"
     assert proposal["status"] == "pending_approval"
 
 
-def test_three_metric_types_and_non_finite_measurements(setup):
-    records, _, _ = setup
+def test_three_metric_types_and_non_finite_measurements(operating_review_setup):
+    records, _, _ = operating_review_setup
     samples(records)
     for key in ("latency_p95_ms", "connections_percent", "storage_percent"):
         assert evaluate(
@@ -200,16 +202,16 @@ def test_three_metric_types_and_non_finite_measurements(setup):
     ]
 
 
-def test_future_or_duplicate_metric_timestamps_block(setup):
-    records, _, _ = setup
+def test_future_or_duplicate_metric_timestamps_block(operating_review_setup):
+    records, _, _ = operating_review_setup
     samples(records)
     records.health[1]["checked_at"] = records.health[0]["checked_at"]
     with pytest.raises(ValueError, match="strictly increasing"):
         evaluate(records, CapacityPromotionCriteria("owned-pool-monitor", connections_percent=80))
 
 
-def test_all_window_values_are_bound_to_proposal_identity(setup):
-    records, policy, service = setup
+def test_all_window_values_are_bound_to_proposal_identity(operating_review_setup):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     samples(records)
     first = service.review(principal(), ID, policy, now=NOW)

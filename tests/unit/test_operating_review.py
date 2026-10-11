@@ -20,7 +20,7 @@ ID = "a" * 16
 
 
 @pytest.fixture
-def setup():
+def operating_review_setup():
     source = DatabaseBinding(
         "org1", "game", "shared_workload", "111111111111", "ap-northeast-2", "pool", "game", "app-game"
     )
@@ -44,8 +44,8 @@ def setup():
     return records, policy, OperatingReview(records)
 
 
-def test_due_review_is_persisted_without_deployment_mutation_and_is_idempotent(setup):
-    records, policy, service = setup
+def test_due_review_is_persisted_without_deployment_mutation_and_is_idempotent(operating_review_setup):
+    records, policy, service = operating_review_setup
     before = deepcopy(records.job)
     proposal = service.review(principal(), ID, policy, now=NOW)
     assert proposal["status"] == "pending_approval"
@@ -58,8 +58,8 @@ def test_due_review_is_persisted_without_deployment_mutation_and_is_idempotent(s
     assert records.save_calls == 1
 
 
-def test_approval_keeps_execution_blocked_and_duplicate_review_preserves_consent(setup):
-    records, policy, service = setup
+def test_approval_keeps_execution_blocked_and_duplicate_review_preserves_consent(operating_review_setup):
+    records, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, policy, now=NOW)
     approved = service.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
     assert approved["approval"]["user_id"] == "user1"
@@ -68,8 +68,8 @@ def test_approval_keeps_execution_blocked_and_duplicate_review_preserves_consent
     assert records.save_calls == 2
 
 
-def test_before_schedule_no_proposal_is_written(setup):
-    records, policy, service = setup
+def test_before_schedule_no_proposal_is_written(operating_review_setup):
+    records, policy, service = operating_review_setup
     policy = replace(policy, review_after="2026-10-12T00:00:00+00:00")
     assert service.review(principal(), ID, policy, now=NOW) is None
     assert records.save_calls == 0
@@ -86,8 +86,8 @@ def test_before_schedule_no_proposal_is_written(setup):
         {"reason": ""},
     ],
 )
-def test_missing_stale_or_unhealthy_observations_block(setup, change):
-    records, policy, service = setup
+def test_missing_stale_or_unhealthy_observations_block(operating_review_setup, change):
+    records, policy, service = operating_review_setup
     records.health[-1].update(change)
     with pytest.raises(ValueError):
         service.review(principal(), ID, policy, now=NOW)
@@ -105,8 +105,8 @@ def test_missing_stale_or_unhealthy_observations_block(setup, change):
         ("result", {}),
     ],
 )
-def test_incomplete_or_unsettled_bindings_fail_closed(setup, field, value):
-    records, policy, service = setup
+def test_incomplete_or_unsettled_bindings_fail_closed(operating_review_setup, field, value):
+    records, policy, service = operating_review_setup
     records.job[field] = value
     with pytest.raises(ValueError):
         service.review(principal(), ID, policy, now=NOW)
@@ -116,15 +116,15 @@ def test_incomplete_or_unsettled_bindings_fail_closed(setup, field, value):
 @pytest.mark.parametrize(
     "field,value", [("role", "sky_state"), ("application_id", "another"), ("organization_id", "another")]
 )
-def test_control_plane_and_foreign_workload_bindings_are_excluded(setup, field, value):
-    records, policy, service = setup
+def test_control_plane_and_foreign_workload_bindings_are_excluded(operating_review_setup, field, value):
+    records, policy, service = operating_review_setup
     records.job["workload_database_binding"][field] = value
     with pytest.raises(ValueError):
         service.review(principal(), ID, policy, now=NOW)
 
 
-def test_permissions_checked_for_review_and_approval(setup):
-    records, policy, service = setup
+def test_permissions_checked_for_review_and_approval(operating_review_setup):
+    records, policy, service = operating_review_setup
     with pytest.raises(PermissionError):
         service.review(principal(role=Role.VIEWER), ID, policy, now=NOW)
     with pytest.raises(FileNotFoundError):
@@ -140,8 +140,8 @@ def test_permissions_checked_for_review_and_approval(setup):
         ("source_digest", "e" * 64),
     ],
 )
-def test_changed_revision_or_runtime_invalidates_approval(setup, field, value):
-    records, policy, service = setup
+def test_changed_revision_or_runtime_invalidates_approval(operating_review_setup, field, value):
+    records, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, policy, now=NOW)
     records.job[field] = value
     with pytest.raises(ValueError):
@@ -149,8 +149,8 @@ def test_changed_revision_or_runtime_invalidates_approval(setup, field, value):
     assert records.save_calls == 1
 
 
-def test_new_observation_and_target_policy_invalidate_old_consent(setup):
-    records, policy, service = setup
+def test_new_observation_and_target_policy_invalidate_old_consent(operating_review_setup):
+    records, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, policy, now=NOW)
     records.health_revision += 1
     with pytest.raises(ValueError):
@@ -161,16 +161,16 @@ def test_new_observation_and_target_policy_invalidate_old_consent(setup):
         service.approve(principal(), ID, fresh["proposal_id"], policy, now=NOW)
 
 
-def test_cas_conflict_does_not_commit_a_proposal(setup):
-    records, policy, service = setup
+def test_cas_conflict_does_not_commit_a_proposal(operating_review_setup):
+    records, policy, service = operating_review_setup
     records.before_save = lambda store: setattr(store, "revision", store.revision + 1)
     with pytest.raises(RecordConflict):
         service.review(principal(), ID, policy, now=NOW)
     assert "operating_proposal" not in records.job
 
 
-def test_uncertain_commit_is_not_retried_and_subsequent_review_recovers(setup):
-    records, policy, service = setup
+def test_uncertain_commit_is_not_retried_and_subsequent_review_recovers(operating_review_setup):
+    records, policy, service = operating_review_setup
     records.uncertain = True
     with pytest.raises(OSError):
         service.review(principal(), ID, policy, now=NOW)
@@ -179,30 +179,30 @@ def test_uncertain_commit_is_not_retried_and_subsequent_review_recovers(setup):
     assert records.save_calls == 1
 
 
-def test_tampered_plan_is_not_approved(setup):
-    records, policy, service = setup
+def test_tampered_plan_is_not_approved(operating_review_setup):
+    records, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, policy, now=NOW)
     records.job["operating_proposal"]["plan"]["ready_to_cutover"] = True
     with pytest.raises(ValueError):
         service.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
 
 
-def test_websocket_policy_adds_session_drain_gate(setup):
-    _, policy, service = setup
+def test_websocket_policy_adds_session_drain_gate(operating_review_setup):
+    _, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, replace(policy, websocket_sessions=True), now=NOW)
     assert "websocket_session_drain" in {gate["name"] for gate in proposal["plan"]["required_gates"]}
 
 
-def test_legacy_health_without_revision_binding_is_not_promotion_evidence(setup):
-    records, policy, service = setup
+def test_legacy_health_without_revision_binding_is_not_promotion_evidence(operating_review_setup):
+    records, policy, service = operating_review_setup
     records.health[-1].pop("deployment_binding")
     with pytest.raises(ValueError, match="bound"):
         service.review(principal(), ID, policy, now=NOW)
     assert records.save_calls == 0
 
 
-def test_next_review_keeps_previous_consent_in_history(setup):
-    records, policy, service = setup
+def test_next_review_keeps_previous_consent_in_history(operating_review_setup):
+    records, policy, service = operating_review_setup
     proposal = service.review(principal(), ID, policy, now=NOW)
     approved = service.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
     records.health_revision += 1
@@ -212,8 +212,8 @@ def test_next_review_keeps_previous_consent_in_history(setup):
     assert records.job["operating_proposal_history"] == [approved]
 
 
-def test_capacity_configuration_digest_is_approved_and_change_invalidates_consent(setup):
-    _, policy, service = setup
+def test_capacity_configuration_digest_is_approved_and_change_invalidates_consent(operating_review_setup):
+    _, policy, service = operating_review_setup
     policy = replace(policy, target_configuration_digest="a" * 64)
     proposal = service.review(principal(), ID, policy, now=NOW)
     assert proposal["plan"]["target_configuration_digest"] == "a" * 64

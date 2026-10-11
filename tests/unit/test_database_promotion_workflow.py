@@ -21,8 +21,8 @@ pytest_plugins = ["tests.unit.test_operating_review"]
 
 
 @pytest.fixture
-def flow(setup):
-    records, policy, reviews = setup
+def flow(operating_review_setup):
+    records, policy, reviews = operating_review_setup
     proposal = reviews.review(principal(), ID, policy, now=NOW)
     approved = reviews.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
     operations = Mock()

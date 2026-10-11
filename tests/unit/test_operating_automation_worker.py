@@ -12,8 +12,8 @@ from tests.unit.test_promotion_policy import policy_with_criteria, samples
 pytest_plugins = ["tests.unit.test_operating_review", "tests.unit.test_dedicated_database_worker"]
 
 
-def test_bounded_review_resolves_consent_actor_and_is_idempotent(setup):
-    records, policy, service = setup
+def test_bounded_review_resolves_consent_actor_and_is_idempotent(operating_review_setup):
+    records, policy, service = operating_review_setup
     policy = policy_with_criteria(policy)
     samples(records)
     service.grant_automation(
@@ -36,8 +36,8 @@ def test_bounded_review_resolves_consent_actor_and_is_idempotent(setup):
     )
 
 
-def test_no_consent_means_no_collection_or_review(setup):
-    records, policy, _ = setup
+def test_no_consent_means_no_collection_or_review(operating_review_setup):
+    records, policy, _ = operating_review_setup
     controller = OperatingReviewController(records, {ID: policy}, clock=lambda: NOW)
     collect = Mock(side_effect=AssertionError("Must not collect"))
     assert controller.review_automations_once(Mock(), collect=collect)[0]["status"] == "no_automation_consent"
@@ -68,8 +68,8 @@ def test_cli_rejects_unbounded_or_mutating_review(registered, extra):
     assert error.value.code == 2
 
 
-def test_runtime_once_uses_metadata_only_without_allocator(registered, setup, capsys):
-    records, _policy, _service = setup
+def test_runtime_once_uses_metadata_only_without_allocator(registered, operating_review_setup, capsys):
+    records, _policy, _service = operating_review_setup
     with (
         patch("interfaces.operating_review_worker.load_hosted_identity", return_value=Mock()),
         patch("interfaces.operating_review_worker.RotatingDatabaseConnection", return_value=Mock()),

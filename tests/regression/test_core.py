@@ -379,7 +379,7 @@ class CoreTests(unittest.TestCase):
             (root / "package.json").write_text('{"scripts":{"start":"node x.js"}}')
             adapter = LocalDockerAdapter(lambda *_: None)
             with patch.object(adapter, "command") as command, patch('adapters.local.docker.time.sleep'), patch('adapters.local.docker.urllib.request.build_opener') as opener:
-                command.side_effect = ["", "container", "127.0.0.1:12345", "logs", ""]
+                command.side_effect = ["", "sha256:" + "a" * 64, "container", "127.0.0.1:12345", "logs", ""]
                 opener.return_value.open.side_effect = OSError("not ready")
                 with self.assertRaisesRegex(RuntimeError, "HTTP 200"):
                     adapter.deploy(root, analyze(root), "test")

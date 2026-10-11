@@ -13,8 +13,8 @@ from tests.unit.test_operating_review import ID, NOW
 pytest_plugins = ["tests.unit.test_operating_review"]
 
 
-def test_sql_collection_cannot_refresh_old_http_health(setup):
-    records, policy, review = setup
+def test_sql_collection_cannot_refresh_old_http_health(operating_review_setup):
+    records, policy, review = operating_review_setup
     policy = replace(policy, capacity_criteria=CapacityPromotionCriteria("collector", connections_percent=80))
     original = deepcopy(records.health[-1])
     original["checked_at"] = "2026-10-10T23:00:00+00:00"
@@ -34,8 +34,8 @@ def test_sql_collection_cannot_refresh_old_http_health(setup):
         review.review(principal(), ID, policy, now=NOW)
 
 
-def test_foreign_collector_and_concurrent_revision_are_blocked(setup):
-    records, policy, review = setup
+def test_foreign_collector_and_concurrent_revision_are_blocked(operating_review_setup):
+    records, policy, review = operating_review_setup
     policy = replace(policy, capacity_criteria=CapacityPromotionCriteria("collector", connections_percent=80))
     original = deepcopy(records.health)
     with pytest.raises(ValueError, match="scope"):

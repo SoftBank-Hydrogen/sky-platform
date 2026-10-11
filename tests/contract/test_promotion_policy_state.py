@@ -10,7 +10,7 @@ from interfaces.operating_review import OperatingReviewController
 from tests.contract.test_operation_store import database as database  # noqa: PLC0414
 from tests.unit.test_deployment_writes import principal
 from tests.unit.test_operating_review import ID, NOW
-from tests.unit.test_operating_review import setup as review_setup
+from tests.unit.test_operating_review import operating_review_setup as review_setup
 from tests.unit.test_promotion_policy import policy_with_criteria, samples
 
 operating_setup = pytest.fixture(name="operating_setup")(review_setup.__wrapped__)

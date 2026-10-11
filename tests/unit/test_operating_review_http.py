@@ -20,8 +20,8 @@ pytest_plugins = ["tests.unit.test_operating_review"]
 
 
 @pytest.fixture
-def web(setup, request):
-    records, policy, _ = setup
+def web(operating_review_setup, request):
+    records, policy, _ = operating_review_setup
     if getattr(request, "param", None) == "capacity":
         from tests.unit.test_promotion_policy import policy_with_criteria, samples
 
@@ -116,8 +116,8 @@ def test_changed_binding_and_unavailable_database_return_sanitized_errors(web):
     assert status == 503 and "private-secret" not in str(body)
 
 
-def test_policy_file_pins_account_and_rejects_duplicates(setup, tmp_path):
-    _, policy, _ = setup
+def test_policy_file_pins_account_and_rejects_duplicates(operating_review_setup, tmp_path):
+    _, policy, _ = operating_review_setup
     item = {"job_id": ID, **asdict(policy)}
     path = tmp_path / "policies.json"
     document = {"schema_version": 1, "policies": [item]}
