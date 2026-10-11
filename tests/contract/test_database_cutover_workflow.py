@@ -74,3 +74,65 @@ def test_failed_app_probe_retains_checkpoint_and_exclusive_scope(persisted, stor
         store.admit("game", "deploy", "unsafe-overlap", {})
     assert worker.execute(operation.id, operation.attempt_id)["status"] == "needs_attention"
     factory.assert_called_once()
+
+
+def test_http_consent_outbox_and_consumer_share_durable_operation(persisted, store):
+    import json
+    import threading
+    from dataclasses import replace
+    from http.client import HTTPConnection
+    from http.server import ThreadingHTTPServer
+
+    from application.database_cutover_workflow import KIND
+    from application.outbox import OutboxPublisher
+    from application.shared_database_consumer import AllocationQueueRouter, SharedDatabaseConsumer
+    from domain.access import LoginSource
+    from interfaces.database_cutover import DatabaseCutoverController
+    from interfaces.http.database_cutover import handler_for_database_cutover
+    from interfaces.http.shared_database import SharedDatabaseApp
+    from interfaces.operating_review import OperatingReviewController
+    from ports.queue import ReceivedOperation
+
+    admission, worker, records, factory, _, proposal_id = persisted
+    actor = replace(principal(), login_source=LoginSource.EXTERNAL_IDP)
+    app = SharedDatabaseApp(Mock(), Mock(check_ready=Mock()),
+        authenticator=Mock(authenticate_request=lambda _: actor), origin='http://127.0.0.1')
+    reviews = OperatingReviewController(records, admission.policies, clock=lambda: NOW)
+    controller = DatabaseCutoverController(reviews, admission)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for_database_cutover(app, reviews, controller))
+    app.origin = f'http://127.0.0.1:{server.server_port}'
+    thread = threading.Thread(target=server.serve_forever, daemon=True);thread.start()
+
+    def request(method, suffix='', document=None):
+        connection = HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+        try:
+            connection.request(method, f'/api/jobs/{ID}/database-cutover'+suffix,
+                json.dumps(document), {'Content-Type': 'application/json', 'Origin': app.origin})
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:connection.close()
+
+    try:
+        consent = {'proposal_id': proposal_id, 'request_key': 'real-postgres-http', 'confirm_cutover': True}
+        status, accepted = request('POST', document=consent)
+        assert status == 202 and accepted['status'] == 'queued'
+        assert request('POST', document=consent)[1]['operation_id'] == accepted['operation_id']
+        factory.assert_not_called()
+        cutover_queue, default, allocations = Mock(), Mock(), Mock()
+        router = AllocationQueueRouter(store, default, allocations, cutover_queue=cutover_queue)
+        report = OutboxPublisher(store, router, 'http-cutover-contract').dispatch_once()
+        assert report.confirmed == 1 and report.deferred == 0
+        default.publish.assert_not_called();allocations.publish.assert_not_called()
+        delivery = cutover_queue.publish.call_args.args[0]
+        message = delivery.message()
+        assert set(message) == {'version', 'workspace', 'operation_id', 'attempt_id', 'application_id'}
+        cutover_queue.receive.return_value = ReceivedOperation('receipt', message)
+        consumer = SharedDatabaseConsumer(store, cutover_queue, worker, kind=KIND)
+        assert consumer.consume_once() == 'succeeded'
+        cutover_queue.delete.assert_called_once()
+        assert request('GET', '/'+accepted['operation_id'])[1]['status'] == 'succeeded'
+        assert records.load_job(ID).record['workload_database_binding']['role'] == 'dedicated_workload'
+        assert consumer.consume_once() == 'duplicate'
+        factory.assert_called_once()
+    finally:
+        server.shutdown();server.server_close();thread.join(5)

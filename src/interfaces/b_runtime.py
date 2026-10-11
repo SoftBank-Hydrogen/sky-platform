@@ -180,6 +180,9 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if ("SKY_DATABASE_CUTOVER_REGISTRATIONS_JSON" in os.environ
+                or os.environ.get("SKY_DATABASE_CUTOVER_ENABLED", "false") != "false") and not args.shared_database_pool_config:
+            parser.error("Cutover intake requires hosted shared database API")
         if (args.operating_review_policy_config or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ) and not args.shared_database_pool_config:
             parser.error("Operating reviews require hosted shared database intake")
         if args.shared_database_pool_config:
@@ -311,6 +314,11 @@ def main(argv):
             if dedicated_url in {url, allocation_url}:
                 raise ValueError("Dedicated preparation queue must be separate")
             SqsOperationQueue(dedicated_url, region=settings.region, account_id=account, client=object())
+        cutover_url = os.environ.get("SKY_DATABASE_CUTOVER_QUEUE_URL", "")
+        if cutover_url:
+            if cutover_url in {url, allocation_url, dedicated_url}:
+                raise ValueError("Cutover queue must be separate")
+            SqsOperationQueue(cutover_url, region=settings.region, account_id=account, client=object())
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
     except ValueError:
@@ -333,6 +341,8 @@ def main(argv):
             else None,
             promotion_queue=SqsOperationQueue(dedicated_url, region=settings.region, account_id=account)
             if dedicated_url else None,
+            cutover_queue=SqsOperationQueue(cutover_url, region=settings.region, account_id=account)
+            if cutover_url else None,
         )
         publisher = OutboxPublisher(store, queue, "outbox-" + uuid4().hex)
         stop = threading.Event()

@@ -1,6 +1,7 @@
 """Explicit hosted shared DB intake composition; workload credentials stay in worker."""
 
 import os
+from datetime import UTC, datetime
 from http.server import ThreadingHTTPServer
 
 from adapters.state.deployment_reads import PostgresDeploymentReads
@@ -12,6 +13,7 @@ from adapters.state.postgres import (
 )
 from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
 from application.deployment_reads import DeploymentReadService
+from interfaces.database_cutover import DatabaseCutoverController, load_cutover_api_configuration
 from interfaces.http.mutation_requests import validate_origin
 from interfaces.http.shared_database import SharedDatabaseApp, handler_for_shared_database
 from interfaces.operating_review import OperatingReviewController, load_operating_policies
@@ -38,6 +40,8 @@ def run_shared_database_api(args, parser):
         policies = (load_operating_policies(policy_path, account_id=settings.pool.account_id,
                                            region=state.region)
                     if policy_path or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ else None)
+        registrations = load_cutover_api_configuration(policies=policies,
+            account_id=settings.pool.account_id, region=state.region, now=datetime.now(UTC).isoformat())
     except (ValueError, TypeError, KeyError, OSError):
         parser.error("Invalid shared database API configuration or identity settings")
     if args.check_config:
@@ -59,8 +63,17 @@ def run_shared_database_api(args, parser):
         if policies is not None:
             from interfaces.http.operating_review import handler_for_operating_review
 
-            handler = handler_for_operating_review(app, OperatingReviewController(
-                PostgresDeploymentRecordStore(connection, workspace=workspace), policies))
+            records = PostgresDeploymentRecordStore(connection, workspace=workspace)
+            controller = OperatingReviewController(records, policies)
+            handler = handler_for_operating_review(app, controller)
+            if registrations is not None:
+                from application.database_cutover_workflow import PromotionCutoverAdmission
+                from interfaces.http.database_cutover import handler_for_database_cutover
+
+                admission = PromotionCutoverAdmission(records, operations, policies, registrations,
+                    clock=lambda: datetime.now(UTC).isoformat(), enabled=True)
+                handler = handler_for_database_cutover(app, controller,
+                    DatabaseCutoverController(controller, admission))
         server = ThreadingHTTPServer((args.host, args.port), handler)
         print(f"Sky shared database review: {origin}/shared-database", flush=True)
         try:

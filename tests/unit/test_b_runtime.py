@@ -1,6 +1,7 @@
 """Runtime routing, fail-closed configuration and bounded outbox shutdown."""
 
 import json
+import os
 import sys
 import threading
 from contextlib import ExitStack
@@ -385,3 +386,20 @@ def test_api_rejects_invalid_environment_identity_without_echoing_it(
     assert "Invalid hosted identity configuration" in error_output
     assert "identity-123" not in error_output and "alice" not in error_output
     api_server[1].serve_forever.assert_not_called()
+
+
+def test_cutover_configuration_cannot_silently_start_read_only_api(monkeypatch):
+    monkeypatch.setenv('SKY_DATABASE_CUTOVER_ENABLED', 'true')
+    with pytest.raises(SystemExit) as error:
+        main(['api', '--check-config'])
+    assert error.value.code == 2
+
+
+def test_outbox_validates_distinct_cutover_fifo_without_aws_calls(worker_environment, monkeypatch):
+    url = 'https://sqs.ap-northeast-2.amazonaws.com/977889523182/cutover.fifo'
+    monkeypatch.setenv('SKY_DATABASE_CUTOVER_QUEUE_URL', url)
+    with patch('boto3.client', side_effect=AssertionError('AWS call')):
+        main(['worker', '--mode', 'outbox', '--check-config'])
+    monkeypatch.setenv('SKY_DATABASE_CUTOVER_QUEUE_URL', os.environ['SKY_JOB_QUEUE_URL'])
+    with pytest.raises(SystemExit):
+        main(['worker', '--mode', 'outbox', '--check-config'])
