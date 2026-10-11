@@ -393,7 +393,8 @@ def test_http_upload_preview_approve_submit_and_read(service, database, upload):
         assert status == 202
         assert request(port, origin, "/api/jobs/" + receipt["job_id"], method="GET")[0] == 200
         status, page = request(port, origin, "/prepare", method="GET")
-        assert status == 200 and "배포 계획 확인" in page and "textContent" in page
+        assert status == 200 and 'id="deploy"' in page and "textContent" in page
+        assert 'id="approve"' not in page and 'id="submit"' not in page
     assert counts(service, database) == [1, 1, 1, 1, 1]
 
 
@@ -527,3 +528,42 @@ def test_stale_preparation_cannot_finish_or_release_replacement_owner(service, d
         prepare(service, raw)
     service.previews.release(replacement)
     assert prepare(service, raw)["status"] == "ready"
+
+
+def test_one_action_http_infers_port_and_recovers_same_admission(service, database, upload):
+    raw = upload()
+    headers = {"Content-Type": "application/zip", "X-Application-Id": "game", "Idempotency-Key": "one-action"}
+    with http(service, database) as (port, origin, _):
+        status, receipt = request(port, origin, "/api/deployments", raw, headers)
+        assert status == 202 and receipt["status"] == "accepted"
+        assert request(port, origin, "/api/deployments", raw, headers) == (status, receipt)
+        status, job = request(port, origin, "/api/jobs/" + receipt["job_id"], method="GET")
+        assert status == 200 and job["plan"]["port"] == 8080
+        assert job["plan"]["health_path"] == "/"
+    assert counts(service, database) == [1, 1, 1, 1, 1]
+
+
+def test_one_action_does_not_admit_unconverted_sqlite(service, database, upload):
+    headers = {"Content-Type": "application/zip", "X-Application-Id": "game", "Idempotency-Key": "one-action"}
+    with http(service, database) as (port, origin, _):
+        status, result = request(port, origin, "/api/deployments", upload(sqlite=True), headers)
+        assert status == 422 and result["status"] == "blocked"
+        assert any(b["code"] == "sqlite_conversion_required" for b in result["blockers"])
+        assert "job_id" not in result
+    assert counts(service, database) == [1, 0, 0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ({"Authorization": "Bearer viewer"}, 403),
+        ({"Authorization": "missing"}, 403),
+        ({"Origin": "https://foreign.example"}, 403),
+    ],
+)
+def test_one_action_keeps_identity_role_and_origin_gates(service, database, upload, headers, expected):
+    base = {"Content-Type": "application/zip", "X-Application-Id": "game", "Idempotency-Key": "one-action"}
+    base.update(headers)
+    with http(service, database) as (port, origin, _):
+        assert request(port, origin, "/api/deployments", upload(), base)[0] == expected
+    assert counts(service, database) == [0, 0, 0, 0, 0]
