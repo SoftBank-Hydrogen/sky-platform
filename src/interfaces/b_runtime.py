@@ -99,23 +99,36 @@ def main(argv):
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
     api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
-    api.add_argument("--operating-review-policy-config", help="Operator-reviewed scheduled DB promotion policies")
+    api.add_argument(
+        "--operating-review-policy-config", help="Operator-reviewed scheduled DB promotion policies"
+    )
     api.add_argument(
         "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
     )
-    worker = modes.add_parser(
-        "worker", help="Outbox publisher, explicit or queued shared database allocation", allow_abbrev=False
-    )
+    worker = modes.add_parser("worker", help="Outbox, build and database workers", allow_abbrev=False)
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "build", "shared-database", "shared-database-queue",
-                 "dedicated-database", "dedicated-database-queue", "operating-review"),
+        choices=(
+            "outbox",
+            "build",
+            "shared-database",
+            "shared-database-queue",
+            "dedicated-database",
+            "dedicated-database-queue",
+            "operating-review",
+        ),
         required=True,
-        help="Select outbox or shared DB allocation execution; no app deployment consumer",
+        help="Select outbox publisher or build consumer; ECS deployment requires --deploy-built-image",
     )
     worker.add_argument(
-        "--collect-capacity-metrics", action="store_true",
+        "--deploy-built-image",
+        action="store_true",
+        help="Opt in to verified ECS deployment after remote build",
+    )
+    worker.add_argument(
+        "--collect-capacity-metrics",
+        action="store_true",
         help="Read app-scoped workload DB capacity during an operating review",
     )
     worker.add_argument("--pool-config")
@@ -164,7 +177,9 @@ def main(argv):
         except ValueError:
             parser.error("Invalid B migration database, account or workspace configuration")
         try:
-            run_migrations(RotatingDatabaseConnection(settings), workspace, account_id=account_id, region=settings.region)
+            run_migrations(
+                RotatingDatabaseConnection(settings), workspace, account_id=account_id, region=settings.region
+            )
             if args.shared_database_reviews:
                 from adapters.state.operations import PostgresOperationStore
                 from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
@@ -180,10 +195,14 @@ def main(argv):
             )
         return
     if args.mode == "api":
-        if ("SKY_DATABASE_CUTOVER_REGISTRATIONS_JSON" in os.environ
-                or os.environ.get("SKY_DATABASE_CUTOVER_ENABLED", "false") != "false") and not args.shared_database_pool_config:
+        if (
+            "SKY_DATABASE_CUTOVER_REGISTRATIONS_JSON" in os.environ
+            or os.environ.get("SKY_DATABASE_CUTOVER_ENABLED", "false") != "false"
+        ) and not args.shared_database_pool_config:
             parser.error("Cutover intake requires hosted shared database API")
-        if (args.operating_review_policy_config or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ) and not args.shared_database_pool_config:
+        if (
+            args.operating_review_policy_config or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ
+        ) and not args.shared_database_pool_config:
             parser.error("Operating reviews require hosted shared database intake")
         if args.shared_database_pool_config:
             from interfaces.shared_database_api import run_shared_database_api
@@ -244,6 +263,8 @@ def main(argv):
         return
     if not 1 <= args.interval <= 300:
         parser.error("--interval must be between 1 and 300 seconds")
+    if args.deploy_built_image and args.worker_mode != "build":
+        parser.error("--deploy-built-image requires --mode build")
     if args.worker_mode == "operating-review":
         from interfaces.operating_review_worker import run_operating_review
 
@@ -340,9 +361,11 @@ def main(argv):
             if allocation_url
             else None,
             promotion_queue=SqsOperationQueue(dedicated_url, region=settings.region, account_id=account)
-            if dedicated_url else None,
+            if dedicated_url
+            else None,
             cutover_queue=SqsOperationQueue(cutover_url, region=settings.region, account_id=account)
-            if cutover_url else None,
+            if cutover_url
+            else None,
         )
         publisher = OutboxPublisher(store, queue, "outbox-" + uuid4().hex)
         stop = threading.Event()

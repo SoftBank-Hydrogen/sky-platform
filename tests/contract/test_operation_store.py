@@ -228,8 +228,16 @@ def test_attention_after_observed_effect_retains_receipt_and_mutation_scope(stor
     assert not store.require_attention(lease, {})
     with pytest.raises(ApplicationBusy):
         admit(store, key="concurrent")
-    assert store.resolve_attention(operation.id, operation.attempt_id, held.row_version, intent,
-                                   receipt, {"stage": "target_prepared"}, resolver="operator", outcome="resume")
+    assert store.resolve_attention(
+        operation.id,
+        operation.attempt_id,
+        held.row_version,
+        intent,
+        receipt,
+        {"stage": "target_prepared"},
+        resolver="operator",
+        outcome="resume",
+    )
     resumed = store.get(operation.id)
     assert resumed.status == "queued" and not resumed.external_pending
     assert resumed.external_receipt["observation"] == receipt

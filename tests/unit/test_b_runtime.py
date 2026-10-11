@@ -389,17 +389,17 @@ def test_api_rejects_invalid_environment_identity_without_echoing_it(
 
 
 def test_cutover_configuration_cannot_silently_start_read_only_api(monkeypatch):
-    monkeypatch.setenv('SKY_DATABASE_CUTOVER_ENABLED', 'true')
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_ENABLED", "true")
     with pytest.raises(SystemExit) as error:
-        main(['api', '--check-config'])
+        main(["api", "--check-config"])
     assert error.value.code == 2
 
 
 def test_outbox_validates_distinct_cutover_fifo_without_aws_calls(worker_environment, monkeypatch):
-    url = 'https://sqs.ap-northeast-2.amazonaws.com/977889523182/cutover.fifo'
-    monkeypatch.setenv('SKY_DATABASE_CUTOVER_QUEUE_URL', url)
-    with patch('boto3.client', side_effect=AssertionError('AWS call')):
-        main(['worker', '--mode', 'outbox', '--check-config'])
-    monkeypatch.setenv('SKY_DATABASE_CUTOVER_QUEUE_URL', os.environ['SKY_JOB_QUEUE_URL'])
+    url = "https://sqs.ap-northeast-2.amazonaws.com/977889523182/cutover.fifo"
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_QUEUE_URL", url)
+    with patch("boto3.client", side_effect=AssertionError("AWS call")):
+        main(["worker", "--mode", "outbox", "--check-config"])
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_QUEUE_URL", os.environ["SKY_JOB_QUEUE_URL"])
     with pytest.raises(SystemExit):
-        main(['worker', '--mode', 'outbox', '--check-config'])
+        main(["worker", "--mode", "outbox", "--check-config"])

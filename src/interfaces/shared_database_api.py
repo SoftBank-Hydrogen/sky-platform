@@ -37,11 +37,17 @@ def run_shared_database_api(args, parser):
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
         policy_path = getattr(args, "operating_review_policy_config", None)
-        policies = (load_operating_policies(policy_path, account_id=settings.pool.account_id,
-                                           region=state.region)
-                    if policy_path or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ else None)
-        registrations = load_cutover_api_configuration(policies=policies,
-            account_id=settings.pool.account_id, region=state.region, now=datetime.now(UTC).isoformat())
+        policies = (
+            load_operating_policies(policy_path, account_id=settings.pool.account_id, region=state.region)
+            if policy_path or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ
+            else None
+        )
+        registrations = load_cutover_api_configuration(
+            policies=policies,
+            account_id=settings.pool.account_id,
+            region=state.region,
+            now=datetime.now(UTC).isoformat(),
+        )
     except (ValueError, TypeError, KeyError, OSError):
         parser.error("Invalid shared database API configuration or identity settings")
     if args.check_config:
@@ -70,10 +76,17 @@ def run_shared_database_api(args, parser):
                 from application.database_cutover_workflow import PromotionCutoverAdmission
                 from interfaces.http.database_cutover import handler_for_database_cutover
 
-                admission = PromotionCutoverAdmission(records, operations, policies, registrations,
-                    clock=lambda: datetime.now(UTC).isoformat(), enabled=True)
-                handler = handler_for_database_cutover(app, controller,
-                    DatabaseCutoverController(controller, admission))
+                admission = PromotionCutoverAdmission(
+                    records,
+                    operations,
+                    policies,
+                    registrations,
+                    clock=lambda: datetime.now(UTC).isoformat(),
+                    enabled=True,
+                )
+                handler = handler_for_database_cutover(
+                    app, controller, DatabaseCutoverController(controller, admission)
+                )
         server = ThreadingHTTPServer((args.host, args.port), handler)
         print(f"Sky shared database review: {origin}/shared-database", flush=True)
         try:

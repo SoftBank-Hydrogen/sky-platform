@@ -50,9 +50,14 @@ def load_dedicated_configuration(path, source):
         return result
 
     document = json.loads(data, object_pairs_hook=unique)
-    if (not isinstance(document, dict) or set(document) != {"version", "settings"}
-            or type(document["version"]) is not int or document["version"] != 1
-            or not isinstance(document["settings"], dict) or "source" in document["settings"]):
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"version", "settings"}
+        or type(document["version"]) is not int
+        or document["version"] != 1
+        or not isinstance(document["settings"], dict)
+        or "source" in document["settings"]
+    ):
         raise ValueError("Invalid dedicated registration")
     return DedicatedDatabaseSettings(source=source, **document["settings"])
 
@@ -63,12 +68,16 @@ def run_dedicated_database(args, parser):
             raise ValueError("Dedicated preparation cannot initialize or mutate the pool")
         state = PostgresStateSettings.from_environment()
         source, _ = load_pool_configuration(args.pool_config)
-        if (source.pool.account_id != os.environ.get("SKY_AWS_ACCOUNT_ID")
-                or source.pool.region != state.region or source.pool.control_database == state.database):
+        if (
+            source.pool.account_id != os.environ.get("SKY_AWS_ACCOUNT_ID")
+            or source.pool.region != state.region
+            or source.pool.control_database == state.database
+        ):
             raise ValueError("Dedicated and state registration mismatch")
         settings = load_dedicated_configuration(args.dedicated_config, source)
-        policies = load_operating_policies(args.operating_review_policy_config,
-                                          account_id=source.pool.account_id, region=state.region)
+        policies = load_operating_policies(
+            args.operating_review_policy_config, account_id=source.pool.account_id, region=state.region
+        )
         if any(policy.target_configuration_digest != settings.digest for policy in policies.values()):
             raise ValueError("Policy capacity/network digest differs from runtime registration")
         identity = load_hosted_identity(args)
@@ -107,18 +116,28 @@ def run_dedicated_database(args, parser):
         check_database_ready(connection, operations=True)
         records = PostgresDeploymentRecordStore(connection, workspace=workspace)
         operations = PostgresOperationStore(connection, workspace=workspace)
-        worker = PromotionPreparationWorker(records, operations, policies, AwsDedicatedDatabasePreparer(settings),
-            lambda user, org: current_membership(identity, user, org), owner="dedicated-db-" + uuid4().hex,
-            clock=lambda: datetime.now(UTC).isoformat())
+        worker = PromotionPreparationWorker(
+            records,
+            operations,
+            policies,
+            AwsDedicatedDatabasePreparer(settings),
+            lambda user, org: current_membership(identity, user, org),
+            owner="dedicated-db-" + uuid4().hex,
+            clock=lambda: datetime.now(UTC).isoformat(),
+        )
         if not queued:
             result = worker.execute(args.operation_id, args.attempt_id)
             print("Dedicated preparation: " + result["status"] + "; data/routing unchanged", flush=True)
             if result["status"] != "succeeded":
                 parser.exit(1, "Dedicated preparation requires review.\n")
             return
-        consumer = SharedDatabaseConsumer(operations,
+        consumer = SharedDatabaseConsumer(
+            operations,
             SqsOperationQueue(url, region=state.region, account_id=source.pool.account_id),
-            worker, protection=protection, kind=KIND)
+            worker,
+            protection=protection,
+            kind=KIND,
+        )
         stop = threading.Event()
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
         try:

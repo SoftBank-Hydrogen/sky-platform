@@ -24,6 +24,8 @@ from application.client_urls import check_browser_client_urls
 from application.consistency import (
     check_async_database_callers, check_database_consistency, check_port_consistency,
     check_postgres_node_dependency, check_postgres_numeric_parsers, PG_NUMERIC_PARSERS, check_source_change_scope,
+    check_python_connection_transactions,
+    check_python_dict_row_access,
     check_sqlite_migration_consistency, check_websocket_state_consistency,
     check_target_resource_consistency, require_health_result)
 from application.source_secrets import (reject_plaintext_cloud_secret_names,
@@ -33,7 +35,7 @@ from application.infrastructure import inspect_infrastructure, validate_infrastr
 from application.local_sqlite import preflight_local_sqlite
 from application.npm_lockfile import sync_npm_lockfile
 from adapters.database.migrations import collect_sql_migrations
-from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
+from application.sqlite_preparation import stage_sqlite_migration
 from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_response
 from adapters.aws.postgres import MANAGED_POSTGRES_ENV, PostgresRequest
 from adapters.gcp.postgres import CloudSqlRequest
@@ -82,6 +84,25 @@ queries, placeholders and dependencies with PostgreSQL equivalents in the workin
 PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE environment. Do not remove database behavior or claim that
 the conversion succeeded until the real migration, deployment and HTTP probe succeed. Report a blocker
 if the source is too complex to convert safely.
+For SQLite-converted Python apps using psycopg 3, sqlite3 `with conn:` commits/rolls back
+without closing the connection, whereas psycopg `with conn:` closes it on exit. Replace
+every existing connection-object context (including route parameters supplied by FastAPI
+Depends/get_db) with `with conn.transaction():` or explicit commit/rollback. Keep connection
+closing at the end of its request/lifetime; do not reuse a closed connection. CV-04 rejects
+remaining `with db:`/`with conn:` connection contexts. Ordinary file/cursor contexts are fine.
+Preserve transaction durability too: psycopg defaults to implicit transactions, so a SELECT
+before transaction() can start an outer transaction and make transaction() only a savepoint.
+Use autocommit=True together with explicit transaction() blocks, or explicitly commit/rollback
+the outer transaction. Preserve atomic multi-statement writes and rollback on exceptions.
+Inspect signup and create-then-read endpoints, not just health. Do not remove type information
+or rename variables to bypass CV-04. These Python rules apply to both AWS and GCP.
+SQLite sqlite3.Row allows both positional and named access; psycopg dict_row allows only
+column-name keys. When using dict_row, convert every fetched-row consumer, including
+COUNT/SUM queries, INSERT ... RETURNING, assigned rows and loops, to named keys. Give
+aggregate expressions explicit SQL aliases: SELECT COUNT(*) AS total then fetchone()["total"].
+Use RETURNING id then fetchone()["id"]. Do not switch the entire connection to tuple_row
+while routes still use row["name"]. Preserve the API's existing value types and JSON shape.
+CV-04 rejects statically proven positional access to dict rows before deployment.
 PostgreSQL client methods are asynchronous. When converting a synchronous SQLite API, inspect and update
 every caller (HTTP routes, WebSocket handlers, timers and shutdown) to await or handle returned promises.
 Do not treat an HTTP health response as proof that database-backed endpoints work.
@@ -316,45 +337,15 @@ class DeploymentTools:
         conversion = self.sqlite_conversion
         if conversion is None or self.postgres_request is None:
             raise ValueError('검토된 SQLite → PostgreSQL 배포에서만 사용할 수 있습니다.')
-        relative = PurePosixPath(conversion['path'])
-        if relative.is_absolute() or '..' in relative.parts:
-            raise ValueError('SQLite 경로가 올바르지 않습니다.')
-        source = self.work.joinpath(*relative.parts)
-        migration_dir = self.work / 'migrations'
-        migration = migration_dir / '0000_sky_sqlite_import.sql'
-        if migration.is_file() and not source.exists():
-            original_snapshot = compile_sqlite_snapshot(self.original.joinpath(*relative.parts))
-            if (original_snapshot.source_sha256 != conversion['source_sha256']
-                    or original_snapshot.schema != conversion['schema']
-                    or migration.read_text(encoding='utf-8') != original_snapshot.sql):
-                raise ValueError('SQLite 이전 SQL이 준비 후 변경됐습니다.')
-            collect_sql_migrations(self.work)
-            return {'prepared': True, 'row_counts': conversion['row_counts']}
-        if migration_dir.exists() or not source.is_file() or source.is_symlink():
-            raise ValueError('작업용 SQLite 파일 또는 마이그레이션 경로가 예상과 다릅니다.')
-        snapshot = compile_sqlite_snapshot(source)
-        if (snapshot.source_sha256 != conversion['source_sha256']
-                or snapshot.row_counts != conversion['row_counts']
-                or snapshot.schema != conversion['schema']):
-            raise ValueError('SQLite 스냅샷이 업로드 사전 검사 후 변경됐습니다.')
-        migration_dir.mkdir(mode=0o700)
-        try:
-            with migration.open('x', encoding='utf-8') as output:
-                output.write(snapshot.sql)
-            collect_sql_migrations(self.work)
-            source.unlink()
-        except Exception:
-            migration.unlink(missing_ok=True)
-            migration_dir.rmdir()
-            raise
+        result = stage_sqlite_migration(self.original, self.work, conversion)
+        if result['resumed']:
+            return result
         self.plan = None
         self.source_transform = None
         self.event('editing', 'SQLite 스냅샷을 PostgreSQL 마이그레이션으로 변환했습니다.')
         self.checkpoint(change={'path': conversion['path'], 'diff': 'SQLite 데이터 파일 → PostgreSQL 마이그레이션'},
                         plan=None, source_transform=None)
-        return {'prepared': True, 'row_counts': snapshot.row_counts,
-                'source_sha256': snapshot.source_sha256,
-                'next': '앱의 SQLite 코드와 의존성을 PostgreSQL로 바꾸고 다시 설정하세요.'}
+        return result
 
     def sync_npm_lockfile(self):
         record = sync_npm_lockfile(self.original, self.work)
@@ -516,6 +507,8 @@ class DeploymentTools:
         if self.plan is None:
             raise ValueError("Configure deployment after the most recent edit first")
         if self.sqlite_conversion is not None:
+            check_python_connection_transactions(self.original, self.work)
+            check_python_dict_row_access(self.work)
             check_postgres_node_dependency(self.work)
             check_postgres_numeric_parsers(self.work)
             check_async_database_callers(self.original, self.work,

@@ -26,26 +26,37 @@ def flow(setup):
     proposal = reviews.review(principal(), ID, policy, now=NOW)
     approved = reviews.approve(principal(), ID, proposal["proposal_id"], policy, now=NOW)
     operations = Mock()
-    admission = PromotionPreparationAdmission(records, operations, {ID: policy}, enabled=True, clock=lambda: NOW)
+    admission = PromotionPreparationAdmission(
+        records, operations, {ID: policy}, enabled=True, clock=lambda: NOW
+    )
     admission.admit(principal(), ID, approved["proposal_id"], "prepare-one")
     command = operations.admit.call_args.args[3]
-    operation = Operation(str(uuid4()), "game", KIND, "queued", str(uuid4()), command, {}, None,
-                          False, 1, None, None)
+    operation = Operation(
+        str(uuid4()), "game", KIND, "queued", str(uuid4()), command, {}, None, False, 1, None, None
+    )
     operations.get.return_value = operation
-    operations.claim.return_value = ExecutionLease(operation.id, operation.attempt_id, "preparer", 1,
-        datetime.now(UTC) + timedelta(minutes=15), "team")
+    operations.claim.return_value = ExecutionLease(
+        operation.id, operation.attempt_id, "preparer", 1, datetime.now(UTC) + timedelta(minutes=15), "team"
+    )
     operations.begin_external.return_value = operations.observe_external.return_value = True
     operations.complete.return_value = True
     preparer = Mock()
-    receipt = {"operation_id": operation.id, "plan_id": approved["plan"]["plan_id"],
-               "binding": approved["plan"]["target"], "status": "available",
-               "verified_scope": "rds_ownership_network_tls", "encrypted": True,
-               "publicly_accessible": False, "resource_id": "db-" + "A" * 26,
-               "password": "must-not-persist"}
+    receipt = {
+        "operation_id": operation.id,
+        "plan_id": approved["plan"]["plan_id"],
+        "binding": approved["plan"]["target"],
+        "status": "available",
+        "verified_scope": "rds_ownership_network_tls",
+        "encrypted": True,
+        "publicly_accessible": False,
+        "resource_id": "db-" + "A" * 26,
+        "password": "must-not-persist",
+    }
     preparer.prepare.return_value = receipt
     resolver = Mock(return_value=principal())
-    worker = PromotionPreparationWorker(records, operations, {ID: policy}, preparer, resolver,
-                                       owner="preparer", clock=lambda: NOW)
+    worker = PromotionPreparationWorker(
+        records, operations, {ID: policy}, preparer, resolver, owner="preparer", clock=lambda: NOW
+    )
     return worker, records, policy, operations, preparer, operation, receipt, resolver
 
 
@@ -63,7 +74,10 @@ def test_preparation_has_durable_intent_and_never_claims_data_or_traffic_moved(f
     result = operations.complete.call_args.args[1]
     assert "password" not in str(observed) and "must-not-persist" not in str(result)
     assert result["ready_to_cutover"] is False and result["promotion_status"] == "not_started"
-    assert "copy" in result["remaining_stages"] and records.job["workload_database_binding"]["role"] == "shared_workload"
+    assert (
+        "copy" in result["remaining_stages"]
+        and records.job["workload_database_binding"]["role"] == "shared_workload"
+    )
 
 
 def test_admission_is_disabled_until_executor_and_transport_are_registered(flow):
@@ -102,9 +116,17 @@ def test_revoked_approver_is_checked_separately(flow):
     preparer.prepare.assert_not_called()
 
 
-@pytest.mark.parametrize("field,value", [
-    ("status", "creating"), ("resource_id", "fake"), ("encrypted", False),
-    ("publicly_accessible", True), ("operation_id", "other"), ("binding", {})])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "creating"),
+        ("resource_id", "fake"),
+        ("encrypted", False),
+        ("publicly_accessible", True),
+        ("operation_id", "other"),
+        ("binding", {}),
+    ],
+)
 def test_incomplete_or_foreign_target_receipts_require_attention(flow, field, value):
     _, _, _, operations, _, _, receipt, _ = flow
     receipt[field] = value
@@ -133,10 +155,15 @@ def test_observation_commit_failure_is_not_retried_or_falsely_completed(flow):
 
 def test_recorded_receipt_resumes_without_recreating_target(flow):
     _, _, _, operations, preparer, operation, receipt, _ = flow
-    intent = {"kind": KIND, "operation_id": operation.id,
-              "plan_id": receipt["plan_id"], "target": receipt["binding"]}
-    operations.get.return_value = replace(operation, external_intent=intent, external_receipt=receipt,
-                                          checkpoint={"stage": "target_prepared"})
+    intent = {
+        "kind": KIND,
+        "operation_id": operation.id,
+        "plan_id": receipt["plan_id"],
+        "target": receipt["binding"],
+    }
+    operations.get.return_value = replace(
+        operation, external_intent=intent, external_receipt=receipt, checkpoint={"stage": "target_prepared"}
+    )
     assert run(flow)["status"] == "succeeded"
     preparer.prepare.assert_not_called()
     operations.begin_external.assert_not_called()

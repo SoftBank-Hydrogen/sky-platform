@@ -316,3 +316,134 @@ def test_missing_workflow_observation_times_out_without_repeating_dispatch(setup
     assert consumer.consume_once() == "needs_attention"
     assert consumer.store.get(operation.id).external_pending
     assert len(consumer.builder.requests) == 1
+
+
+class Deployer:
+    def __init__(self):
+        self.calls = []
+        self.failure = None
+        self.result = {"url": "https://game.ecs.ap-northeast-2.on.aws", "image": "verified"}
+
+    def prepare(self, request, result):
+        return {"kind": "ecs_deployment", "image": result["image"], "request_digest": digest(request)}
+
+    def create(self, intent):
+        self.calls.append(intent)
+        if self.failure:
+            raise self.failure
+
+    def observe(self, intent):
+        return self.result
+
+
+def test_verified_deployment_atomically_completes_job_and_releases_application(setup):
+    consumer, operation, database = setup
+    consumer.deployer = Deployer()
+    assert consumer.consume_once() == "succeeded"
+    current = consumer.store.get(operation.id)
+    record, _ = job(setup)
+    assert current.status == record["status"] == "succeeded"
+    assert current.result == record["result"] == consumer.deployer.result
+    assert not current.external_pending
+    assert record["deployment_state"] == "deployed"
+    assert len(consumer.deployer.calls) == len(consumer.queue.deleted) == 1
+    with database() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM sky_state.mutation_scopes WHERE workspace=%s",
+                (consumer.store.workspace,),
+            ).fetchone()[0]
+            == 0
+        )
+    assert consumer.consume_once() == "duplicate"
+    assert len(consumer.deployer.calls) == 1
+
+
+def test_uncertain_deployment_is_not_resubmitted_and_retains_aws_intent(setup):
+    consumer, operation, _ = setup
+    consumer.deployer = Deployer()
+    consumer.deployer.failure = OSError("create response lost")
+    assert consumer.consume_once() == "needs_attention"
+    current = consumer.store.get(operation.id)
+    assert current.external_pending and current.external_intent["kind"] == "ecs_deployment"
+    assert current.checkpoint["stage"] == "deploying"
+    assert job(setup)[0]["result"] is None
+    assert consumer.consume_once() == "duplicate"
+    assert len(consumer.deployer.calls) == 1
+
+
+def test_deployment_timeout_preserves_aws_intent_without_success(setup):
+    consumer, operation, _ = setup
+    consumer.deployer = Deployer()
+    consumer.deployment_timeout_seconds = 0
+    assert consumer.consume_once() == "needs_attention"
+    assert consumer.store.get(operation.id).external_pending
+    assert job(setup)[0]["result"] is None
+
+
+def test_deployment_completion_projection_failure_rolls_back_operation(setup):
+    consumer, operation, _ = setup
+    lease = consumer.store.claim(operation.id, operation.attempt_id, "worker")
+    result = Deployer().result
+    checkpoint = {"stage": "deployed", "deployment_result": result, "build_result": {"image": "verified"}}
+    consumer.store.begin_external(lease, {"kind": "ecs_deployment"})
+    consumer.store.observe_external(lease, result, checkpoint)
+    before, projection = consumer.store.get(operation.id), job(setup)
+    with patch.object(consumer.store, "_event", side_effect=ValueError("abort")), pytest.raises(ValueError):
+        consumer.store.deployment_complete(lease, checkpoint, result)
+    assert consumer.store.get(operation.id) == before and job(setup) == projection
+
+
+def test_observed_deployment_recovers_db_completion_without_second_create(setup):
+    consumer, operation, database = setup
+    consumer.deployer = Deployer()
+    lease = consumer.store.claim(operation.id, operation.attempt_id, "old")
+    request = request_for(operation, consumer.store.workspace, consumer.settings)
+    checkpoint = {
+        "stage": "deployed",
+        "request": request,
+        "request_digest": digest(request),
+        "verified_run": consumer.builder.run,
+        "build_result": consumer.objects.result(request),
+        "deployment_intent": {"kind": "ecs_deployment"},
+        "deployment_result": consumer.deployer.result,
+    }
+    consumer.store.begin_external(lease, {"kind": "ecs_deployment"})
+    consumer.store.observe_external(lease, consumer.deployer.result, checkpoint)
+    with database() as connection:
+        connection.execute(
+            "UPDATE sky_state.operations SET lease_until=clock_timestamp()-interval '1 second' WHERE workspace=%s AND id=%s",
+            (consumer.store.workspace, operation.id),
+        )
+    consumer.store.recover_expired()
+    current = consumer.store.get(operation.id)
+    consumer.queue.delivery = replace(
+        consumer.queue.delivery, message={**consumer.queue.delivery.message, "attempt_id": current.attempt_id}
+    )
+    assert consumer.consume_once() == "succeeded"
+    assert not consumer.builder.requests and not consumer.deployer.calls
+    assert job(setup)[0]["status"] == "succeeded"
+
+
+def test_existing_app_is_not_recreated_by_initial_deployment_executor(setup):
+    consumer, operation, database = setup
+    consumer.deployer = Deployer()
+    with database() as connection:
+        connection.execute(
+            """INSERT INTO sky_state.metadata_records (workspace,kind,record_id,document)
+            VALUES (%s,'job','previous',%s)""",
+            (
+                consumer.store.workspace,
+                psycopg.types.json.Jsonb(
+                    {
+                        "application_id": operation.application_id,
+                        "organization_id": operation.command["organization_id"],
+                        "status": "succeeded",
+                        "result": {"service": "previous"},
+                    }
+                ),
+            ),
+        )
+    assert consumer.consume_once() == "needs_attention"
+    assert not consumer.deployer.calls
+    assert not consumer.store.get(operation.id).external_pending

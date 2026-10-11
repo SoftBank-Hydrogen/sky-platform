@@ -21,14 +21,23 @@ ID = "a" * 16
 
 @pytest.fixture
 def setup():
-    source = DatabaseBinding("org1", "game", "shared_workload", "111111111111",
-                             "ap-northeast-2", "pool", "game", "app-game")
-    policy = ScheduledPromotionPolicy("after-30-days", "2026-10-10T00:00:00+00:00",
-                                      replace(source, role="dedicated_workload", instance_id="dedicated"))
+    source = DatabaseBinding(
+        "org1", "game", "shared_workload", "111111111111", "ap-northeast-2", "pool", "game", "app-game"
+    )
+    policy = ScheduledPromotionPolicy(
+        "after-30-days",
+        "2026-10-10T00:00:00+00:00",
+        replace(source, role="dedicated_workload", instance_id="dedicated"),
+    )
     records = Records()
-    records.job.update(status="succeeded", deployment_state="active", source_digest="b" * 64,
-                       result={"service": "owned-service", "image_digest": "sha256:" + "c" * 64},
-                       plan={"source_digest": "d" * 64}, workload_database_binding=asdict(source))
+    records.job.update(
+        status="succeeded",
+        deployment_state="active",
+        source_digest="b" * 64,
+        result={"service": "owned-service", "image_digest": "sha256:" + "c" * 64},
+        plan={"source_digest": "d" * 64},
+        workload_database_binding=asdict(source),
+    )
     records.health = [{"healthy": True, "reason": "HTTP checked", "checked_at": NOW}]
     records.health[-1]["deployment_binding"] = deployment_observation_binding(records.job)
     records.health_revision = 1
@@ -66,10 +75,17 @@ def test_before_schedule_no_proposal_is_written(setup):
     assert records.save_calls == 0
 
 
-@pytest.mark.parametrize("change", [
-    {"healthy": False}, {"checked_at": "2026-10-10T23:54:59+00:00"},
-    {"checked_at": "2026-10-11T00:00:01+00:00"}, {"checked_at": "invalid"},
-    {"checked_at": "2026-10-11T00:00:00"}, {"reason": ""}])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"healthy": False},
+        {"checked_at": "2026-10-10T23:54:59+00:00"},
+        {"checked_at": "2026-10-11T00:00:01+00:00"},
+        {"checked_at": "invalid"},
+        {"checked_at": "2026-10-11T00:00:00"},
+        {"reason": ""},
+    ],
+)
 def test_missing_stale_or_unhealthy_observations_block(setup, change):
     records, policy, service = setup
     records.health[-1].update(change)
@@ -78,10 +94,17 @@ def test_missing_stale_or_unhealthy_observations_block(setup, change):
     assert records.save_calls == 0
 
 
-@pytest.mark.parametrize("field,value", [
-    ("status", "running"), ("deployment_state", "deleted"),
-    ("release_rollback_state", "needs_attention"), ("source_digest", None),
-    ("workload_database_binding", None), ("result", {})])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "running"),
+        ("deployment_state", "deleted"),
+        ("release_rollback_state", "needs_attention"),
+        ("source_digest", None),
+        ("workload_database_binding", None),
+        ("result", {}),
+    ],
+)
 def test_incomplete_or_unsettled_bindings_fail_closed(setup, field, value):
     records, policy, service = setup
     records.job[field] = value
@@ -90,8 +113,9 @@ def test_incomplete_or_unsettled_bindings_fail_closed(setup, field, value):
     assert records.save_calls == 0
 
 
-@pytest.mark.parametrize("field,value", [
-    ("role", "sky_state"), ("application_id", "another"), ("organization_id", "another")])
+@pytest.mark.parametrize(
+    "field,value", [("role", "sky_state"), ("application_id", "another"), ("organization_id", "another")]
+)
 def test_control_plane_and_foreign_workload_bindings_are_excluded(setup, field, value):
     records, policy, service = setup
     records.job["workload_database_binding"][field] = value
@@ -108,9 +132,14 @@ def test_permissions_checked_for_review_and_approval(setup):
     assert records.save_calls == 0
 
 
-@pytest.mark.parametrize("field,value", [
-    ("result", {"service": "replacement"}), ("plan", {"source_digest": "e" * 64}),
-    ("source_digest", "e" * 64)])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("result", {"service": "replacement"}),
+        ("plan", {"source_digest": "e" * 64}),
+        ("source_digest", "e" * 64),
+    ],
+)
 def test_changed_revision_or_runtime_invalidates_approval(setup, field, value):
     records, policy, service = setup
     proposal = service.review(principal(), ID, policy, now=NOW)
