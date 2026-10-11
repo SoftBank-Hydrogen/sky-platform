@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -239,8 +239,10 @@ def test_opt_in_migration_command_is_repeatable_without_changing_existing_review
 
     review = store.review(ACTOR, JOB)
     monkeypatch.setenv("SKY_STATE_WORKSPACE", store.operations.workspace)
+    monkeypatch.setenv("SKY_AWS_ACCOUNT_ID", store.pool.account_id)
     with (
-        patch("adapters.state.postgres.PostgresStateSettings.from_environment"),
+        patch("adapters.state.postgres.PostgresStateSettings.from_environment",
+              return_value=Mock(region=store.pool.region)),
         patch("adapters.state.postgres.RotatingDatabaseConnection", return_value=database),
     ):
         main(["migrate", "--shared-database-reviews"])

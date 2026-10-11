@@ -10,13 +10,16 @@ from interfaces.operating_review import OperatingReviewController
 from tests.contract.test_operation_store import database as database  # noqa: PLC0414
 from tests.unit.test_deployment_writes import principal
 from tests.unit.test_operating_review import ID, NOW
+from tests.unit.test_operating_review import setup as review_setup
 from tests.unit.test_promotion_policy import policy_with_criteria, samples
+
+operating_setup = pytest.fixture(name="operating_setup")(review_setup.__wrapped__)
 
 pytest_plugins = ["tests.unit.test_operating_review"]
 
 
-def test_concurrent_timers_persist_one_approval_and_revocation_blocks_execution(database, setup):
-    fake, policy, _service = setup
+def test_concurrent_timers_persist_one_approval_and_revocation_blocks_execution(database, operating_setup):
+    fake, policy, _service = operating_setup
     policy = policy_with_criteria(policy)
     samples(fake)
     workspace = uuid4().hex
