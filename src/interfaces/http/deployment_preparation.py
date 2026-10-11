@@ -9,11 +9,11 @@ from assets import ASSET_ROOT
 from domain.access import Action, ResourceOwner, permitted
 from interfaces.http.deployment_approvals import DatabaseApprovalApp, handler_for_approvals
 from ports.deployment_previews import PreviewBusy, PreviewUnavailable
-from ports.operations import IdempotencyConflict
+from ports.operations import ApplicationBusy, IdempotencyConflict
 
 
 class DatabasePreparationApp(DatabaseApprovalApp):
-    def __init__(self, reads, approvals, preparation, *, authenticator, origin, workspace="team"):
+    def __init__(self, reads, approvals, preparation, *, authenticator, origin, workspace="team", sqlite_jobs=None):
         super().__init__(
             reads,
             approvals,
@@ -22,6 +22,7 @@ class DatabasePreparationApp(DatabaseApprovalApp):
             readiness=preparation.previews.check_ready,
             workspace=workspace,
         )
+        self.sqlite_jobs = sqlite_jobs
         self.preparation = preparation
         self.upload_slot = threading.BoundedSemaphore(1)
 
@@ -38,6 +39,7 @@ def handler_for_preparation(app):
                             "approval_submission": True,
                             "upload_enabled": True,
                             "preparation_mode": "static",
+                            "sqlite_preparation_enabled": app.sqlite_jobs is not None,
                             "deployment_consumer_enabled": False,
                             "targets": ["aws"],
                         },
@@ -52,7 +54,7 @@ def handler_for_preparation(app):
                     self.json_response(200, {"status": "ready", "mode": "deployment_preparation"})
                 return
             url = urlsplit(self.path)
-            if url.path == "/prepare":
+            if url.path in {"/", "/prepare"}:
                 if not self.authenticate_api():
                     return
                 payload = (ASSET_ROOT / "static/deployment-preparation.html").read_bytes()
@@ -62,6 +64,24 @@ def handler_for_preparation(app):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(payload)
+                return
+            sqlite_job = re.fullmatch(r"/api/sqlite-preparation-jobs/([0-9a-f-]{36})", self.path)
+            if sqlite_job:
+                if not self.authenticate_api():
+                    return
+                if app.sqlite_jobs is None:
+                    self.json_response(503, {"error": "SQLite preparation is disabled"})
+                    return
+                try:
+                    self.json_response(200, app.sqlite_jobs.detail(self.principal, sqlite_job[1]))
+                except PermissionError:
+                    self.json_response(403, {"error": "Preparation access denied"})
+                except FileNotFoundError:
+                    self.json_response(404, {"error": "Not found"})
+                except OSError:
+                    self.json_response(503, {"error": "Preparation temporarily unavailable"})
+                except ValueError:
+                    self.json_response(400, {"error": "Invalid preparation identity"})
                 return
             match = re.fullmatch(r"/api/deployment-previews/([0-9a-f-]{36})", self.path)
             if match:
@@ -101,7 +121,51 @@ def handler_for_preparation(app):
                 raise ValueError("Incomplete body")
             return data
 
+        def _sqlite_post(self, preview_id):
+            self.close_connection = True
+            if not self.authenticate_api():
+                return
+            if not permitted(self.principal, Action.DEPLOY, ResourceOwner(self.principal.organization_id, self.principal.user_id)):
+                self.json_response(403, {"error": "Preparation access denied"})
+                return
+            if self.headers.get_all("Origin") != [app.origin]:
+                self.json_response(403, {"error": "Invalid request origin"})
+                return
+            if app.sqlite_jobs is None:
+                self.json_response(503, {"error": "SQLite preparation is disabled"})
+                return
+            try:
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("Duplicate preparation field")
+                        result[key] = value
+                    return result
+                body = json.loads(self._body(1024, "application/json"), object_pairs_hook=unique)
+                if (not isinstance(body, dict) or set(body) != {"preview_digest"}
+                        or not isinstance(body["preview_digest"], str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", body["preview_digest"])):
+                    raise ValueError("Invalid preparation review")
+                key = self._header("Idempotency-Key")
+                app.readiness()
+                self.json_response(202, app.sqlite_jobs.submit(self.principal, preview_id, body["preview_digest"], key))
+            except PermissionError:
+                self.json_response(403, {"error": "Preparation access denied"})
+            except FileNotFoundError:
+                self.json_response(404, {"error": "Not found"})
+            except (PreviewUnavailable, ApplicationBusy, IdempotencyConflict):
+                self.json_response(409, {"error": "Preparation preview changed, expired or job is busy"})
+            except OSError:
+                self.json_response(503, {"error": "Preparation temporarily unavailable; retry the same request"})
+            except (ValueError, UnicodeError):
+                self.json_response(400, {"error": "Invalid preparation request"})
+
         def do_POST(self):
+            sqlite = re.fullmatch(r"/api/deployment-previews/([0-9a-f-]{36})/prepare-sqlite", self.path)
+            if sqlite:
+                self._sqlite_post(sqlite[1])
+                return
             approval = re.fullmatch(r"/api/deployment-previews/([0-9a-f-]{36})/approve", self.path)
             if self.path != "/api/deployment-previews" and not approval:
                 super().do_POST()

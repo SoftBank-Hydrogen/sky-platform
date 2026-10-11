@@ -36,6 +36,10 @@ def smoke(image: str) -> None:
             connection.executemany('INSERT INTO posts (title) VALUES (?)',
                                    [("O'Reilly",), ('한글',), ('deleted',)])
             connection.execute('DELETE FROM posts WHERE id = 3')
+            connection.execute('CREATE TABLE readings (value INTEGER, note TEXT)')
+            connection.executemany('INSERT INTO readings VALUES (?, ?)',
+                                   [(None, None), (7, 'same'), (7, 'same')])
+            connection.execute('CREATE TABLE empty_table (value TEXT)')
         source_before = source.read_bytes()
         snapshot = compile_sqlite_snapshot(source)
         migrations = root / 'project' / 'migrations'
@@ -54,7 +58,28 @@ def smoke(image: str) -> None:
                 time.sleep(1)
             else:
                 raise RuntimeError('PostgreSQL 컨테이너가 준비되지 않았습니다.')
-            docker('build', '-t', migrator_image, str(root / 'migrator'), timeout=300)
+            # Keep the verification VALUES intact while corrupting INSERTs.
+            # Same row counts must not allow changed values or multiplicities.
+            corruptions = [
+                snapshot.sql.replace("VALUES (2, '한글');", "VALUES (2, 'changed');", 1),
+                snapshot.sql.replace('VALUES (NULL, NULL);', "VALUES (7, 'same');", 1),
+            ]
+            for corrupted in corruptions:
+                if corrupted == snapshot.sql:
+                    raise AssertionError('Negative fixture did not change a source value')
+                rejected = subprocess.run(
+                    ['docker', 'exec', '-i', name, 'psql', '-X', '-v', 'ON_ERROR_STOP=1',
+                     '-U', 'postgres', '-d', 'postgres'],
+                    input='BEGIN;\n' + corrupted + '\nCOMMIT;\n', text=True,
+                    capture_output=True, timeout=30, check=False,
+                )
+                if rejected.returncode == 0 or 'division by zero' not in rejected.stderr:
+                    raise AssertionError('Changed values were not rejected by the integrity guard')
+                remaining = docker('exec', name, 'psql', '-X', '-A', '-t', '-U', 'postgres',
+                                   '-c', "SELECT count(*) FROM pg_tables WHERE schemaname='public'")
+                if remaining != '0':
+                    raise AssertionError('Rejected snapshot did not roll back all tables')
+            docker('build', '--network=host', '-t', migrator_image, str(root / 'migrator'), timeout=300)
             migrated = docker('run', '--rm', '--network', 'container:' + name,
                               '-e', 'PGHOST=127.0.0.1', '-e', 'PGDATABASE=postgres',
                               '-e', 'PGUSER=postgres', '-e', 'PGPASSWORD=sky-sqlite-smoke',
@@ -82,6 +107,8 @@ def smoke(image: str) -> None:
             print('PASS: production migrator applied SQLite snapshot once and skipped it on replay')
             print('PASS: SQLite rows, Unicode, apostrophe and identity sequence migrated to PostgreSQL')
             print('PASS: uploaded SQLite source remained unchanged')
+            print('PASS: same-count value and duplicate changes rejected with complete transaction rollback')
+            print('PASS: NULLs, duplicate rows and empty tables migrated through the production migrator')
         finally:
             docker('rm', '-f', name, timeout=30)
             subprocess.run(['docker', 'image', 'rm', migrator_image], capture_output=True,

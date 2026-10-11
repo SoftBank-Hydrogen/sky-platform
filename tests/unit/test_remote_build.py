@@ -410,3 +410,39 @@ def test_builder_runs_verified_source_in_real_local_docker(build_request, tmp_pa
         assert result.returncode == 0 and result.stdout.strip() == "verified-build-fixture"
     finally:
         subprocess.run(["docker", "image", "rm", image], check=False, capture_output=True)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://169.254.170.2",
+        "http://169.254.170.2:51679",
+        "http://169.254.170.2/api/e54c6fb442cd460d83b0c565a03affa6-3812634470",
+    ],
+)
+def test_task_protection_accepts_fargate_base_and_preserves_task_path(uri):
+    protection = EcsTaskProtection(uri)
+    response = Mock()
+    response.read.return_value = b'{"protection":{"ProtectionEnabled":true}}'
+    protection.opener = Mock()
+    protection.opener.open.return_value.__enter__ = Mock(return_value=response)
+    protection.opener.open.return_value.__exit__ = Mock(return_value=False)
+    protection.set(True)
+    request = protection.opener.open.call_args.args[0]
+    assert request.full_url == uri + "/task-protection/v1/state"
+    assert request.method == "PUT"
+    assert json.loads(request.data) == {"ProtectionEnabled": True, "ExpiresInMinutes": 5}
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://169.254.170.2/api/../credentials",
+        "http://169.254.170.2/api/e54c6fb442cd460d83b0c565a03affa6-3812634470?redirect=evil",
+        "http://169.254.170.2/api/e54c6fb442cd460d83b0c565a03affa6-3812634470#fragment",
+        "http://169.254.170.2/api/not-a-task",
+    ],
+)
+def test_task_protection_rejects_non_task_paths(uri):
+    with pytest.raises(ValueError):
+        EcsTaskProtection(uri)

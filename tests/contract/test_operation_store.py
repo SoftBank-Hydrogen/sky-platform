@@ -213,6 +213,36 @@ def test_sigterm_checkpoint_requeues_or_blocks_safely(store, database, external)
     assert not store.heartbeat(lease)
 
 
+def test_attention_after_observed_effect_retains_receipt_and_mutation_scope(store, database):
+    operation = store.admit("game", "db_dedicated_prepare", "prepare", {"plan_id": "test"})
+    lease = store.claim(operation.id, operation.attempt_id, "worker")
+    intent, receipt = {"plan_id": "test"}, {"resource_id": "owned-target"}
+    store.begin_external(lease, intent)
+    store.observe_external(lease, receipt, {"stage": "target_prepared"})
+    assert store.require_attention(lease, {"stage": "revalidation_after_external_effect"})
+    held = store.get(operation.id)
+    assert held.status == "needs_attention" and held.external_receipt == receipt
+    assert held.external_pending
+    assert held.external_intent == intent and held.attempt_id == operation.attempt_id
+    assert count(store, database, "mutation_scopes") == 1
+    assert not store.require_attention(lease, {})
+    with pytest.raises(ApplicationBusy):
+        admit(store, key="concurrent")
+    assert store.resolve_attention(
+        operation.id,
+        operation.attempt_id,
+        held.row_version,
+        intent,
+        receipt,
+        {"stage": "target_prepared"},
+        resolver="operator",
+        outcome="resume",
+    )
+    resumed = store.get(operation.id)
+    assert resumed.status == "queued" and not resumed.external_pending
+    assert resumed.external_receipt["observation"] == receipt
+
+
 def test_independent_recovery_scanners_do_not_create_duplicate_attempts(store, database):
     operation = admit(store)
     lease = store.claim(operation.id, operation.attempt_id, "worker")

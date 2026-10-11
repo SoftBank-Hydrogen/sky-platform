@@ -41,11 +41,13 @@ class EnvironmentHistoryTests(unittest.TestCase):
         events = []
         adapter = LocalDockerAdapter(lambda stage, message: events.append(message))
         temp_paths = []
-        def command(args, timeout=300):
+        def command(args, timeout=300, quiet=False):
             if args[1] == 'build':
                 context = Path(args[-1])
                 self.assertFalse(context.is_relative_to(self.project))
                 self.assertNotIn(self.secret, (context / 'Dockerfile').read_text())
+            if args[1:3] == ['image', 'inspect']:
+                return 'sha256:' + 'a' * 64
             if args[1] == 'run':
                 path = Path(args[args.index('--env-file') + 1])
                 temp_paths.append(path)

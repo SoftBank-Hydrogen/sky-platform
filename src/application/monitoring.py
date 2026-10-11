@@ -8,11 +8,28 @@ from datetime import datetime, timezone
 
 from application.analysis import redact
 from application.health import check_deployment
+from application.operating_review import deployment_observation_binding
+from application.session_evidence import bind_session_rehearsal
 from application.websocket_probe import WebSocketProbeError, probe_sky_game
 
 
 class MonitoringMixin:
     """Keep observations separate from deployment execution and state transitions."""
+
+    def record_session_rehearsal(self, job_id: str, receipt: dict) -> dict:
+        """Internal trusted-runner boundary; never accept public receipt uploads."""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not isinstance(job, dict) or job.get('id') != job_id:
+                raise ValueError('Deployment not found')
+            record = bind_session_rehearsal(job, receipt)
+            updated = json.loads(json.dumps(job))
+            updated['websocket_session_rehearsal'] = record
+            # The legacy save method converts I/O failure into deployment
+            # failure. Observational evidence must not alter deployment status.
+            self.record_store.save_job(job_id, updated)
+            job['websocket_session_rehearsal'] = record
+            return json.loads(json.dumps(record))
 
     def check_and_record_health(self, job_id: str, source: str = "manual") -> dict:
         if source not in {"automatic", "manual"}:
@@ -28,6 +45,7 @@ class MonitoringMixin:
             "checked_at": result.get("checked_at") or datetime.now(timezone.utc).isoformat(),
             "reason": redact(str(result.get("reason") or ""))[:300],
             "source": source,
+            "deployment_binding": deployment_observation_binding(snapshot),
         }
         with self.lock:
             current = self.jobs.get(job_id)
@@ -36,6 +54,7 @@ class MonitoringMixin:
                 or current.get("status") != "succeeded"
                 or current.get("deployment_state", "active") != "active"
                 or current.get("result") != snapshot["result"]
+                or deployment_observation_binding(current) != entry["deployment_binding"]
                 or (
                     source == "automatic"
                     and any(

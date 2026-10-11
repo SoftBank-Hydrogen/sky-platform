@@ -1,4 +1,4 @@
-"""Run the preparation page workflow with a DOM/fetch double, no browser or app code."""
+"""One action starts the reviewed hosted workflow and reports actual execution."""
 
 import shutil
 import subprocess
@@ -9,39 +9,51 @@ from assets import ASSET_ROOT
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node required for page workflow")
-def test_preparation_page_reuses_upload_keys_and_binds_approval_submission():
+def test_one_action_upload_approval_submission_and_http_result():
     program = r"""
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-const html=fs.readFileSync(process.argv[1],'utf8');const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
-const ids=['app','file','port','health','upload','reset','message','review','summary','blockers','approve','submit','receipt'];
-const els=Object.fromEntries(ids.map(id=>[id,{value:'',disabled:false,hidden:false,textContent:'',files:[]}]));
-els.app.value='tug-test';els.port.value='8080';els.health.value='/health';els.file.files=[{name:'game.zip',size:123,lastModified:1}];
-let calls=[],fail=true,blocked=false,next=0;const saved=new Map();
-const view={id:'11111111-1111-1111-1111-111111111111',status:'ready',application_id:'tug-test',plan:{port:8080},inspection:{},blockers:[],preview_digest:'a'.repeat(64),approval_id:null};
-const context={document:{getElementById:id=>els[id]},crypto:{randomUUID:()=>`upload${++next}`},
+const html=fs.readFileSync(process.argv[1],'utf8'),script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+assert(html.includes('app-shell'));assert(!html.includes('id="approve"'));assert(!html.includes('id="submit"'));
+function setup(mode){
+ const ids=['app','file','port','health','deploy','reset','message','jobSection','stage','visit','details','jobId','history'];
+ const els=Object.fromEntries(ids.map(id=>[id,{value:'',disabled:false,hidden:false,textContent:'',files:[]}]));
+ els.port.value='3000';els.health.value='/';els.file.files=[{name:'web.zip',size:100,lastModified:1}];
+ const saved=new Map(),calls=[],timers=[];let first=true;
+ const preview={id:'11111111-1111-1111-1111-111111111111',status:'ready',preview_digest:'a'.repeat(64),blockers:mode==='blocked'?[{message:'DB 연결 필요'}]:[]};
+ const ctx={document:{getElementById:id=>els[id]},crypto:{randomUUID:()=> 'upload-key'},URL,
  sessionStorage:{getItem:k=>saved.get(k),setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)},
- history:{replaceState(){}},location:{search:''},URLSearchParams,
- fetch:async(path,options)=>{calls.push({path,options});if(path==='/api/deployment-previews'){
-  if(fail){fail=false;throw Error('temporary failure');}return {ok:true,json:async()=>({...view,blockers:blocked?[{code:'sqlite_conversion_required'}]:[]})};}
-  if(path.endsWith('/approve'))return {ok:true,json:async()=>({id:'approval1'})};
-  if(path.endsWith('/submit'))return {ok:true,json:async()=>({job_id:'a'.repeat(16),operation_id:'operation1'})};throw Error('unexpected path');}};
-(async()=>{vm.runInNewContext(script,context);
- await els.upload.onclick();assert.equal(els.message.textContent,'temporary failure');
- const first=calls[0].options.headers['Idempotency-Key'];assert(saved.size);
- await els.upload.onclick();assert.equal(calls[1].options.headers['Idempotency-Key'],first);assert.equal(els.approve.disabled,false);
- await els.approve.onclick();assert.equal(calls[2].options.body,JSON.stringify({preview_digest:view.preview_digest}));
- assert.equal(els.submit.disabled,false);await els.submit.onclick();
- assert.equal(calls[3].path,'/api/deployment-approvals/approval1/submit');
- assert.equal(calls[3].options.body,JSON.stringify({request_key:'preview:'+view.id}));assert(els.receipt.textContent.includes('a'.repeat(16)));
- els.reset.onclick();assert.equal(saved.size,0);blocked=true;await els.upload.onclick();
- assert.equal(els.approve.disabled,true);assert.equal(els.submit.disabled,true);assert(els.blockers.textContent.includes('sqlite_conversion_required'));
+ setTimeout:fn=>timers.push(fn),fetch:async(path,options={})=>{
+ calls.push({path,options});let data;
+ if(path==='/api/jobs')data={items:[]};
+ else if(path==='/api/deployment-previews'){
+  if(mode==='retry'&&first){first=false;throw Error('upload response lost');}data=preview;
+ }else if(path.endsWith('/approve'))data={id:'approval1'};
+ else if(path.endsWith('/submit'))data={job_id:'a'.repeat(16)};
+ else if(path.startsWith('/api/jobs/'))data={status:mode==='waiting'?'deploying':'succeeded',result:{url:mode==='unsafe'?'javascript:alert(1)':'https://example.com'}};
+ else throw Error('Unexpected endpoint '+path);
+ return {ok:true,headers:{get:()=> 'application/json'},json:async()=>data};}};
+ vm.runInNewContext(script,ctx);return {els,saved,calls,timers};
+}
+(async()=>{
+ const s=setup('success');await s.els.deploy.onclick();
+ const write=s.calls.filter(c=>c.options.method==='POST');assert.equal(write.length,3);
+ assert.equal(write[0].options.headers['X-Application-Id'],'app-web');
+ assert.equal(write[1].options.body,JSON.stringify({preview_digest:'a'.repeat(64)}));
+ assert.equal(write[2].options.body,JSON.stringify({request_key:'preview:11111111-1111-1111-1111-111111111111'}));
+ assert.equal(s.els.stage.textContent,'배포 완료');assert.equal(s.els.visit.hidden,false);assert.equal(s.els.visit.href,'https://example.com/');
+ const b=setup('blocked');await b.els.deploy.onclick();assert(b.els.message.textContent.includes('DB 연결 필요'));assert.equal(b.calls.filter(c=>c.options.method==='POST').length,1);
+ const r=setup('retry');await r.els.deploy.onclick();assert.equal(r.els.message.textContent,'upload response lost');await r.els.deploy.onclick();
+ assert.equal(r.calls.filter(c=>c.path==='/api/deployment-previews').length,2);
+ assert(r.calls.filter(c=>c.path==='/api/deployment-previews').every(c=>c.options.headers['Idempotency-Key']==='upload-key'));
+ const w=setup('waiting');await w.els.deploy.onclick();assert.equal(w.els.visit.hidden,true);assert.notEqual(w.els.stage.textContent,'배포 완료');assert.equal(w.timers.length,1);assert(w.els.deploy.disabled);
+ const u=setup('unsafe');await u.els.deploy.onclick();assert.equal(u.els.visit.hidden,true);assert(!u.els.visit.href);
 })().catch(e=>{console.error(e);process.exit(1)});
 """
     result = subprocess.run(
         ["node", "-e", program, str(ASSET_ROOT / "static/deployment-preparation.html")],
-        check=False,
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     assert result.returncode == 0, result.stderr

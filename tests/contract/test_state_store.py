@@ -145,7 +145,14 @@ def test_health_and_github_settings_round_trip_through_injected_store(tmp_path):
     instance.save_github_sources()
     instance.set_github_source_enabled(source_id, False)
     restarted = app(tmp_path, store)
-    assert restarted.health_history[JOB_ID] == [{**finding, "source": "manual"}]
+    saved = instance.health_history[JOB_ID]
+    assert restarted.health_history[JOB_ID] == saved
+    assert len(saved) == 1
+    assert {key: saved[0][key] for key in (*finding, "source")} == {**finding, "source": "manual"}
+    binding = saved[0]["deployment_binding"]
+    assert binding["job_id"] == JOB_ID
+    assert binding["application_id"] is None and binding["source_revision"] is None
+    assert len(binding["runtime_digest"]) == len(binding["deployment_plan_digest"]) == 64
     assert restarted.github_sources[source_id]["enabled"] is False
     assert restarted.jobs[JOB_ID]["status"] == "succeeded"
     assert not (tmp_path / "github-sources.json").exists()
