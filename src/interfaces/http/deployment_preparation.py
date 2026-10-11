@@ -54,7 +54,7 @@ def handler_for_preparation(app):
                     self.json_response(200, {"status": "ready", "mode": "deployment_preparation"})
                 return
             url = urlsplit(self.path)
-            if url.path == "/prepare":
+            if url.path in {"/", "/prepare"}:
                 if not self.authenticate_api():
                     return
                 payload = (ASSET_ROOT / "static/deployment-preparation.html").read_bytes()
