@@ -1,6 +1,7 @@
 """Explicit upload/preview/approval composition; default runtime stays read-only."""
 
 import json
+import os
 import re
 import threading
 from urllib.parse import urlsplit
@@ -8,12 +9,16 @@ from urllib.parse import urlsplit
 from assets import ASSET_ROOT
 from domain.access import Action, ResourceOwner, permitted
 from interfaces.http.deployment_approvals import DatabaseApprovalApp, handler_for_approvals
+from ports.deployment_approvals import ApprovalUnavailable
 from ports.deployment_previews import PreviewBusy, PreviewUnavailable
 from ports.operations import ApplicationBusy, IdempotencyConflict
+from ports.state import RecordConflict
 
 
 class DatabasePreparationApp(DatabaseApprovalApp):
-    def __init__(self, reads, approvals, preparation, *, authenticator, origin, workspace="team", sqlite_jobs=None):
+    def __init__(
+        self, reads, approvals, preparation, *, authenticator, origin, workspace="team", sqlite_jobs=None
+    ):
         super().__init__(
             reads,
             approvals,
@@ -40,7 +45,9 @@ def handler_for_preparation(app):
                             "upload_enabled": True,
                             "preparation_mode": "static",
                             "sqlite_preparation_enabled": app.sqlite_jobs is not None,
-                            "deployment_consumer_enabled": False,
+                            "deployment_consumer_enabled": os.environ.get("SKY_DEPLOYMENT_CONSUMER_ENABLED")
+                            == "true",
+                            "one_action_upload": True,
                             "targets": ["aws"],
                         },
                     )
@@ -125,7 +132,11 @@ def handler_for_preparation(app):
             self.close_connection = True
             if not self.authenticate_api():
                 return
-            if not permitted(self.principal, Action.DEPLOY, ResourceOwner(self.principal.organization_id, self.principal.user_id)):
+            if not permitted(
+                self.principal,
+                Action.DEPLOY,
+                ResourceOwner(self.principal.organization_id, self.principal.user_id),
+            ):
                 self.json_response(403, {"error": "Preparation access denied"})
                 return
             if self.headers.get_all("Origin") != [app.origin]:
@@ -135,6 +146,7 @@ def handler_for_preparation(app):
                 self.json_response(503, {"error": "SQLite preparation is disabled"})
                 return
             try:
+
                 def unique(pairs):
                     result = {}
                     for key, value in pairs:
@@ -142,14 +154,20 @@ def handler_for_preparation(app):
                             raise ValueError("Duplicate preparation field")
                         result[key] = value
                     return result
+
                 body = json.loads(self._body(1024, "application/json"), object_pairs_hook=unique)
-                if (not isinstance(body, dict) or set(body) != {"preview_digest"}
-                        or not isinstance(body["preview_digest"], str)
-                        or not re.fullmatch(r"[0-9a-f]{64}", body["preview_digest"])):
+                if (
+                    not isinstance(body, dict)
+                    or set(body) != {"preview_digest"}
+                    or not isinstance(body["preview_digest"], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", body["preview_digest"])
+                ):
                     raise ValueError("Invalid preparation review")
                 key = self._header("Idempotency-Key")
                 app.readiness()
-                self.json_response(202, app.sqlite_jobs.submit(self.principal, preview_id, body["preview_digest"], key))
+                self.json_response(
+                    202, app.sqlite_jobs.submit(self.principal, preview_id, body["preview_digest"], key)
+                )
             except PermissionError:
                 self.json_response(403, {"error": "Preparation access denied"})
             except FileNotFoundError:
@@ -157,7 +175,9 @@ def handler_for_preparation(app):
             except (PreviewUnavailable, ApplicationBusy, IdempotencyConflict):
                 self.json_response(409, {"error": "Preparation preview changed, expired or job is busy"})
             except OSError:
-                self.json_response(503, {"error": "Preparation temporarily unavailable; retry the same request"})
+                self.json_response(
+                    503, {"error": "Preparation temporarily unavailable; retry the same request"}
+                )
             except (ValueError, UnicodeError):
                 self.json_response(400, {"error": "Invalid preparation request"})
 
@@ -167,7 +187,8 @@ def handler_for_preparation(app):
                 self._sqlite_post(sqlite[1])
                 return
             approval = re.fullmatch(r"/api/deployment-previews/([0-9a-f-]{36})/approve", self.path)
-            if self.path != "/api/deployment-previews" and not approval:
+            one_action = self.path == "/api/deployments"
+            if self.path != "/api/deployment-previews" and not approval and not one_action:
                 super().do_POST()
                 return
             self.close_connection = True
@@ -213,17 +234,21 @@ def handler_for_preparation(app):
                             r"[A-Za-z0-9_.:-]{1,128}", request_key
                         ):
                             raise ValueError("Invalid upload identity")
-                        port = self._header("X-Container-Port")
-                        health = self._header("X-Health-Path")
-                        if not re.fullmatch(r"[0-9]{4,5}", port):
-                            raise ValueError("Invalid port")
+                        if not one_action:
+                            port = self._header("X-Container-Port")
+                            health = self._header("X-Health-Path")
+                            if not re.fullmatch(r"[0-9]{4,5}", port):
+                                raise ValueError("Invalid port")
                         body = self._body(20 * 1024 * 1024, "application/zip")
                 except (ValueError, UnicodeError, OSError):
                     self.json_response(400, {"error": "Invalid preparation request"})
                     return
                 try:
                     app.readiness()
-                    if approval:
+                    if one_action:
+                        result = app.preparation.deploy(self.principal, application_id, request_key, body)
+                        self.json_response(202 if result["status"] == "accepted" else 422, result)
+                    elif approval:
                         result = app.preparation.approve(self.principal, approval[1], body["preview_digest"])
                         self.json_response(
                             200, {"id": result.id, "expires_at": result.expires_at.isoformat()}
@@ -242,7 +267,14 @@ def handler_for_preparation(app):
                     self.json_response(403, {"error": "Deployment preparation access denied"})
                 except FileNotFoundError:
                     self.json_response(404, {"error": "Not found"})
-                except (PreviewBusy, PreviewUnavailable, IdempotencyConflict):
+                except (
+                    PreviewBusy,
+                    PreviewUnavailable,
+                    ApprovalUnavailable,
+                    ApplicationBusy,
+                    IdempotencyConflict,
+                    RecordConflict,
+                ):
                     self.json_response(
                         409, {"error": "Preview is busy, changed, expired or requires preparation"}
                     )

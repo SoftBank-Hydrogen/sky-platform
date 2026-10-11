@@ -31,7 +31,7 @@ def test_hosted_entry_uses_preparation_page_and_preserves_authentication(path):
             body = response.read().decode()
             assert response.status == expected
             if expected == 200:
-                assert "deployment-previews" in body
+                assert "/api/deployments" in body
                 assert "aws-ecs-express" not in body
                 assert "__TOKEN__" not in body
                 assert response.getheader("Cache-Control") == "no-store"
