@@ -88,6 +88,16 @@ def assess_static_site(project: Path, profile: InfrastructureProfile) -> StaticS
     evidence: set[str] = set()
     reasons: list[str] = []
     server_markers = False
+    for name, paths in profile.source_signals:
+        if name in {
+            "function-handler",
+            "persistent-http-server",
+            "host-kernel-control",
+            "host-device-access",
+        }:
+            server_markers = True
+            evidence.update(paths)
+            reasons.append("서버 실행 신호 확인 필요: " + name)
     for name in SERVER_ENTRIES:
         if (project / name).is_file():
             server_markers = True

@@ -11,6 +11,12 @@ from adapters.state.service_volume import (
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "aws-backend":
+        from interfaces.native_aws import main as run_native
+
+        run_native(sys.argv[2:])
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] in {"api", "worker", "migrate"}:
         from interfaces.b_runtime import main as run_b_runtime
 

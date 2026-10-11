@@ -244,16 +244,36 @@ def infrastructure_compatibility(
     source_signals = dict(profile.source_signals)
 
     def check(rule_id: str, requirement: str, problem: str | None) -> None:
+        paths = evidence_by_requirement.get(requirement, source_signals.get(requirement, ()))
         constraints.append(
             {
                 "rule_id": rule_id,
                 "status": "violated" if problem else "satisfied",
                 "requirement": requirement,
-                "evidence_files": list(evidence_by_requirement.get(requirement, ())),
-                "evidence_ids": [
-                    evidence_id(requirement, path) for path in evidence_by_requirement.get(requirement, ())
-                ],
+                "evidence_files": list(paths),
+                "evidence_ids": [evidence_id(requirement, path) for path in paths],
                 "reason": problem or "현재 대상 어댑터의 선언과 충돌하지 않습니다.",
+            }
+        )
+
+    for kind in ("host-kernel-control", "host-device-access"):
+        if kind in source_signals:
+            check(
+                "HOST-CONTROL-01",
+                kind,
+                "호스트 커널·장치 제어 신호가 있습니다. 현재 Sky 어댑터는 해당 호스트 권한·장치를 제공하지 않습니다.",
+            )
+    if "function-handler" in source_signals and "persistent-http-server" not in source_signals:
+        constraints.append(
+            {
+                "rule_id": "RUNTIME-ENTRYPOINT-01",
+                "status": "unknown",
+                "requirement": "function-handler",
+                "evidence_files": list(source_signals["function-handler"]),
+                "evidence_ids": [
+                    evidence_id("function-handler", path) for path in source_signals["function-handler"]
+                ],
+                "reason": "함수 핸들러 신호가 있지만 컨테이너 HTTP 서버 진입점은 확인하지 못했습니다. 변환·검증이 필요합니다.",
             }
         )
 

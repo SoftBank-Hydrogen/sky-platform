@@ -126,12 +126,19 @@ class StateRecoveryMixin:
                     raise ValueError("Invalid project path")
                 if job.get("plan") is not None:
                     DeploymentPlan(**job["plan"])
-                elif job.get("mode") not in {"agent", "static_site"}:
+                elif job.get("mode") not in {"agent", "static_site", "native_aws"}:
                     raise ValueError("Missing deployment plan")
                 if job.get("mode") == "static_site" and (
                         job.get("target") != "aws-s3-cloudfront"
                         or job.get("attempt_id") != job_id + "-a1"):
                     raise ValueError("Invalid static deployment identity")
+                if job.get("mode") == "native_aws" and (
+                        job.get("target") not in {"aws-lambda", "aws-ec2"}
+                        or job.get("attempt_id") != job_id + "-a1"
+                        or not isinstance(job.get("native_plan"), dict)
+                        or job["native_plan"].get("target") != job["target"]
+                        or job["native_plan"].get("source_digest") != job.get("source_digest")):
+                    raise ValueError("Invalid native deployment identity")
                 postgres_request_from_job(job)
                 if job.get('postgres_creation_id') is not None and (
                         not isinstance(job['postgres_creation_id'], str)

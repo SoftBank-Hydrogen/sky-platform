@@ -64,7 +64,8 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertIn('aws-ecs-express', payload['deployment_policy']['allowed_targets'])
         self.assertIsNone(payload['deployment_policy']['max_monthly_cost_usd'])
         capability_models = payload['capability_models']
-        self.assertEqual(set(capability_models), set(reports) | {'aws-s3-cloudfront', 'aws-ecs-standard'})
+        self.assertEqual(set(capability_models), set(reports) |
+                         {'aws-s3-cloudfront', 'aws-ecs-standard', 'aws-lambda', 'aws-ec2'})
         self.assertTrue(all(model['schema_version'] == 1 for model in capability_models.values()))
         aws_capabilities = {item['id']: item for item in capability_models['aws-ecs-express']['capabilities']}
         self.assertEqual(aws_capabilities['existing_rds_binding']['display_status'], 'implemented_unverified')
@@ -119,6 +120,9 @@ class CompatibilityPreviewTests(unittest.TestCase):
             self.assertEqual(set(decision['evidence_ids']), evidence_ids)
             self.assertIn(decision['reason'], report['problems'])
         for candidate in payload['candidates']:
+            if candidate['sky_adapter_support'] == 'unimplemented':
+                self.assertEqual(candidate['status'], 'unsupported_by_sky')
+                continue
             self.assertEqual(candidate['status'], 'rejected')
             if candidate['id'] != 'aws-s3-cloudfront':
                 self.assertIn('DATA-SQLITE-01', candidate['violated_rule_ids'])
@@ -141,11 +145,12 @@ class CompatibilityPreviewTests(unittest.TestCase):
         self.assertTrue(all(item['status'] == 'inferred' for item in ir['evidence']))
         self.assertIn('session_affinity_behavior', ir['unknowns'])
         self.assertIn('target_websocket_round_trip', ir['unknowns'])
-        self.assertEqual({item['status'] for item in payload['candidates'] if item['id'] != 'aws-s3-cloudfront'},
+        self.assertEqual({item['status'] for item in payload['candidates']
+                          if item['id'] != 'aws-s3-cloudfront' and item['sky_adapter_support'] == 'implemented'},
                          {'needs_review'})
         self.assertTrue(all('PROTOCOL-WS-01' in item['unknown_rule_ids']
                             and item['evidence_ids'] for item in payload['candidates']
-                            if item['id'] != 'aws-s3-cloudfront'))
+                            if item['id'] != 'aws-s3-cloudfront' and item['sky_adapter_support'] == 'implemented'))
         self.assertTrue(all(not item['preview_eligible'] for item in payload['reports']))
         self.assertTrue(all(any(rule['rule_id'] == 'PROTOCOL-WS-01' and rule['status'] == 'unknown'
                                 for rule in report['constraint_results']) for report in payload['reports']))
@@ -240,6 +245,35 @@ class CompatibilityPreviewTests(unittest.TestCase):
         static = next(item for item in worker['candidates'] if item['id'] == 'aws-s3-cloudfront')
         self.assertEqual(static['status'], 'rejected')
         self.assertIn('background-worker', worker['inspection']['requirements'])
+
+    def test_lambda_and_ec2_comparisons_are_source_bound_and_never_available_for_deployment(self):
+        status, payload = self.preview(archive({
+            'handler.py': 'def lambda_handler(event, context):\n    return {"statusCode": 200, "body": "ok"}\n',
+        }))
+        self.assertEqual(status, 200)
+        candidates = {item['id']: item for item in payload['candidates']}
+        self.assertEqual(candidates['aws-lambda']['structural_status'], 'potentially_compatible')
+        self.assertEqual(candidates['aws-ec2']['structural_status'], 'not_preferred')
+        evidence = {item['id']: item for item in payload['application_ir']['evidence']}
+        for target in ('aws-lambda', 'aws-ec2'):
+            self.assertEqual(candidates[target]['status'], 'unsupported_by_sky')
+            self.assertFalse(candidates[target]['selected'])
+            self.assertNotIn(target, payload['deployment_policy']['allowed_targets'])
+            self.assertTrue(all(ref in evidence for ref in candidates[target]['evidence_ids']))
+        self.assertTrue(all(item['status'] != 'eligible' for item in candidates.values()))
+        self.assertEqual(self.app.jobs, {})
+
+    def test_host_requirement_is_retained_and_compared_to_ec2_instead_of_silently_removed(self):
+        status, payload = self.preview(archive({
+            'app.py': 'import subprocess\nsubprocess.run(["modprobe", "kvm"])\n',
+        }))
+        self.assertEqual(status, 200)
+        candidates = {item['id']: item for item in payload['candidates']}
+        self.assertEqual(candidates['aws-ec2']['structural_status'], 'potentially_compatible')
+        self.assertEqual(candidates['aws-lambda']['structural_status'], 'incompatible')
+        self.assertIn('host-kernel-control', {item['kind'] for item in payload['application_ir']['hypotheses']})
+        self.assertTrue(all(not item['compatible'] for item in payload['reports']))
+        self.assertEqual(candidates['aws-s3-cloudfront']['status'], 'rejected')
 
 
 if __name__ == '__main__':

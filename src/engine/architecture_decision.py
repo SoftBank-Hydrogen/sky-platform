@@ -7,6 +7,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 
+from engine.backend_identity import backend_identity
 from engine.deployment_policy import DeploymentPolicy
 
 _ELIGIBILITY = {
@@ -15,6 +16,7 @@ _ELIGIBILITY = {
     "needs_review": "needs_review",
     "requires_setup": "needs_review",
     "requires_database_binding": "needs_review",
+    "unsupported_by_sky": "unsupported_by_sky",
 }
 _CONSTRAINT = {"satisfied": "pass", "violated": "fail", "unknown": "unknown"}
 
@@ -111,6 +113,18 @@ def architecture_decision(ir: dict, policy: DeploymentPolicy, plan: dict) -> Arc
         ]
     if not isinstance(raw_candidates, (list, tuple)) or not raw_candidates:
         raise ValueError("Architecture decision requires evaluated candidates")
+    options = plan.get("architecture_options", ())
+    if not isinstance(options, (list, tuple)) or any(not isinstance(item, dict) for item in options):
+        raise ValueError("Invalid architecture options")
+    for item in options:
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "unsupported_by_sky"
+            or item.get("selected") is not False
+            or backend_identity(item.get("id")).sky_adapter_support != "unimplemented"
+        ):
+            raise ValueError("Architecture options cannot be selected for execution")
+    raw_candidates = [*raw_candidates, *options]
     candidates = []
     for item in raw_candidates:
         if (
@@ -140,7 +154,7 @@ def architecture_decision(ir: dict, policy: DeploymentPolicy, plan: dict) -> Arc
     if (
         len(selected) != 1
         or selected[0].target != target
-        or selected[0].eligibility == "rejected"
+        or selected[0].eligibility in {"rejected", "unsupported_by_sky"}
         or len({item.target for item in candidates}) != len(candidates)
     ):
         raise ValueError("Architecture decision selection disagrees with the chosen target")

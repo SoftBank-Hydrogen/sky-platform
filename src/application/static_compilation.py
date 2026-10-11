@@ -8,6 +8,7 @@ from pathlib import Path
 from application.infrastructure import inspect_infrastructure
 from engine.application_ir import ApplicationIR, Component, Requirement
 from engine.architecture_decision import architecture_decision, verify_architecture_decision
+from engine.aws_backend_assessment import with_aws_backend_options
 from engine.candidates import static_hosting_candidate
 from engine.compatibility import evidence_id
 from engine.compilation import compile_decision, verify_compilation
@@ -58,6 +59,7 @@ def static_compilation(project: Path, source_revision: str, *, requested_target:
         },
         "candidates": [candidate],
     }
+    plan = with_aws_backend_options(profile, plan)
     decision = architecture_decision(ir, policy, plan).as_dict()
     compilation = compile_decision(decision, ir, policy, plan)
     return {

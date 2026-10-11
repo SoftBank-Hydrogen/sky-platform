@@ -126,13 +126,14 @@ def extract_project(archive: Path, destination: Path) -> Path:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(item) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-    entrypoints = ("package.json", "Dockerfile", "server.py", "app.py", "main.py", "index.html")
+    entrypoints = ("package.json", "Dockerfile", "server.py", "app.py", "main.py", "index.html",
+                   "handler.py", "lambda_function.py")
     if any((destination / name).is_file() for name in entrypoints):
         return destination
     candidates = {path.parent for name in entrypoints
                   for path in destination.glob(f"*/{name}")}
     if len(candidates) != 1:
-        raise ValueError("Include package.json, Dockerfile, server.py, app.py, main.py or index.html at ZIP root or in one top-level folder")
+        raise ValueError("Include an app manifest, HTTP entrypoint, handler.py, lambda_function.py or index.html at ZIP root or in one top-level folder")
     project = candidates.pop()
     if any(not (destination / name).is_relative_to(project) for name in files):
         raise ValueError("ZIP contains files outside the selected top-level app folder")

@@ -12,6 +12,7 @@ from adapters.ai.openai_http import MAX_RESPONSE_BYTES, OpenAIHTTPFailure, read_
 from adapters.database.sqlite_snapshot import compile_sqlite_snapshot
 from application.sqlite_preparation import migration_manifest
 from engine.target_selection_context import automatic_target_context
+from engine.runtime_signals import runtime_signals
 
 
 from engine.compatibility import (
@@ -100,6 +101,8 @@ def inspect_infrastructure(project: Path) -> InfrastructureProfile:
             raise ValueError('검사 중 소스 파일이 변경됐습니다. 다시 업로드하세요.')
         content = raw.decode('utf-8', errors='replace')
         budget -= len(raw)
+        for name in runtime_signals(relative.as_posix(), content):
+            signal(name, relative.as_posix())
         if relative.as_posix() == 'Dockerfile':
             stages = DOCKER_FROM.findall(re.sub(r'\\\r?\n\s*', ' ', content))
             if stages:

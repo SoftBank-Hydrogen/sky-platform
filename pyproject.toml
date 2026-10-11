@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = ["cryptography>=45,<48"]
 
 [project.optional-dependencies]
+aws-native = ["boto3>=1.40,<2"]
 state-postgres = ["psycopg[binary]>=3.2,<4", "boto3>=1.35,<2"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
