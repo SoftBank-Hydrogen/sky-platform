@@ -143,13 +143,13 @@ def handler_for_preparation(app):
                         result[key] = value
                     return result
                 body = json.loads(self._body(1024, "application/json"), object_pairs_hook=unique)
-                if (not isinstance(body, dict) or set(body) != {"preview_digest"}
+                if (not isinstance(body, dict) or set(body) not in ({"preview_digest"}, {"preview_digest", "conversion_profile"})
                         or not isinstance(body["preview_digest"], str)
                         or not re.fullmatch(r"[0-9a-f]{64}", body["preview_digest"])):
                     raise ValueError("Invalid preparation review")
                 key = self._header("Idempotency-Key")
                 app.readiness()
-                self.json_response(202, app.sqlite_jobs.submit(self.principal, preview_id, body["preview_digest"], key))
+                self.json_response(202, app.sqlite_jobs.submit(self.principal, preview_id, body["preview_digest"], key, conversion_profile=body.get("conversion_profile", "sqlite-data")))
             except PermissionError:
                 self.json_response(403, {"error": "Preparation access denied"})
             except FileNotFoundError:

@@ -296,3 +296,69 @@ def test_actual_tug_zip_through_preparation_job_when_supplied(pipeline, service)
     assert original_db.startswith(b"SQLite format 3")
     with pytest.raises(PreviewUnavailable):
         service.approve(principal(), view["id"], view["preview_digest"])
+
+
+def test_actual_tug_postgres_profile_through_http_when_supplied(pipeline, service, database):
+    import os
+    from pathlib import Path
+
+    from ports.artifacts import SourceArtifact
+
+    path = os.environ.get("SKY_TEST_GAME_ZIP")
+    if not path:
+        pytest.skip("Pinned demo-game ZIP supplied only for local rehearsal")
+    jobs, _, _, consumer, publisher = pipeline
+    view = prepare(service, Path(path).read_bytes(), key="actual-tug-pg")
+    with http(service, database) as (port, origin, app):
+        app.sqlite_jobs = jobs
+        status, receipt = request(
+            port,
+            origin,
+            "/api/deployment-previews/" + view["id"] + "/prepare-sqlite",
+            json.dumps({"preview_digest": view["preview_digest"], "conversion_profile": "tug-postgres-v1"}),
+            {"Idempotency-Key": "tug-pg"},
+        )
+        assert status == 202
+    assert publisher.dispatch_once().confirmed == 1
+    assert consumer.consume_once() == "prepared"
+    result = jobs.detail(principal(), receipt["id"])["result"]
+    assert result["status"] == "database_binding_required"
+    assert result["transformation"]["profile"] == "tug-postgres-v1"
+    prepared = SourceArtifact.from_record(result["prepared_ref"])
+    with service.sources.restore(principal(), prepared) as project:
+        assert "await scores.saveRound" in (project / "server.js").read_text()
+        assert "rejectUnauthorized: true" in (project / "db.js").read_text()
+        assert (project / "rds-global-bundle.pem").is_file()
+        assert (
+            json.loads((project / "package-lock.json").read_text())["packages"]["node_modules/pg"]["version"]
+            == "8.23.0"
+        )
+    with pytest.raises(PreviewUnavailable):
+        service.approve(principal(), view["id"], view["preview_digest"])
+
+
+def test_tug_profile_rejects_unreviewed_source_before_admission(pipeline):
+    jobs, view, _, _, publisher = pipeline
+    with pytest.raises(ValueError, match="Unsupported TUG"):
+        jobs.submit(
+            principal(), view["id"], view["preview_digest"], "wrong-tug", conversion_profile="tug-postgres-v1"
+        )
+    assert publisher.dispatch_once().confirmed == 0
+
+
+@pytest.mark.parametrize("profile", [None, [], {}, "unsupported"])
+def test_invalid_profile_returns_400_without_queued_work(pipeline, service, database, profile):
+    jobs, view, _, _, publisher = pipeline
+    with http(service, database) as (port, origin, app):
+        app.sqlite_jobs = jobs
+        assert (
+            request(
+                port,
+                origin,
+                "/api/deployment-previews/" + view["id"] + "/prepare-sqlite",
+                json.dumps({"preview_digest": view["preview_digest"], "conversion_profile": profile}),
+                {"Idempotency-Key": "invalid-profile"},
+            )[0]
+            == 400
+        )
+    assert publisher.dispatch_once().confirmed == 0

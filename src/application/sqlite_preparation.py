@@ -100,20 +100,35 @@ class SqliteSourcePreparation:
     def __init__(self, sources):
         self.sources = sources
 
-    def prepare(self, principal, original, conversion, *, expected_source_digest):
+    def prepare(self, principal, original, conversion, *, expected_source_digest, conversion_profile="sqlite-data"):
         if not isinstance(original, SourceArtifact) or original.kind != "original":
             raise ValueError("SQLite preparation requires an original artifact")
         if expected_source_digest != original.source_digest:
             raise ValueError("SQLite source differs from review")
         if not isinstance(conversion, dict) or "migration" not in conversion:
             raise ValueError("Reviewed SQLite migration manifest required")
+        if not isinstance(conversion_profile, str) or conversion_profile not in {"sqlite-data", "tug-postgres-v1"}:
+            raise ValueError("Unsupported SQLite conversion profile")
+        transformation = None
         with self.sources.restore(principal, original) as project:
+            if conversion_profile == "tug-postgres-v1":
+                from application.tug_postgres import validate_tug_source
+                validate_tug_source(project)
             with tempfile.TemporaryDirectory(prefix="sky-sqlite-preparation-") as temporary:
                 work = Path(temporary) / "work"
                 shutil.copytree(project, work)
                 result = stage_sqlite_migration(project, work, conversion)
+                if conversion_profile == "tug-postgres-v1":
+                    from application.tug_postgres import convert_tug_postgres
+                    transformation = convert_tug_postgres(work)
                 prepared = self.sources.capture_prepared(
                     principal, original, work, expected_digest=source_digest(work))
+        if transformation is not None:
+            return {"original_ref": original.record(), "prepared_ref": prepared.record(),
+                    "conversion": result, "transformation": transformation,
+                    "status": "database_binding_required",
+                    "blockers": ["database_binding_required", "migration_execution_required", "runtime_verification_required"],
+                    "requires_new_review": True}
         return {"original_ref": original.record(), "prepared_ref": prepared.record(),
                 "conversion": result, "status": "application_conversion_required",
                 "blockers": ["postgres_application_conversion_required", "database_binding_required"],

@@ -8,7 +8,7 @@ PR #31의 원본 보존·이전 SQL 생성 서비스를 별도 준비 작업으�
 
 - `POST /api/deployment-previews/{id}/prepare-sqlite`
   - 동일 origin, 배포 권한, `Content-Type: application/json`, `Idempotency-Key`가 필요하다.
-  - 본문은 `{"preview_digest":"검토 화면에서 받은 digest"}`만 받는다. 임의 소스·SQL·계획·비밀 값을 받지 않는다.
+  - 본문은 `{"preview_digest":"검토 화면에서 받은 digest"}`와 선택 항목 `conversion_profile`을 받는다. 기본값은 `sqlite-data`이며, 검증한 TUG ZIP에만 `tug-postgres-v1`을 선택할 수 있다. 임의 소스·SQL·계획·비밀 값을 받지 않는다.
   - 준비된 정적 preview의 만료·digest·원본 참조·SQLite 지원 여부를 확인하고 작업을 접수한다. DB 작업·outbox 생성이 한 트랜잭션이다.
   - 응답은 202와 작업 ID·상태다. SQL 생성이나 S3 변환은 API에서 실행하지 않는다.
 - `GET /api/sqlite-preparation-jobs/{operation_id}`
@@ -40,7 +40,7 @@ sky-service worker --mode preparation-outbox
 sky-service worker --mode prepare-sqlite
 ```
 
-두 check-config는 AWS·DB·GitHub 호출 없이 설정을 검사한다. 소비 워커는 유효한 Fargate `ECS_AGENT_URI`와 ECS task protection을 요구한다. 기존 DB 비밀 읽기 권한, 준비 큐의 publish/receive/delete/visibility 권한, 원본 S3 읽기·준비 artifact 쓰기 권한이 필요하다. 이 워커에는 GitHub App·OpenAI·앱 DB 비밀번호·Docker가 필요하지 않다. 이 단계는 앱 코드의 AI 변환을 실행하지 않는다.
+두 check-config는 AWS·DB·GitHub 호출 없이 설정을 검사한다. 소비 워커는 유효한 Fargate `ECS_AGENT_URI`와 ECS task protection을 요구한다. 기존 DB 비밀 읽기 권한, 준비 큐의 publish/receive/delete/visibility 권한, 원본 S3 읽기·준비 artifact 쓰기 권한이 필요하다. 이 워커에는 GitHub App·OpenAI·앱 DB 비밀번호·Docker가 필요하지 않다. 이 단계는 앱 코드의 AI 변환을 실행하지 않는다. `tug-postgres-v1`은 원본 digest가 일치하는 게임에 고정된 PostgreSQL 변환을 적용한다.
 
 ## 처리·복구
 
@@ -55,5 +55,5 @@ sky-service worker --mode prepare-sqlite
 
 ## 다음 작업
 
-앱의 PostgreSQL 코드 변환·async 호출 및 게임 프로토콜 검증, 팀 DB 할당 결과 연결, 변환된 소스의 새 preview·승인 생성, 승인된 SQL 이전 실행이 남아 있다. 기존 SQLite preview의 배포 차단은 유지한다. 현재 작업 결과 artifact만으로 기존 승인을 재사용해 빌드·배포할 수 없다.
+검증한 TUG의 PostgreSQL 변환·async 호출·게임 프로토콜은 구현 및 임시 DB 검증을 완료했다. 팀 할당 작업 결과의 실제 조회·ECS 설정 반영, 변환된 소스의 새 preview·승인 생성, 승인된 SQL 이전 실행이 남아 있다. 기존 SQLite preview의 배포 차단은 유지한다. 현재 작업 결과 artifact만으로 기존 승인을 재사용해 빌드·배포할 수 없다.
 

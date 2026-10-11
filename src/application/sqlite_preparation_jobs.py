@@ -12,9 +12,12 @@ from ports.remote_builds import canonical, digest, identity
 def validate_command(command, application_id):
     fields = {"version", "organization_id", "created_by", "role", "login_source", "source_ref",
               "source_digest", "sqlite_conversion", "preview_id", "preview_digest"}
-    if (not isinstance(command, dict) or set(command) != fields
+    if (not isinstance(command, dict) or set(command) not in (fields, fields | {"conversion_profile"})
             or type(command["version"]) is not int or command["version"] != 1):
         raise ValueError("Invalid SQLite preparation command")
+    profile = command.get("conversion_profile", "sqlite-data")
+    if not isinstance(profile, str) or profile not in {"sqlite-data", "tug-postgres-v1"}:
+        raise ValueError("Unsupported preparation conversion profile")
     canonical(command)
     artifact = SourceArtifact.from_record(command["source_ref"])
     principal = Principal(command["created_by"], command["organization_id"],
@@ -24,6 +27,10 @@ def validate_command(command, application_id):
             or artifact.source_digest != command["source_digest"]
             or not permitted(principal, Action.DEPLOY, ResourceOwner(principal.organization_id, principal.user_id))):
         raise ValueError("Invalid SQLite preparation scope")
+    if profile == "tug-postgres-v1":
+        from application.tug_postgres import TUG_SOURCE_DIGEST
+        if artifact.source_digest != TUG_SOURCE_DIGEST:
+            raise ValueError("Unsupported TUG source")
     identity(command["preview_id"])
     if not isinstance(command["preview_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", command["preview_digest"]):
         raise ValueError("Invalid SQLite preview digest")
@@ -39,7 +46,7 @@ class SqlitePreparationJobs:
             raise ValueError("Preparation needs a separate operation workspace")
         self.previews, self.operations, self.clock = previews, operations, clock
 
-    def submit(self, principal, preview_id, expected_digest, request_key):
+    def submit(self, principal, preview_id, expected_digest, request_key, *, conversion_profile="sqlite-data"):
         if not isinstance(principal, Principal) or not permitted(
                 principal, Action.DEPLOY, ResourceOwner(principal.organization_id, principal.user_id)):
             raise PermissionError("SQLite preparation access denied")
@@ -55,6 +62,7 @@ class SqlitePreparationJobs:
                    "source_ref": view["source_ref"], "source_digest": view["source_ref"]["source_digest"],
                    "sqlite_conversion": view["inspection"]["sqlite_conversion"],
                    "preview_id": view["id"], "preview_digest": expected_digest}
+        command["conversion_profile"] = conversion_profile
         validate_command(command, view["application_id"])
         if not isinstance(request_key, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request_key):
             raise ValueError("Invalid preparation request key")

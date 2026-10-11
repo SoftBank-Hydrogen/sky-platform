@@ -92,7 +92,8 @@ class SqlitePreparationConsumer:
                         raise PreparationOwnershipLost()
                     # Content-addressed S3 writes are safe to replay after a lost acknowledgement.
                     result = self.preparation.prepare(principal, original, operation.command["sqlite_conversion"],
-                                                      expected_source_digest=operation.command["source_digest"])
+                                                      expected_source_digest=operation.command["source_digest"],
+                                                      conversion_profile=operation.command.get("conversion_profile", "sqlite-data"))
                     guard()
                     if saved.get("stage") == "sqlite_prepared" and saved.get("result") != result:
                         raise ValueError("Replayed preparation result differs")
