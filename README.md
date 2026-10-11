@@ -1,132 +1,130 @@
 # Sky
 
-> 앱을 올리면, 코드에서 근거를 찾아 어디서 어떻게 돌릴지 정하고, 배포한 뒤 실제로 동작하는지 증명합니다.
+**One Action, Infinite Clouds.** 웹앱을 올리면 실행 환경을 판단하고, 배포 결과를 확인합니다.
 
-SoftBank Hackathon 2026 **One Action, Infinite Clouds** 팀 SoftBank-Hydrogen의 배포 플랫폼입니다.
-로컬 웹 앱 ZIP·폴더·GitHub 저장소를 받아 로컬, 온프레미스, AWS, GCP에 배포합니다.
+SoftBank Hackathon 2026 팀 **SoftBank-Hydrogen**의 배포 플랫폼입니다.
+ZIP·앱 폴더·공개 GitHub 저장소를 입력으로 받습니다. 배포 대상 앱보다 **배포 시스템의 품질**에 집중합니다.
 
-| 저장소 | 역할 |
-| --- | --- |
-| **sky-platform** (여기) | 분석, 판단, 코드 변환, 배포 어댑터, API, 워커, UI |
-| [sky-infra](https://github.com/SoftBank-Hydrogen/sky-infra) | Sky를 호스팅하는 AWS 인프라 (Terraform), 온프레미스 VM 준비 (Ansible) |
-| [demo-game](https://github.com/SoftBank-Hydrogen/demo-game) | 데모 앱: 실시간 줄다리기 게임, 팀 게시판 |
+## 배포 흐름
 
-## 무엇을 하나
-
-```
-입력 (ZIP · 폴더 · GitHub)
-  → 증거 수집   런타임·포트·DB·파일 쓰기·메모리 상태·WebSocket을 규칙과 AST로 찾고, AI가 실행 설정을 정한다
-  → 판단        대상별 역량과 대조해 후보를 거르고(eligible / rejected / needs_review), 정책에 따라 고른다
-  → 컴파일      코드 변경 계획과 인프라 계획을 같은 결정에서 만들고, 둘이 맞는지 검사한다
-  → 빌드·리허설  같은 이미지를 로컬에서 먼저 띄워 확인한다
-  → 배포        대상 어댑터가 Sky 소유 리소스만 만든다
-  → 검증        HTTP, WebSocket, DB를 실제로 확인한다. 확인 못 한 것은 미검증으로 남긴다
-  → 증거 보고서  왜 이 대상인지, 무엇을 바꿨는지, 무엇을 검증했는지 기록한다
+```text
+앱 입력 → 소스 분석 → 후보 비교 → 코드·인프라 계획 → 빌드·배포 → 실제 응답 검증
 ```
 
-원칙:
+- **근거로 판단합니다.** 설정 파일·소스·DB를 규칙과 AST로 분석합니다. AI의 판단과 인용도 검증합니다.
+- **환경 차이를 처리합니다.** 지원하는 패턴에서 실행 설정과 코드를 바꿉니다. 원본은 보존합니다.
+- **실행 결과로 성공을 판단합니다.** HTTP 응답을 확인하고, DB·WebSocket 등 추가 검증 결과를 기록합니다.
+- **운영까지 이어집니다.** GitHub 변경 감지, 갱신, 롤백, 모니터링 기능을 제공합니다.
 
-- **근거가 있을 때만 판단합니다.** 모든 판단에 `confirmed` / `inferred` / `unknown` 상태와 근거 파일이 붙습니다.
-- **AI가 "완료"라고 해도 성공이 아닙니다.** 실제 응답을 확인해야 성공입니다.
-- **AI는 정해진 도구 안에서만 움직입니다.** 셸이나 클라우드 CLI를 직접 쓰지 않고, 인용한 근거가 소스에 그대로 있는지 검사받습니다.
-- **Sky는 앱의 요청 경로에 없습니다.** Sky가 멈춰도 배포된 앱은 계속 동작합니다.
+AI는 계획과 코드 변경을 제안합니다. Python 서비스가 계약·정책을 검사하고 어댑터로 실행합니다.
+지원하지 않거나 근거가 부족한 요구사항은 차단하거나 추가 확인을 요청합니다.
 
 ## 배포 대상
 
-| 대상 | 실행 모델 | 상태 |
+| 대상 | 용도 | 구현·검증 상태 |
 | --- | --- | --- |
-| Local Docker | 같은 PC 컨테이너 | 실검증 |
-| AWS ECS Express | Fargate + 관리형 ALB + HTTPS 주소 | 실검증 |
-| AWS S3 + CloudFront | 정적 호스팅 (자동 선택 시 정적 앱 우선) | 실검증 |
-| AWS RDS PostgreSQL | 앱 전용 DB, SQLite → PostgreSQL 코드 변환과 데이터 이전 | 실검증 (게임 데모) |
-| 온프레미스 Compose | 같은 PC Compose, SQLite 볼륨 | 구현 |
-| 온프레미스 원격 VM | SSH로 Linux VM의 Docker에 배포 ([준비 방법](https://github.com/SoftBank-Hydrogen/sky-infra)) | 로컬 VM에서 실검증 |
-| GCP Cloud Run | 서버리스 컨테이너, Cloud SQL 연결 | 구현 |
-| AWS Lambda, EC2 | 소스 근거로 구조 적합성 판정, 명시 선택 배포 | PR 진행 중 |
+| Local Docker | 같은 PC에서 컨테이너 실행 | 실제 배포 검증 |
+| On-prem Compose | 같은 PC에서 Compose 실행, SQLite 볼륨 보관 | 구현 |
+| On-prem Linux VM | SSH로 원격 Docker에 배포 | 로컬 Linux VM 검증 |
+| AWS ECS Express | Fargate 컨테이너, 관리형 HTTPS 주소 | 실제 AWS 배포 검증 |
+| AWS S3 + CloudFront | 정적 웹앱 호스팅 | 실제 AWS 배포 검증 |
+| AWS Lambda | 외부 의존성 없는 Python 핸들러 | 명시 선택 ZIP 배포·실제 AWS 검증 |
+| AWS EC2 | 무상태 HTTP 컨테이너 | 명시 선택 ZIP 배포 구현, 실배포 미검증 |
+| GCP Cloud Run | 컨테이너 실행, Cloud SQL 연결 경로 | 구현, 전체 실환경 검증 필요 |
 
-**실검증**은 해당 환경에서 실제 실행·응답을 확인한 경로입니다. 로컬 VM 검증은 외부 온프레미스 실증과 구분합니다. **구현**은 실환경 전체 경로가 아직 확인되지 않은 상태입니다. 모든 경로에서 실제 AI·DB·WebSocket 검증을 수행했다는 뜻은 아닙니다.
+자동 선택은 **서버에 설정된 대상·앱 요구사항·사용자 정책**을 기준으로 후보를 좁힙니다.
+Lambda·EC2는 명시 선택 경로이며, AI 자동 선택과는 아직 연결되지 않았습니다.
+현재 EC2 경로는 DB·영속 파일·워커·호스트 제어를 지원하지 않습니다.
 
-자동 선택은 정적 앱이면 S3 + CloudFront, 아니면 적격 후보(Local Docker, ECS Express, Cloud Run) 중에서 고릅니다.
-DB가 필요한 앱, WebSocket 앱, 온프레미스는 자동 선택하지 않고 사용자 확인을 거칩니다.
+DB가 없는 앱은 DB 없이 배포합니다. SQLite는 지원 경로에서 볼륨에 보관하거나 PostgreSQL로 이전합니다.
+AWS RDS는 앱의 DB 구성 요소입니다. 게임 데모에서 SQLite → PostgreSQL 코드 변환과 데이터 이전을 검증했습니다.
+이 검증이 모든 앱이나 모든 배포 대상에 대한 성공을 보장하지는 않습니다.
 
-## 빠른 시작 (로컬)
+## 빠른 시작
 
-Python 3.12 이상, Docker가 필요합니다. AI 배포에는 OpenAI API 키가 필요합니다.
+Python 3.12 이상과 Docker가 필요합니다.
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-
-export OPENAI_API_KEY=...          # 또는 chmod 600인 .env 파일
-.venv/bin/sky-platform             # http://127.0.0.1:8080
+.venv/bin/pip install -e '.[dev,aws-native,state-postgres]'
+.venv/bin/sky-platform
 ```
 
-브라우저에서 앱 폴더나 ZIP을 올리고 대상을 고른 뒤 **배포하기**를 누릅니다.
+브라우저에서 **http://127.0.0.1:8080**에 접속합니다.
+앱을 올리고 대상을 선택한 뒤 **배포하기**를 누릅니다. 설정되지 않은 대상은 화면에서 비활성화됩니다.
 
-| 대상 | 서버 환경변수 |
+AI 기능을 쓰려면 `OPENAI_API_KEY`를 설정합니다.
+로컬 실행은 현재 디렉터리의 `.env`도 읽습니다. 파일 권한은 `chmod 600 .env`로 제한합니다.
+키가 없어도 정해진 규칙과 명시 대상의 지원 경로를 사용할 수 있습니다.
+
+| 기능 | 필요한 설정 |
 | --- | --- |
-| AWS | `SKY_AWS_ACCOUNT_ID` (실제 로그인 계정과 다르면 중단), `SKY_AWS_REGION`, AWS CLI 자격 증명 |
-| GCP | `SKY_GCP_PROJECT`, `SKY_GCP_REGION`, `gcloud` |
-| 원격 VM | `SKY_VM_SSH_HOST`, `SKY_VM_SSH_USER`, `SKY_VM_PUBLIC_HOST` ([docs/onprem-vm.md](docs/onprem-vm.md)) |
+| AWS | AWS CLI 자격 증명, `SKY_AWS_ACCOUNT_ID`, `SKY_AWS_REGION` |
+| Lambda·EC2 | 위 AWS 설정과 `SKY_AWS_ROLE_BOUNDARY_ARN`, EC2는 `SKY_EC2_SUBNET_ID` 추가 |
+| GCP | `gcloud` 인증, `SKY_GCP_PROJECT`, `SKY_GCP_REGION` |
+| Linux VM | `SKY_VM_SSH_HOST`, `SKY_VM_SSH_USER`, `SKY_VM_PUBLIC_HOST` |
 
-주요 옵션: `--port`, `--state-dir`, `--monitor-interval`, `--github-poll-interval` (`sky-platform --help`).
+계정·역할 권한·네트워크 설정도 해당 어댑터의 조건을 충족해야 합니다.
+실행 옵션은 `.venv/bin/sky-platform --help`에서 확인할 수 있습니다.
 
-## 호스팅 모드 (B안)
+## 로컬 실행과 클라우드 호스팅
 
-여러 조직이 쓰는 클라우드 운영형 Sky입니다. 인프라는 sky-infra의 Terraform이 만듭니다.
-아래는 구현된 구성 요소의 흐름입니다. 운영 환경에서는 호환되는 서비스 이미지와 워커 실행 설정을 별도로 적용해야 합니다. SQLite 변환·DB 연결을 포함한 전체 자동 배포는 아직 연결 중입니다.
+로컬 실행은 `.sky/`에 작업 상태를 저장합니다.
+호스팅 모드는 PostgreSQL에 상태를, S3에 소스를 저장합니다. **Sky 상태 DB와 사용자 앱 DB는 분리합니다.**
 
-```
-ALB + Cognito → API (Fargate) → PostgreSQL 상태 DB
-                  └ ZIP 업로드 → S3 원본 → 미리보기 → 저장된 승인 → 작업 접수 + outbox (한 트랜잭션)
-outbox 발행기 → SQS FIFO → 워커 → 격리된 원격 빌더 → ECR 다이제스트 검증 → ECS 배포
-```
-
-- 사용자 코드는 API나 워커에서 실행하지 않습니다. 빌드는 자격 증명 없는 별도 러너에서 합니다.
-- 모든 요청에서 조직 소유권을 확인합니다.
-- 결과가 불확실한 외부 작업은 자동으로 다시 실행하지 않고 재조사합니다.
-
-```sh
-sky-service api --auth-mode alb ...   # docs/b-runtime-entrypoints.md
-sky-service worker ...
-sky-service migrate
+```text
+ALB + Cognito → API → PostgreSQL 상태 DB / S3 소스
+                  → 작업 접수·outbox → SQS → 워커 → 원격 빌더 → ECR → 앱 배포
 ```
 
-구성 요소별 설계: [docs/](docs/) 의 `b-*.md`.
+호스팅 API는 신원·조직 소유권을 확인합니다. ZIP 접수는 서버에서 검증·승인 기록·작업 등록을 이어 처리합니다.
+실제 실행에는 호환되는 워커와 빌더 설정이 필요합니다. API에 OpenAI 키를 넣는 방식은 사용하지 않습니다.
+호스팅 모드의 SQLite 변환·DB 연결을 포함한 전체 자동 배포는 아직 통합 검증이 남아 있습니다.
 
-## 코드 구조
+V4의 목표는 **관측 → 변경 제안 → 승인 → 재배포 → 검증**입니다.
+운영 판단, 공유 DB 할당, 전용 RDS 준비, 데이터 이전·전환 구성 요소가 있습니다.
+이 기능을 모든 ZIP 앱에 자동 적용하는 운영 루프는 아직 완성·검증된 상태가 아닙니다.
 
-```
+## 저장소와 코드 구조
+
+| 저장소 | 역할 |
+| --- | --- |
+| **sky-platform** | 분석, 판단, 코드 변환, 배포, API·워커·UI |
+| [sky-infra](https://github.com/SoftBank-Hydrogen/sky-infra) | Terraform 기반 Sky 호스팅 인프라, Ansible 기반 VM 준비 |
+| [demo-game](https://github.com/SoftBank-Hydrogen/demo-game) | 배포 시연용 앱 |
+
+```text
 src/
-  domain/        모델, 접근 권한
-  engine/        순수 판단 로직: 증거, Application IR, 호환성, 후보, 컴파일, 정적 판정
-  application/   유스케이스: 분석, AI 에이전트, 배포, DB 이전, 롤백, 모니터링, 증명서
-  adapters/      외부 연결: aws, gcp, local, onprem, build, database, state, ai, github
-  interfaces/    HTTP 서버, CLI, 호스팅 API·워커 진입점
-  assets/        UI(static/index.html), 인프라 템플릿(CloudFormation), DB 마이그레이터
-tests/
-  unit/ contract/ regression/   CI에서 실행
-  integration/                  로컬 Docker 등에서 재현
-  live/                         실계정·실모델 검증 (수동, CI 제외)
+  domain/        모델과 접근 권한
+  engine/        증거, 후보 평가, 호환성, 컴파일
+  application/   분석·배포·DB 이전·롤백·모니터링 유스케이스
+  adapters/      AWS·GCP·Docker·VM·DB·AI·GitHub 연결
+  interfaces/    HTTP API, CLI, 호스팅 API·워커
+  assets/        UI, CloudFormation 템플릿, DB 마이그레이터
+tests/           단위·계약·회귀·통합·실환경 테스트
 ```
 
-## 개발
+Sky 호스팅 리소스는 `sky-infra`가 관리합니다. 사용자 앱 리소스는 배포 어댑터가 별도로 관리합니다.
+`terraform destroy`만으로 사용자 앱 리소스까지 정리되지는 않습니다.
+
+## 개발·검증
 
 ```sh
 .venv/bin/pytest
-.venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
 ```
 
-CI(GitHub Actions)는 PostgreSQL을 붙인 전체 테스트, JavaScript UI 테스트, 서비스 이미지 빌드, 오프라인 ZIP 배포 확인을 실행합니다.
-main에 머지되면 검증된 서비스 이미지를 ECR에 게시합니다.
+PostgreSQL·Docker 통합 테스트에는 별도 실행 환경이 필요합니다. 실계정·실모델 테스트는 수동으로 실행합니다.
+GitHub Actions에는 코드 검사, UI 테스트, 서비스 이미지 검증과 ECR 게시 흐름이 정의돼 있습니다.
+현재 주 CI 워크플로는 수동 비활성화 상태입니다. 이미지 게시에는 워크플로 활성화와 OIDC·ECR 설정이 필요합니다.
+서비스 이미지 게시와 실제 서비스 갱신은 별도 단계입니다.
 
-## 문서
+## 사용·운영 문서
 
-| 문서 | 내용 |
-| --- | --- |
-| [docs/onprem-vm.md](docs/onprem-vm.md) | 원격 Linux VM 대상 |
-| [docs/rollback-rehearsal.md](docs/rollback-rehearsal.md) | 롤백·복귀 리허설 |
-| [docs/service-monitoring.md](docs/service-monitoring.md), [docs/monitoring-integration.md](docs/monitoring-integration.md) | 모니터링, Slack 알림, k6 |
-| [docs/infra-image-pr.md](docs/infra-image-pr.md) | 서비스 이미지 → 인프라 배포 연결 |
-| `docs/b-*.md` | 호스팅 모드 구성 요소 (접수, 승인, 소스 보관, 원격 빌드, 배포) |
-| [docs/state-store-boundary.md](docs/state-store-boundary.md), [docs/postgres-state-foundation.md](docs/postgres-state-foundation.md), [docs/operation-state-foundation.md](docs/operation-state-foundation.md) | 상태 저장소와 작업 상태 |
+- [Linux VM 배포](docs/onprem-vm.md)
+- [롤백 리허설](docs/rollback-rehearsal.md)
+- [모니터링](docs/service-monitoring.md)
+- [호스팅 ZIP 접수](docs/b-upload-preview-flow.md) · [원격 빌드](docs/b-consumer-remote-build.md) · [이미지 배포](docs/b-built-image-deployment.md)
+- [상태 저장소](docs/state-store-boundary.md) · [PostgreSQL 상태 DB](docs/postgres-state-foundation.md)
+- [서비스 이미지와 인프라 연결](docs/infra-image-pr.md)
