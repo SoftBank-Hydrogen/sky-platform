@@ -134,7 +134,7 @@ def test_unsuitable_or_existing_workload_is_not_silently_moved(change):
 
 
 def test_worker_records_only_verified_allowlist_and_never_marks_app_deployed(workflow):
-    worker, _, _, operations, allocator, _, operation = workflow
+    worker, job, records, operations, allocator, _, operation = workflow
     assert worker.execute(operation.id, operation.attempt_id)["status"] == "succeeded"
     allocator.allocate.assert_called_once()
     assert "must-never-be-persisted" not in str(operations.method_calls)
@@ -142,6 +142,16 @@ def test_worker_records_only_verified_allowlist_and_never_marks_app_deployed(wor
     assert result["deployment_ready"] is False and result["deployment_status"] == "not_started"
     assert "http_verification" in result["remaining_gates"]
     assert operations.begin_external.call_count == operations.observe_external.call_count == 1
+    saved = records.save_job.call_args.args[1]
+    assert saved["status"] == job["status"]
+    assert saved["workload_database_binding"]["role"] == "shared_workload"
+    binding = saved["shared_database_allocation"]
+    assert binding["operation_id"] == operation.id
+    assert binding["source_digest"] == job["source_digest"]
+    assert binding["source_revision"] == job["application_ir"]["source_revision"]
+    assert binding["deployment_ready"] is False
+    assert "must-never-be-persisted" not in str(records.method_calls)
+    assert records.save_job.call_args.kwargs == {"expected_revision": 1}
 
 
 @pytest.mark.parametrize("change", ["revoked", "source", "config", "selection", "scope", "revision"])
@@ -200,6 +210,78 @@ def test_recorded_observation_resumes_without_new_cloud_request(workflow):
     assert worker.execute(operation.id, operation.attempt_id)["status"] == "succeeded"
     allocator.allocate.assert_not_called()
     operations.begin_external.assert_not_called()
+
+
+def test_lost_completion_response_resumes_exact_binding_without_second_write(workflow):
+    worker, _, records, operations, allocator, _, operation = workflow
+    worker.execute(operation.id, operation.attempt_id)
+    saved = deepcopy(records.save_job.call_args.args[1])
+    operations.get.return_value = replace(
+        operation,
+        external_receipt=operations.observe_external.call_args.args[1],
+        external_intent=operations.begin_external.call_args.args[1],
+        checkpoint={"stage": "database_allocated"},
+    )
+    records.load_job.side_effect = lambda _: StoredJob(saved, "unused", 2)
+    records.save_job.reset_mock()
+    allocator.reset_mock()
+    assert worker.execute(operation.id, operation.attempt_id)["status"] == "succeeded"
+    allocator.allocate.assert_not_called()
+    records.save_job.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["secret", "owner", "operation", "source", "revision"])
+def test_changed_binding_after_external_effect_retains_application_reservation(workflow, change):
+    worker, _, records, operations, allocator, _, operation = workflow
+    worker.execute(operation.id, operation.attempt_id)
+    saved = deepcopy(records.save_job.call_args.args[1])
+    operations.get.return_value = replace(
+        operation,
+        external_receipt=operations.observe_external.call_args.args[1],
+        external_intent=operations.begin_external.call_args.args[1],
+        checkpoint={"stage": "database_allocated"},
+    )
+    if change == "secret":
+        saved["shared_database_allocation"]["secret_ref"] += "changed"
+    elif change == "owner":
+        saved["workload_database_binding"]["organization_id"] = "another-team"
+    elif change == "operation":
+        saved["shared_database_allocation"]["operation_id"] = str(uuid4())
+    elif change == "source":
+        saved["source_digest"] = "d" * 64
+    records.load_job.side_effect = lambda _: StoredJob(saved, "unused", 3 if change == "revision" else 2)
+    allocator.reset_mock()
+    operations.complete.reset_mock()
+    records.save_job.reset_mock()
+    assert worker.execute(operation.id, operation.attempt_id)["status"] == "needs_attention"
+    operations.require_attention.assert_called_once()
+    allocator.allocate.assert_not_called()
+    records.save_job.assert_not_called()
+    operations.complete.assert_not_called()
+
+
+def test_projection_revision_conflict_retains_allocated_database(workflow):
+    from ports.state import RecordConflict
+
+    worker, _, records, operations, allocator, _, operation = workflow
+    records.save_job.side_effect = RecordConflict("concurrent mutation")
+    assert worker.execute(operation.id, operation.attempt_id)["status"] == "needs_attention"
+    allocator.allocate.assert_called_once()
+    operations.observe_external.assert_called_once()
+    operations.require_attention.assert_called_once()
+    operations.complete.assert_not_called()
+
+
+def test_projection_commit_response_loss_never_reallocates_in_same_attempt(workflow):
+    worker, _, records, operations, allocator, _, operation = workflow
+    records.save_job.side_effect = OSError("commit response lost")
+    with pytest.raises(OSError):
+        worker.execute(operation.id, operation.attempt_id)
+    allocator.allocate.assert_called_once()
+    operations.observe_external.assert_called_once()
+    records.save_job.assert_called_once()
+    operations.complete.assert_not_called()
+    operations.interrupt.assert_not_called()
 
 
 def test_ambiguous_observation_commit_is_never_retried_or_interrupted(workflow):

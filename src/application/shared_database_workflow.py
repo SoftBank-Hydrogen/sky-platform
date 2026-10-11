@@ -108,8 +108,8 @@ class SharedDatabaseWorker:
         ):
             raise PermissionError("Allocation requester no longer has access")
         snapshot = self.writer.snapshot(principal, command["job_id"])
-        if type(command["job_revision"]) is not int or snapshot.revision != command["job_revision"]:
-            raise RecordConflict("Deployment changed before database allocation")
+        if type(command["job_revision"]) is not int:
+            raise RecordConflict("Invalid reviewed deployment revision")
         selection = command["selection"]
         if not isinstance(selection, dict) or not isinstance(selection.get("allocation"), dict):
             raise ValueError("Invalid allocation selection")  # noqa: TRY004 -- malformed persisted document
@@ -128,7 +128,36 @@ class SharedDatabaseWorker:
             selection["allocation"]["connection_limit"],
         )
         authorize_allocation(principal, snapshot.record, request)
-        return principal, snapshot.record, request, expected
+        if snapshot.revision != command["job_revision"]:
+            # A lost completion response may leave our exact projection committed.
+            # No other revision change is accepted as approval for this source.
+            if (snapshot.revision != command["job_revision"] + 1
+                    or operation.external_receipt is None
+                    or not self._projection_matches(snapshot.record, operation, request)):
+                raise RecordConflict("Deployment changed before database allocation")
+        elif any(snapshot.record.get(key) is not None for key in
+                 ("shared_database_allocation", "workload_database_binding")):
+            raise RecordConflict("Deployment already contains a database binding")
+        return principal, snapshot, request, expected
+
+    def _projection(self, operation, request, receipt):
+        safe = safe_receipt(receipt, request)
+        return {
+            "workload_database_binding": safe["binding"],
+            "shared_database_allocation": {
+                **safe,
+                "operation_id": operation.id,
+                "selection_id": operation.command["selection"]["selection_id"],
+                "source_digest": operation.command["selection"]["source_digest"],
+                "source_revision": operation.command["selection"]["source_revision"],
+                "status": "allocated",
+                "deployment_ready": False,
+            },
+        }
+
+    def _projection_matches(self, record, operation, request):
+        expected = self._projection(operation, request, operation.external_receipt)
+        return all(record.get(key) == value for key, value in expected.items())
 
     def execute(self, operation_id: str, attempt_id: str) -> dict:
         operation = self.operations.get(operation_id)
@@ -149,8 +178,14 @@ class SharedDatabaseWorker:
     def _execute_owned(self, operation, lease, guard):
         operation_id = operation.id
         try:
-            principal, job, request, selection = self._validate(operation)
+            principal, snapshot, request, selection = self._validate(operation)
         except (ValueError, PermissionError, FileNotFoundError, RecordConflict):
+            if operation.external_receipt is not None or operation.external_pending:
+                retained = self.operations.require_attention(
+                    lease, {"stage": "allocation_binding_revalidation_failed"}
+                )
+                return {"status": "needs_attention" if retained else "lease_lost",
+                        "operation_id": operation_id}
             completed = self.operations.complete(
                 lease, {"code": "allocation_revalidation_failed", "deployment_ready": False}, succeeded=False
             )
@@ -174,7 +209,7 @@ class SharedDatabaseWorker:
             if not self.operations.begin_external(lease, intent):
                 return {"status": "lease_lost", "operation_id": operation_id}
             try:
-                receipt = self.service.allocate(principal, job, request)
+                receipt = self.service.allocate(principal, snapshot.record, request)
                 guard()
                 safe = safe_receipt(receipt, request, require_ready=True)
             except Exception:  # noqa: BLE001 -- all uncertain external effects need reconciliation
@@ -184,6 +219,19 @@ class SharedDatabaseWorker:
             # Never retry an ambiguous state commit. Recovery reads the durable receipt.
             if not self.operations.observe_external(lease, safe, {"stage": "database_allocated"}):
                 return {"status": "lease_lost", "operation_id": operation_id}
+        guard()
+        projection = self._projection(operation, request, safe)
+        try:
+            if snapshot.revision == operation.command["job_revision"]:
+                self.writer.patch(principal, operation.command["job_id"], snapshot.revision, projection)
+        except RecordConflict:
+            retained = self.operations.require_attention(
+                lease, {"stage": "allocation_binding_revision_conflict"}
+            )
+            return {"status": "needs_attention" if retained else "lease_lost",
+                    "operation_id": operation_id}
+        # An ambiguous metadata write is intentionally not retried here. Recovery
+        # loads its exact source-bound projection without reallocating the DB.
         result = {
             "database_allocation": safe,
             "selection_id": selection["selection_id"],

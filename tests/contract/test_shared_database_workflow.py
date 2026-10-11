@@ -114,6 +114,10 @@ def test_outbox_identity_is_executable_once_without_claiming_application_success
     assert final.result["deployment_ready"] is False and final.result["deployment_status"] == "not_started"
     assert "disposable-test-password-for-app" not in str(asdict(final))
     assert records.load_job("a" * 16).record["status"] == "planned"
+    projection = records.load_job("a" * 16).record
+    assert projection["workload_database_binding"] == final.result["database_allocation"]["binding"]
+    assert projection["shared_database_allocation"]["operation_id"] == operation.id
+    assert projection["shared_database_allocation"]["deployment_ready"] is False
     assert worker.execute(operation.id, operation.attempt_id)["status"] == "succeeded"
     assert len(calls) == 1
 
@@ -155,3 +159,40 @@ def test_source_change_after_admission_is_failed_without_workload_mutation(workf
     records.save_job("a" * 16, changed, expected_revision=snapshot.revision)
     assert worker.execute(operation.id, operation.attempt_id)["status"] == "failed"
     assert calls == [] and operations.get(operation.id).external_intent is None
+
+
+def test_projection_committed_without_response_recovers_on_real_state_store(workflow):
+    worker, operation, records, operations, calls, connect = workflow
+    save = records.save_job
+
+    def committed_without_response(*args, **kwargs):
+        save(*args, **kwargs)
+        raise OSError("projection commit response lost")
+
+    records.save_job = committed_without_response
+    with pytest.raises(OSError):
+        worker.execute(operation.id, operation.attempt_id)
+    assert records.load_job("a" * 16).revision == 2
+    assert operations.get(operation.id).status == "running"
+    recovered = expire(operations, operation, connect)
+    records.save_job = save
+    assert worker.execute(recovered.id, recovered.attempt_id)["status"] == "succeeded"
+    assert len(calls) == 1
+    assert records.load_job("a" * 16).revision == 2
+
+
+def test_changed_source_after_binding_retains_real_application_reservation(workflow):
+    worker, operation, records, operations, calls, connect = workflow
+    complete = operations.complete
+    operations.complete = lambda *_args, **_kwargs: False
+    assert worker.execute(operation.id, operation.attempt_id)["status"] == "lease_lost"
+    snapshot = records.load_job("a" * 16)
+    records.save_job(
+        "a" * 16, {**snapshot.record, "source_digest": "d" * 64}, expected_revision=snapshot.revision
+    )
+    recovered = expire(operations, operation, connect)
+    operations.complete = complete
+    assert worker.execute(recovered.id, recovered.attempt_id)["status"] == "needs_attention"
+    with pytest.raises(ApplicationBusy):
+        operations.admit("game", "deploy", "another-deployment", {})
+    assert len(calls) == 1
