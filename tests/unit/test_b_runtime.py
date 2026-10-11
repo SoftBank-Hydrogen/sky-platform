@@ -59,6 +59,38 @@ def test_worker_does_not_silently_start_legacy_web_or_claim_deployments():
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "mode,runner",
+    [
+        ("build", "interfaces.b_build_runtime.run_build_consumer"),
+        ("shared-database-queue", "interfaces.shared_database_worker.run_shared_database"),
+        ("dedicated-database-queue", "interfaces.dedicated_database_worker.run_dedicated_database"),
+        ("operating-review", "interfaces.operating_review_worker.run_operating_review"),
+        ("preparation-outbox", "interfaces.b_sqlite_runtime.run_sqlite_worker"),
+        ("prepare-sqlite", "interfaces.b_sqlite_runtime.run_sqlite_worker"),
+    ],
+)
+def test_integrated_worker_modes_keep_their_execution_boundary(mode, runner):
+    args = ["worker", "--mode", mode, "--check-config"]
+    if mode == "build":
+        args.append("--deploy-built-image")
+    with patch(runner) as run:
+        main(args)
+    run.assert_called_once()
+    options = run.call_args.args[0]
+    assert options.worker_mode == mode and options.check_config
+    assert options.deploy_built_image is (mode == "build")
+
+
+@pytest.mark.parametrize(
+    "mode", ["shared-database-queue", "dedicated-database-queue", "operating-review", "preparation-outbox"]
+)
+def test_database_and_preparation_workers_cannot_enable_image_deployment(mode):
+    with pytest.raises(SystemExit) as error:
+        main(["worker", "--mode", mode, "--deploy-built-image"])
+    assert error.value.code == 2
+
+
 @pytest.fixture
 def worker_environment(monkeypatch, tmp_path):
     ca = tmp_path / "ca.pem"

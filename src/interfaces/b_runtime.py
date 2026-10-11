@@ -98,6 +98,9 @@ def main(argv):
         action="store_true",
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
+    api.add_argument(
+        "--enable-sqlite-preparation", action="store_true", help="Opt in to isolated SQLite preparation jobs"
+    )
     api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
     api.add_argument(
         "--operating-review-policy-config", help="Operator-reviewed scheduled DB promotion policies"
@@ -112,6 +115,8 @@ def main(argv):
         choices=(
             "outbox",
             "build",
+            "preparation-outbox",
+            "prepare-sqlite",
             "shared-database",
             "shared-database-queue",
             "dedicated-database",
@@ -195,6 +200,8 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if args.enable_sqlite_preparation and not args.enable_preparation:
+            parser.error("--enable-sqlite-preparation requires --enable-preparation")
         if (
             "SKY_DATABASE_CUTOVER_REGISTRATIONS_JSON" in os.environ
             or os.environ.get("SKY_DATABASE_CUTOVER_ENABLED", "false") != "false"
@@ -295,6 +302,19 @@ def main(argv):
         )
     ):
         parser.error("Shared database options require --mode shared-database")
+    if args.worker_mode in {"preparation-outbox", "prepare-sqlite"}:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from interfaces.b_sqlite_runtime import run_sqlite_worker
+
+        try:
+            run_sqlite_worker(args)
+        except (OSError, ValueError, TypeError, KeyError, BotoCoreError, ClientError):
+            parser.exit(
+                1,
+                "SQLite preparation unavailable; check isolated queue, workspace, schemas and credentials.\n",
+            )
+        return
     if args.worker_mode == "build":
         from botocore.exceptions import BotoCoreError, ClientError
 

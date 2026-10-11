@@ -41,6 +41,11 @@ def run_preparation_api(args):
     database = PostgresStateSettings.from_environment()
     artifacts = S3ArtifactSettings.from_environment()
     workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
+    sqlite_workspace = None
+    if getattr(args, "enable_sqlite_preparation", False):
+        from interfaces.b_sqlite_runtime import preparation_scope
+
+        sqlite_workspace, _ = preparation_scope(os.environ, artifacts)
     operations = PostgresOperationStore(None, workspace=workspace)
     connection = RotatingDatabaseConnection(database)
     operations = PostgresOperationStore(connection, workspace=operations.workspace)
@@ -52,8 +57,21 @@ def run_preparation_api(args):
     sources = SourceArtifactService(S3SourceArtifactStore(artifacts))
     preparation = DeploymentPreparationService(sources, previews)
     reads = DeploymentReadService(PostgresDeploymentReads(connection, workspace=workspace))
+    sqlite_jobs = None
+    if sqlite_workspace is not None:
+        from application.sqlite_preparation_jobs import SqlitePreparationJobs
+
+        sqlite_jobs = SqlitePreparationJobs(
+            previews, PostgresOperationStore(connection, workspace=sqlite_workspace)
+        )
     app = DatabasePreparationApp(
-        reads, approvals, preparation, authenticator=authenticator, origin=args.origin, workspace=workspace
+        reads,
+        approvals,
+        preparation,
+        authenticator=authenticator,
+        origin=args.origin,
+        workspace=workspace,
+        sqlite_jobs=sqlite_jobs,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler_for_preparation(app))
     print(

@@ -22,6 +22,7 @@ from ports.operations import (
 )
 
 KINDS = {
+    "prepare_sqlite",
     "deploy",
     "rollback",
     "retire",
