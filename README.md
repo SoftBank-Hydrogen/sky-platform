@@ -44,7 +44,7 @@ SoftBank Hackathon 2026 **One Action, Infinite Clouds** 팀 SoftBank-Hydrogen의
 | GCP Cloud Run | 서버리스 컨테이너, Cloud SQL 연결 | 구현 |
 | AWS Lambda, EC2 | 소스 근거로 구조 적합성 판정, 명시 선택 배포 | PR 진행 중 |
 
-**실검증**은 실제 계정·실제 모델로 확인한 것, **구현**은 테스트는 통과했지만 실계정 전체 경로는 아직 확인하지 않은 것입니다.
+**실검증**은 해당 환경에서 실제 실행·응답을 확인한 경로입니다. 로컬 VM 검증은 외부 온프레미스 실증과 구분합니다. **구현**은 실환경 전체 경로가 아직 확인되지 않은 상태입니다. 모든 경로에서 실제 AI·DB·WebSocket 검증을 수행했다는 뜻은 아닙니다.
 
 자동 선택은 정적 앱이면 S3 + CloudFront, 아니면 적격 후보(Local Docker, ECS Express, Cloud Run) 중에서 고릅니다.
 DB가 필요한 앱, WebSocket 앱, 온프레미스는 자동 선택하지 않고 사용자 확인을 거칩니다.
@@ -74,6 +74,7 @@ export OPENAI_API_KEY=...          # 또는 chmod 600인 .env 파일
 ## 호스팅 모드 (B안)
 
 여러 조직이 쓰는 클라우드 운영형 Sky입니다. 인프라는 sky-infra의 Terraform이 만듭니다.
+아래는 구현된 구성 요소의 흐름입니다. 운영 환경에서는 호환되는 서비스 이미지와 워커 실행 설정을 별도로 적용해야 합니다. SQLite 변환·DB 연결을 포함한 전체 자동 배포는 아직 연결 중입니다.
 
 ```
 ALB + Cognito → API (Fargate) → PostgreSQL 상태 DB
