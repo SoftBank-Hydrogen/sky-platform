@@ -1,0 +1,149 @@
+"""Consume reviewed allocations; queue bodies never carry allocation commands."""
+
+import threading
+import time
+from contextlib import contextmanager
+
+from application.shared_database_workflow import KIND
+from application.database_promotion_workflow import KIND as PROMOTION_KIND
+from application.database_cutover_workflow import KIND as CUTOVER_KIND
+
+
+class AllocationOwnershipLost(OSError):
+    pass
+
+
+class AllocationQueueRouter:
+    """Route using durable operation kind, never fields supplied in queue payloads."""
+
+    def __init__(
+        self, operations, default_queue, allocation_queue, *, promotion_queue=None, cutover_queue=None
+    ):
+        self.operations, self.default_queue, self.allocation_queue = (
+            operations,
+            default_queue,
+            allocation_queue,
+        )
+        self.promotion_queue = promotion_queue
+        self.cutover_queue = cutover_queue
+
+    def publish(self, delivery):
+        operation = self.operations.get(delivery.operation_id)
+        if (
+            delivery.workspace != self.operations.workspace
+            or operation.application_id != delivery.application_id
+        ):
+            raise OSError("Outbox scope does not match durable operation")
+        if operation.kind == CUTOVER_KIND:
+            queue = self.cutover_queue
+        elif operation.kind == PROMOTION_KIND:
+            queue = self.promotion_queue
+        else:
+            queue = self.allocation_queue if operation.kind == KIND else self.default_queue
+        if queue is None:
+            raise OSError("Required operation queue is not configured")
+        queue.publish(delivery)
+
+
+class SharedDatabaseConsumer:
+    def __init__(self, operations, queue, worker, *, heartbeat_seconds=30, protection=None, kind=KIND):
+        if kind not in {KIND, PROMOTION_KIND, CUTOVER_KIND}:
+            raise ValueError("Unsupported database consumer kind")
+        self.kind = kind
+        self.operations, self.queue, self.worker = operations, queue, worker
+        self.heartbeat_seconds = heartbeat_seconds
+        self.protection = protection
+
+    @contextmanager
+    def ownership(self, lease, delivery):
+        stop, lost = threading.Event(), threading.Event()
+        renewal_lock = threading.Lock()
+        last_transport_renewal = None
+
+        def renew():
+            nonlocal last_transport_renewal
+            with renewal_lock:
+                if lost.is_set() or not self.operations.heartbeat(lease, seconds=900):
+                    lost.set()
+                    raise AllocationOwnershipLost("Allocation execution ownership lost")
+                now = time.monotonic()
+                # Guards can run several times before an external operation. SQS
+                # throttles repeated visibility updates to the same receipt, so
+                # retain DB fencing on every guard and coalesce transport renewals.
+                if last_transport_renewal is None or now - last_transport_renewal >= min(
+                    self.heartbeat_seconds, 30
+                ):
+                    self.queue.extend(delivery, seconds=300)
+                    if self.protection is not None and not stop.is_set():
+                        self.protection.set(True)
+                    last_transport_renewal = now
+
+        def heartbeat():
+            while not stop.wait(self.heartbeat_seconds):
+                try:
+                    renew()
+                except OSError:
+                    lost.set()
+                    return
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            yield renew
+        finally:
+            stop.set()
+            thread.join(timeout=30)
+
+    def consume_once(self):
+        self.operations.recover_expired(limit=10)
+        delivery = self.queue.receive()
+        if delivery is None:
+            return "idle"
+        message = delivery.message
+        if message is None or message["workspace"] != self.operations.workspace:
+            self.queue.extend(delivery, seconds=60)
+            return "invalid"
+        try:
+            operation = self.operations.get(message["operation_id"])
+        except FileNotFoundError:
+            self.queue.extend(delivery, seconds=60)
+            return "missing"
+        if operation.application_id != message["application_id"]:
+            self.queue.extend(delivery, seconds=60)
+            return "invalid"
+        # A shared queue must not let this consumer acknowledge another worker's job.
+        if operation.kind != self.kind:
+            self.queue.extend(delivery, seconds=30)
+            return "other_kind"
+        if operation.attempt_id != message["attempt_id"] or operation.status in {
+            "succeeded",
+            "failed",
+            "needs_attention",
+        }:
+            self.queue.delete(delivery)
+            return "duplicate"
+        if operation.status == "running":
+            self.queue.extend(delivery, seconds=30)
+            return "busy"
+        self.worker.ownership = lambda lease: self.ownership(lease, delivery)
+        try:
+            if self.protection is not None:
+                self.protection.set(True)
+            result = self.worker.execute(operation.id, operation.attempt_id)
+            # Only durable terminal states can acknowledge a delivery. An uncertain
+            # commit/lease loss must remain observable for expiry recovery.
+            saved = self.operations.get(operation.id)
+            if saved.status in {"succeeded", "failed", "needs_attention"}:
+                self.queue.delete(delivery)
+            else:
+                self.queue.extend(delivery, seconds=30)
+            return result["status"]
+        except OSError:
+            return "unavailable"
+        finally:
+            self.worker.ownership = None
+            if self.protection is not None:
+                try:
+                    self.protection.set(False)
+                except OSError:
+                    pass

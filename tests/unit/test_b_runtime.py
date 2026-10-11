@@ -1,6 +1,7 @@
 """Runtime routing, fail-closed configuration and bounded outbox shutdown."""
 
 import json
+import os
 import sys
 import threading
 from contextlib import ExitStack
@@ -23,6 +24,12 @@ def test_api_routes_to_database_without_local_state():
         service_main()
         serve.assert_called_once_with(product_name="Sky")
         assert sys.argv is previous
+
+
+def test_operating_policy_cannot_silently_start_read_only_or_preparation_mode():
+    with pytest.raises(SystemExit) as error:
+        main(["api", "--operating-review-policy-config", "policies.json"])
+    assert error.value.code == 2
 
 
 def test_api_forwards_read_only_and_alb_configuration():
@@ -49,6 +56,38 @@ def test_worker_does_not_silently_start_legacy_web_or_claim_deployments():
         pytest.raises(SystemExit) as error,
     ):
         service_main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "mode,runner",
+    [
+        ("build", "interfaces.b_build_runtime.run_build_consumer"),
+        ("shared-database-queue", "interfaces.shared_database_worker.run_shared_database"),
+        ("dedicated-database-queue", "interfaces.dedicated_database_worker.run_dedicated_database"),
+        ("operating-review", "interfaces.operating_review_worker.run_operating_review"),
+        ("preparation-outbox", "interfaces.b_sqlite_runtime.run_sqlite_worker"),
+        ("prepare-sqlite", "interfaces.b_sqlite_runtime.run_sqlite_worker"),
+    ],
+)
+def test_integrated_worker_modes_keep_their_execution_boundary(mode, runner):
+    args = ["worker", "--mode", mode, "--check-config"]
+    if mode == "build":
+        args.append("--deploy-built-image")
+    with patch(runner) as run:
+        main(args)
+    run.assert_called_once()
+    options = run.call_args.args[0]
+    assert options.worker_mode == mode and options.check_config
+    assert options.deploy_built_image is (mode == "build")
+
+
+@pytest.mark.parametrize(
+    "mode", ["shared-database-queue", "dedicated-database-queue", "operating-review", "preparation-outbox"]
+)
+def test_database_and_preparation_workers_cannot_enable_image_deployment(mode):
+    with pytest.raises(SystemExit) as error:
+        main(["worker", "--mode", mode, "--deploy-built-image"])
     assert error.value.code == 2
 
 
@@ -379,3 +418,20 @@ def test_api_rejects_invalid_environment_identity_without_echoing_it(
     assert "Invalid hosted identity configuration" in error_output
     assert "identity-123" not in error_output and "alice" not in error_output
     api_server[1].serve_forever.assert_not_called()
+
+
+def test_cutover_configuration_cannot_silently_start_read_only_api(monkeypatch):
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_ENABLED", "true")
+    with pytest.raises(SystemExit) as error:
+        main(["api", "--check-config"])
+    assert error.value.code == 2
+
+
+def test_outbox_validates_distinct_cutover_fifo_without_aws_calls(worker_environment, monkeypatch):
+    url = "https://sqs.ap-northeast-2.amazonaws.com/977889523182/cutover.fifo"
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_QUEUE_URL", url)
+    with patch("boto3.client", side_effect=AssertionError("AWS call")):
+        main(["worker", "--mode", "outbox", "--check-config"])
+    monkeypatch.setenv("SKY_DATABASE_CUTOVER_QUEUE_URL", os.environ["SKY_JOB_QUEUE_URL"])
+    with pytest.raises(SystemExit):
+        main(["worker", "--mode", "outbox", "--check-config"])

@@ -1,4 +1,4 @@
-"""Explicit B API, opt-in preparation/outbox publisher and one-shot migration."""
+"""Explicit B API preparation/shared DB intake, outbox and maintenance."""
 
 import argparse
 import os
@@ -89,19 +89,40 @@ def main(argv):
     api.add_argument("--auth-mode", choices=("alb", "local"), default="alb")
     api.add_argument("--alb-trusts-file")
     api.add_argument("--memberships-file")
-    api.add_argument(
+    intake = api.add_mutually_exclusive_group()
+    intake.add_argument(
+        "--shared-database-pool-config", help="Opt in to reviewed workload DB allocation intake"
+    )
+    intake.add_argument(
         "--enable-preparation",
         action="store_true",
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
-    api.add_argument("--origin", help="Canonical HTTPS browser origin for preparation requests")
-    worker = modes.add_parser(
-        "worker", help="Outbox publisher or remote build/deployment worker", allow_abbrev=False
+    api.add_argument(
+        "--enable-sqlite-preparation", action="store_true", help="Opt in to isolated SQLite preparation jobs"
     )
+    api.add_argument("--origin", help="Exact browser origin for preparation or shared database consent")
+    api.add_argument(
+        "--operating-review-policy-config", help="Operator-reviewed scheduled DB promotion policies"
+    )
+    api.add_argument(
+        "--check-config", action="store_true", help="Validate shared intake without AWS/DB calls"
+    )
+    worker = modes.add_parser("worker", help="Outbox, build and database workers", allow_abbrev=False)
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "build"),
+        choices=(
+            "outbox",
+            "build",
+            "preparation-outbox",
+            "prepare-sqlite",
+            "shared-database",
+            "shared-database-queue",
+            "dedicated-database",
+            "dedicated-database-queue",
+            "operating-review",
+        ),
         required=True,
         help="Select outbox publisher or build consumer; ECS deployment requires --deploy-built-image",
     )
@@ -110,13 +131,37 @@ def main(argv):
         action="store_true",
         help="Opt in to verified ECS deployment after remote build",
     )
+    worker.add_argument(
+        "--collect-capacity-metrics",
+        action="store_true",
+        help="Read app-scoped workload DB capacity during an operating review",
+    )
+    worker.add_argument("--pool-config")
+    worker.add_argument("--dedicated-config")
+    worker.add_argument("--operating-review-policy-config")
+    worker.add_argument(
+        "--initialize-pool",
+        action="store_true",
+        help="Explicitly initialize an audited dedicated workload pool; no app allocation or deployment",
+    )
+    worker.add_argument("--alb-trusts-file")
+    worker.add_argument("--memberships-file")
+    worker.add_argument("--operation-id")
+    worker.add_argument("--attempt-id")
     worker.add_argument("--check-config", action="store_true", help="Validate settings without AWS/DB calls")
-    worker.add_argument("--once", action="store_true", help="Publish one bounded batch and exit")
+    worker.add_argument(
+        "--once", action="store_true", help="Process one bounded batch or queue delivery and exit"
+    )
     worker.add_argument("--interval", type=int, default=5)
-    modes.add_parser(
+    migrate = modes.add_parser(
         "migrate",
         help="Apply pending PostgreSQL state migrations once and exit; safe to repeat",
         allow_abbrev=False,
+    )
+    migrate.add_argument(
+        "--shared-database-reviews",
+        action="store_true",
+        help="Explicitly migrate the opt-in shared DB review schema too",
     )
     args = parser.parse_args(argv)
     if args.mode == "migrate":
@@ -140,6 +185,14 @@ def main(argv):
             run_migrations(
                 RotatingDatabaseConnection(settings), workspace, account_id=account_id, region=settings.region
             )
+            if args.shared_database_reviews:
+                from adapters.state.operations import PostgresOperationStore
+                from adapters.state.shared_database_reviews import PostgresSharedDatabaseReviews
+
+                PostgresSharedDatabaseReviews.initialize_schema(
+                    PostgresOperationStore(RotatingDatabaseConnection(settings), workspace=workspace)
+                )
+                print("shared database review schema: up to date", flush=True)
         except (OSError, ValueError, BotoCoreError, ClientError):
             # Do not log query diagnostics, credentials or DDL.
             parser.exit(
@@ -147,9 +200,25 @@ def main(argv):
             )
         return
     if args.mode == "api":
-        if args.origin and not args.enable_preparation:
-            parser.error("--origin requires --enable-preparation")
+        if args.enable_sqlite_preparation and not args.enable_preparation:
+            parser.error("--enable-sqlite-preparation requires --enable-preparation")
+        if (
+            "SKY_DATABASE_CUTOVER_REGISTRATIONS_JSON" in os.environ
+            or os.environ.get("SKY_DATABASE_CUTOVER_ENABLED", "false") != "false"
+        ) and not args.shared_database_pool_config:
+            parser.error("Cutover intake requires hosted shared database API")
+        if (
+            args.operating_review_policy_config or "SKY_OPERATING_REVIEW_POLICIES_JSON" in os.environ
+        ) and not args.shared_database_pool_config:
+            parser.error("Operating reviews require hosted shared database intake")
+        if args.shared_database_pool_config:
+            from interfaces.shared_database_api import run_shared_database_api
+
+            run_shared_database_api(args, parser)
+            return
         if args.enable_preparation:
+            if args.check_config:
+                parser.error("--check-config currently requires --shared-database-pool-config")
             if (
                 args.auth_mode != "alb"
                 or not (
@@ -173,6 +242,10 @@ def main(argv):
                     "Preparation API unavailable; check hosted authentication, schemas, S3 and database configuration.\n",
                 )
             return
+        if args.origin or args.check_config:
+            parser.error(
+                "--origin requires preparation or shared database intake; --check-config requires shared intake"
+            )
         from interfaces.http.server import serve
 
         forwarded = [
@@ -199,6 +272,49 @@ def main(argv):
         parser.error("--interval must be between 1 and 300 seconds")
     if args.deploy_built_image and args.worker_mode != "build":
         parser.error("--deploy-built-image requires --mode build")
+    if args.worker_mode == "operating-review":
+        from interfaces.operating_review_worker import run_operating_review
+
+        run_operating_review(args, parser)
+        return
+    if args.collect_capacity_metrics:
+        parser.error("Capacity collection requires operating review mode")
+    if args.worker_mode in {"dedicated-database", "dedicated-database-queue"}:
+        from interfaces.dedicated_database_worker import run_dedicated_database
+
+        run_dedicated_database(args, parser)
+        return
+    if args.dedicated_config or args.operating_review_policy_config:
+        parser.error("Dedicated database options require dedicated database mode")
+    if args.worker_mode in {"shared-database", "shared-database-queue"}:
+        from interfaces.shared_database_worker import run_shared_database
+
+        run_shared_database(args, parser)
+        return
+    if any(
+        (
+            args.pool_config,
+            args.alb_trusts_file,
+            args.memberships_file,
+            args.operation_id,
+            args.attempt_id,
+            args.initialize_pool,
+        )
+    ):
+        parser.error("Shared database options require --mode shared-database")
+    if args.worker_mode in {"preparation-outbox", "prepare-sqlite"}:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from interfaces.b_sqlite_runtime import run_sqlite_worker
+
+        try:
+            run_sqlite_worker(args)
+        except (OSError, ValueError, TypeError, KeyError, BotoCoreError, ClientError):
+            parser.exit(
+                1,
+                "SQLite preparation unavailable; check isolated queue, workspace, schemas and credentials.\n",
+            )
+        return
     if args.worker_mode == "build":
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -216,7 +332,10 @@ def main(argv):
 
     from adapters.aws.job_queue import SqsOperationQueue
     from adapters.state.operations import PostgresOperationStore
-    from adapters.state.postgres import PostgresStateSettings, RotatingDatabaseConnection
+    from adapters.state.postgres import (
+        PostgresStateSettings,
+        RotatingDatabaseConnection,
+    )
     from adapters.state.readiness import check_database_ready
     from application.outbox import OutboxPublisher
 
@@ -226,6 +345,21 @@ def main(argv):
         url = os.environ.get("SKY_JOB_QUEUE_URL", "")
         # A sentinel avoids constructing a boto client during configuration validation.
         SqsOperationQueue(url, region=settings.region, account_id=account, client=object())
+        allocation_url = os.environ.get("SKY_SHARED_DATABASE_QUEUE_URL", "")
+        if allocation_url:
+            if allocation_url == url:
+                raise ValueError("Allocation queue must be separate from the build queue")
+            SqsOperationQueue(allocation_url, region=settings.region, account_id=account, client=object())
+        dedicated_url = os.environ.get("SKY_DEDICATED_DATABASE_QUEUE_URL", "")
+        if dedicated_url:
+            if dedicated_url in {url, allocation_url}:
+                raise ValueError("Dedicated preparation queue must be separate")
+            SqsOperationQueue(dedicated_url, region=settings.region, account_id=account, client=object())
+        cutover_url = os.environ.get("SKY_DATABASE_CUTOVER_QUEUE_URL", "")
+        if cutover_url:
+            if cutover_url in {url, allocation_url, dedicated_url}:
+                raise ValueError("Cutover queue must be separate")
+            SqsOperationQueue(cutover_url, region=settings.region, account_id=account, client=object())
         workspace = os.environ.get("SKY_STATE_WORKSPACE", "team")
         PostgresOperationStore(None, workspace=workspace)
     except ValueError:
@@ -238,6 +372,21 @@ def main(argv):
         check_database_ready(connection, operations=True)
         store = PostgresOperationStore(connection, workspace=workspace)
         queue = SqsOperationQueue(url, region=settings.region, account_id=account)
+        from application.shared_database_consumer import AllocationQueueRouter
+
+        queue = AllocationQueueRouter(
+            store,
+            queue,
+            SqsOperationQueue(allocation_url, region=settings.region, account_id=account)
+            if allocation_url
+            else None,
+            promotion_queue=SqsOperationQueue(dedicated_url, region=settings.region, account_id=account)
+            if dedicated_url
+            else None,
+            cutover_queue=SqsOperationQueue(cutover_url, region=settings.region, account_id=account)
+            if cutover_url
+            else None,
+        )
         publisher = OutboxPublisher(store, queue, "outbox-" + uuid4().hex)
         stop = threading.Event()
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}

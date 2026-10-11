@@ -197,6 +197,23 @@ def compile_sqlite_snapshot(path: Path) -> SqliteSnapshot:
                 sql.append(
                     f"SELECT 1 / CASE WHEN (SELECT COUNT(*) FROM {table}) = {len(rows)} THEN 1 ELSE 0 END;"
                 )
+                if rows:
+                    # EXCEPT ALL compares a multiset: NULLs and duplicate counts
+                    # matter, while row ordering does not. Explicit casts also
+                    # handle empty-valued columns and BIGINT identity values.
+                    expected_rows = ", ".join(
+                        "(" + ", ".join(
+                            f"CAST({_literal(value)} AS {'BIGINT' if declared[index][1] == 'INTEGER' else 'TEXT'})"
+                            for index, value in enumerate(row)
+                        ) + ")" for row in rows
+                    )
+                    sql.append(
+                        "WITH expected (" + ", ".join(names) + ") AS (VALUES " + expected_rows + "), "
+                        f"actual AS (SELECT {', '.join(names)} FROM {table}) "
+                        "SELECT 1 / CASE WHEN NOT EXISTS "
+                        "((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual) UNION ALL "
+                        "(SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)) THEN 1 ELSE 0 END;"
+                    )
             result = "\n".join(sql) + "\n"
     except sqlite3.DatabaseError as exc:
         raise ValueError("SQLite 스냅샷을 읽지 못했습니다.") from exc

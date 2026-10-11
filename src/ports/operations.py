@@ -99,6 +99,10 @@ class OperationStore(Protocol):
 
     def interrupt(self, lease: ExecutionLease, checkpoint: dict) -> bool: ...
 
+    def require_attention(self, lease: ExecutionLease, checkpoint: dict) -> bool:
+        """Retain scope/evidence and require a fresh operator reconciliation."""
+        ...
+
     def recover_expired(self, *, limit: int = 100) -> tuple[str, ...]: ...
 
     def resolve_attention(

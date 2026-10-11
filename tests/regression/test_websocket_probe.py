@@ -115,13 +115,19 @@ class WebSocketProbeTests(unittest.TestCase):
                 handler.do_POST()
             self.assertEqual(handler.json_response.call_args.args[0], 200)
             self.assertEqual(app.jobs[job_id]['websocket_verification']['status'], 'passed')
-            self.assertEqual(deployment_certificate(app.jobs[job_id])['verification'][-1]['status'], 'passed')
+            checks = {item['name']: item['status']
+                      for item in deployment_certificate(app.jobs[job_id])['verification']}
+            self.assertEqual(checks['websocket_round_trip'], 'passed')
+            self.assertEqual(checks['websocket_session_continuity'], 'unverified')
             with patch('application.monitoring.check_deployment', return_value={'healthy': False}), \
                     patch('application.monitoring.probe_sky_game') as probe:
                 failed = app.check_and_record_websocket(job_id)
             self.assertEqual(failed['status'], 'failed')
             probe.assert_not_called()
-            self.assertEqual(deployment_certificate(app.jobs[job_id])['verification'][-1]['status'], 'failed')
+            checks = {item['name']: item['status']
+                      for item in deployment_certificate(app.jobs[job_id])['verification']}
+            self.assertEqual(checks['websocket_round_trip'], 'failed')
+            self.assertEqual(checks['websocket_session_continuity'], 'unverified')
             app.jobs[job_id]['application_ir']['hypotheses'] = []
             with self.assertRaisesRegex(ValueError, '계약'):
                 app.check_and_record_websocket(job_id)

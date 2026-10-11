@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -11,6 +12,22 @@ from adapters.local.rehearsal import rehearse_image
 ATTEMPT = 'a' * 16 + '-a1'
 IMAGE = 'example.invalid/sky-managed:' + ATTEMPT
 IMAGE_ID = 'sha256:' + 'b' * 64
+MANIFEST = json.dumps({'schemaVersion': 2, 'config': {'digest': IMAGE_ID}})
+DIGEST = 'sha256:' + hashlib.sha256(MANIFEST.encode()).hexdigest()
+
+
+def identity_response(args, account, region, service, image):
+    task = f'arn:aws:ecs:{region}:{account}:task/default/' + 'e' * 32
+    if args[:2] == ['ecr', 'batch-get-image']:
+        return json.dumps({'images': [{'imageManifest': MANIFEST, 'imageId': {'imageDigest': DIGEST}}]})
+    if args[:2] == ['ecs', 'list-tasks']:
+        return json.dumps({'taskArns': [task]})
+    if args[:2] == ['ecs', 'describe-tasks']:
+        return json.dumps({'tasks': [{'taskArn': task, 'clusterArn': f'arn:aws:ecs:{region}:{account}:cluster/default',
+            'group': 'service:' + service, 'taskDefinitionArn': f'arn:aws:ecs:{region}:{account}:task-definition/{service}:1',
+            'lastStatus': 'RUNNING', 'desiredStatus': 'RUNNING',
+            'containers': [{'image': image, 'imageDigest': DIGEST, 'lastStatus': 'RUNNING'}]}]})
+    return None
 
 
 class RehearsalTests(unittest.TestCase):
@@ -87,9 +104,12 @@ class RehearsalTests(unittest.TestCase):
         image = repository + ':' + ATTEMPT
         service = 'sky-' + ATTEMPT
         arn = f'arn:aws:ecs:{region}:{account}:service/default/{service}'
-        digest = 'sha256:' + 'c' * 64
+        digest = DIGEST
         requests = []
         def aws(args, **_kwargs):
+            identity = identity_response(args, account, region, service, image)
+            if identity is not None:
+                return identity
             requests.append(args)
             if args[:2] == ['ecr', 'get-login-password']:
                 return 'synthetic-password'
@@ -177,10 +197,13 @@ class RehearsalTests(unittest.TestCase):
                 return IMAGE_ID
             return ''
         def aws(args, **_kwargs):
+            identity = identity_response(args, account, region, service, image)
+            if identity is not None:
+                return identity
             if args[:2] == ['ecr', 'get-login-password']:
                 return 'synthetic-password'
             if args[:2] == ['ecr', 'describe-images']:
-                return json.dumps({'imageDetails': [{'imageDigest': 'sha256:' + 'c' * 64}]})
+                return json.dumps({'imageDetails': [{'imageDigest': DIGEST}]})
             if args[:2] == ['ecs', 'create-express-gateway-service']:
                 return json.dumps({'service': {'serviceArn': arn,
                                                'currentDeployment': 'deployment-1'}})
@@ -207,7 +230,7 @@ class RehearsalTests(unittest.TestCase):
         self.assertIn(['docker', 'tag', local_image, image], commands)
         self.assertNotIn(['docker', 'image', 'rm', local_image], commands)
         self.assertEqual(result['promotion'], candidate)
-        self.assertEqual(result['image_digest'], 'sha256:' + 'c' * 64)
+        self.assertEqual(result['image_digest'], DIGEST)
 
 
 if __name__ == '__main__':

@@ -5,17 +5,19 @@ fresh probe of cloud resources. Missing evidence remains explicitly unknown.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 
+from application.consistency import health_result_matches_plan
 from application.deployment_core import DeploymentPlan
+from application.session_evidence import recorded_session_rehearsal
 from application.source_transform import executable_plan_digest, resolved_target_plan
+from application.verification_gates import static_consistency_gate, target_verification_obligations
 from engine.architecture_decision import verify_architecture_decision
 from engine.compilation import verify_compilation
 from engine.deployment_policy import policy_from_record
-from application.consistency import health_result_matches_plan
-from application.verification_gates import static_consistency_gate, target_verification_obligations
-
 
 _SHA256 = re.compile(r'[a-f0-9]{64}')
 
@@ -236,6 +238,105 @@ def _schema_migration_task_verified(job: dict, result: dict) -> bool:
     )
 
 
+def _sqlite_integrity_evidence(job: dict, result: dict) -> dict | None:
+    """Connect the bounded snapshot assertion to an owned successful SQL task.
+
+    This proves assertions at import time, not an independent current DB audit.
+    Legacy count-only bundles deliberately have no recognized protocol record.
+    """
+    if not _schema_migration_task_verified(job, result):
+        return None
+    conversion = job.get('sqlite_conversion')
+    plan = job.get('plan')
+    checks = [check for check in _items(job.get('consistency_checks'))
+              if isinstance(check, dict) and check.get('id') == 'CV-04'
+              and check.get('source') == 'reviewed_sqlite_migration']
+    if not isinstance(conversion, dict) or not isinstance(plan, dict) or len(checks) != 1:
+        return None
+    check = checks[0]
+    evidence = check.get('integrity')
+    if check.get('status') != 'pass' or not isinstance(evidence, dict):
+        return None
+    counts, schema = conversion.get('row_counts'), conversion.get('schema')
+    if (not isinstance(counts, dict) or not 1 <= len(counts) <= 8
+            or not isinstance(schema, dict) or set(schema) != set(counts)
+            or any(not isinstance(name, str) or type(count) is not int or count < 0
+                   for name, count in counts.items()) or sum(counts.values()) > 1000):
+        return None
+    try:
+        schema_digest = hashlib.sha256(json.dumps(
+            schema, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    except (ValueError, TypeError):
+        return None
+    sql_digest = _digest(evidence.get('sql_sha256'))
+    if sql_digest is None:
+        return None
+    bundle_digest = hashlib.sha256(
+        b'0000_sky_sqlite_import.sql\0' + bytes.fromhex(sql_digest)).hexdigest()
+    if (evidence.get('protocol') != 'sqlite-snapshot-multiset-v1'
+            or _digest(job.get('source_digest')) is None
+            or evidence.get('source_revision') != job['source_digest']
+            or _digest(plan.get('source_digest')) is None
+            or evidence.get('prepared_revision') != plan['source_digest']
+            or _digest(conversion.get('source_sha256')) is None
+            or evidence.get('snapshot_sha256') != conversion['source_sha256']
+            or evidence.get('schema_sha256') != schema_digest
+            or evidence.get('row_counts') != counts
+            or evidence.get('bundle_digest') != bundle_digest
+            or result['migration'].get('bundle_digest') != bundle_digest):
+        return None
+    # Allowlist metadata; never include source SQL or raw application values.
+    return {key: evidence[key] for key in (
+        'protocol', 'source_revision', 'prepared_revision', 'snapshot_sha256',
+        'sql_sha256', 'schema_sha256', 'bundle_digest', 'row_counts')}
+
+
+def _runtime_identity_verified(job: dict, result: dict) -> bool:
+    evidence = result.get('image_identity')
+    origin = result.get('rehearsal') or result.get('promotion')
+    if (job.get('target') != 'aws-ecs-express' or not isinstance(evidence, dict)
+            or not isinstance(origin, dict) or origin.get('platform') != 'linux/amd64'
+            or evidence.get('protocol') != 'ecs-image-identity-v1' or evidence.get('status') != 'passed'):
+        return False
+    account, region, service = result.get('account'), result.get('region'), result.get('service')
+    if (not isinstance(account, str) or not re.fullmatch(r'\d{12}', account)
+            or not isinstance(region, str) or not re.fullmatch(r'[a-z]{2}-[a-z]+-\d', region)
+            or not isinstance(service, str) or not re.fullmatch(r'sky-[a-f0-9]{16}-a[1-3]', service)):
+        return False
+    arn = f'arn:aws:ecs:{region}:{account}:service/default/{service}'
+    prefix = f'arn:aws:ecs:{region}:{account}:task/default/'
+    tasks = evidence.get('task_arns')
+    definition = evidence.get('task_definition_arn')
+    definition_prefix = f'arn:aws:ecs:{region}:{account}:task-definition/'
+    return bool(
+        isinstance(tasks, list) and 1 <= len(tasks) <= 100
+        and all(isinstance(task, str) and task.startswith(prefix)
+                and re.fullmatch(r'[a-f0-9]{32}', task.removeprefix(prefix)) for task in tasks)
+        and len(set(tasks)) == len(tasks)
+        and isinstance(definition, str) and definition.startswith(definition_prefix)
+        and re.fullmatch(r'[A-Za-z0-9_-]+:\d+', definition.removeprefix(definition_prefix))
+        and definition == result.get('task_definition_arn')
+        and evidence.get('service_arn') == result.get('service_arn') == arn
+        and isinstance(evidence.get('checked_at'), str)
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('local_image_id')))
+        and evidence['local_image_id'] == origin.get('image_id')
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('manifest_digest')))
+        and evidence['manifest_digest'] == result.get('image_digest')
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('platform_manifest_digest')))
+        and re.fullmatch(r'sha256:[a-f0-9]{64}', str(evidence.get('config_digest')))
+        and evidence['local_image_id'] in {evidence['manifest_digest'],
+                                          evidence['platform_manifest_digest'], evidence['config_digest']}
+        and isinstance(evidence.get('runtime_digests'), list)
+        and 1 <= len(evidence['runtime_digests']) <= 2
+        and all(isinstance(digest, str) and digest in {evidence['manifest_digest'],
+                                                     evidence['platform_manifest_digest']}
+                for digest in evidence['runtime_digests'])
+        and evidence.get('image') == result.get('image')
+        and isinstance(result.get('image'), str)
+        and result['image'].startswith(f'{account}.dkr.ecr.{region}.amazonaws.com/sky-managed:')
+    )
+
+
 def _release_rollback_verified(job: dict, result: dict) -> bool:
     """Check the saved result of restoring a prior ECS release, not a rehearsal."""
     record = job.get('release_rollback_verification')
@@ -381,8 +482,12 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
         {'name': 'registry_manifest', 'status': 'passed' if completed and registry_digest else 'unverified',
          'detail': ('ECR 이미지 태그의 매니페스트 다이제스트를 업로드 후와 배포 후에 확인했습니다.'
                     if completed and registry_digest else '레지스트리 매니페스트 다이제스트 확인 기록이 없습니다.')},
-        {'name': 'image_identity', 'status': 'unverified',
-         'detail': '실행 중인 ECS 태스크의 이미지 다이제스트는 아직 대조하지 않았습니다.'},
+        {'name': 'image_identity',
+         'status': 'passed' if completed and _runtime_identity_verified(job, result) else 'unverified',
+         'detail': ('리허설 이미지 config → ECR 매니페스트 → 실행 ECS 태스크 다이제스트의 일치를 확인했습니다. '
+                    '배포 당시의 기록이며 현재 태스크 재조회는 아닙니다.'
+                    if completed and _runtime_identity_verified(job, result) else
+                    '리허설 이미지부터 실행 중인 ECS 태스크까지 연결한 확인 기록이 없습니다.')},
         {'name': 'ai_model_execution', 'status': 'passed' if ai_recorded else 'unverified',
          'detail': ('Sky가 OpenAI Responses API의 완료 응답 ID와 모델명을 작업에 기록했습니다. 독립 서명 검증은 아닙니다.'
                     if ai_recorded else '실제 모델 호출과 고정 응답을 구분하는 출처 기록이 없습니다.')},
@@ -413,8 +518,13 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                        'status': 'passed' if migration_verified else 'unverified',
                        'detail': ('소유한 ECS 일회성 SQL 태스크의 성공 결과와 작업 기록이 일치합니다. DB 내용을 독립 조회한 증거는 아닙니다.'
                                   if migration_verified else '소유한 ECS SQL 태스크의 성공 기록을 확인할 수 없습니다.')})
-        checks.append({'name': 'cross_environment_data_migration', 'status': 'unverified',
-                       'detail': '환경 간 기존 데이터 이전은 SQL 스키마 마이그레이션과 별도로 검증해야 합니다.'})
+        integrity = _sqlite_integrity_evidence(job, result) if completed else None
+        checks.append({'name': 'cross_environment_data_migration',
+                       'status': 'passed' if integrity else 'unverified',
+                       'evidence': integrity,
+                       'detail': ('승인한 SQLite 스냅샷의 스키마·행 수·값·중복 검사가 SQL 이전 트랜잭션에서 통과했습니다. '
+                                  '현재 DB 재조회나 이후 앱 쓰기 결과의 검증은 아닙니다.' if integrity else
+                                  '승인한 스냅샷의 값 검증과 실제 SQL 태스크를 연결한 기록이 없습니다.')})
     local_sqlite = job.get('local_sqlite_binding')
     if isinstance(local_sqlite, dict):
         mounted = bool(completed and result.get('sqlite_volume') == local_sqlite.get('volume_name')
@@ -442,6 +552,16 @@ def deployment_certificate(job: dict, health_history: list[dict] | None = None) 
                                   if recorded == 'passed' else
                                   '실제 대상의 sky.probe 왕복에 실패했습니다.' if recorded == 'failed' else
                                   '실제 대상의 WebSocket 메시지 왕복 기록이 없습니다.')})
+        checks.append({'name': 'websocket_session_continuity', 'status': 'unverified',
+                       'detail': '새 연결의 메시지 왕복은 기존 플레이어 연결·진행 중인 게임 상태의 유지를 증명하지 않습니다. '
+                                 '이 배포 리비전에 연결된 갱신·재시작·롤백 세션 증거가 필요합니다.'})
+        session_rehearsal = recorded_session_rehearsal(job) if completed else None
+        checks.append({'name': 'websocket_session_rehearsal',
+                       'status': 'passed' if session_rehearsal else 'unverified',
+                       'evidence': session_rehearsal,
+                       'detail': ('같은 이미지의 격리 복제본에서 연결 종료·재접속·메모리 상태 초기화·점수 유지를 관측했습니다. '
+                                  '실제 배포 대상의 갱신·롤백이나 세션 유지 성공을 뜻하지 않습니다.' if session_rehearsal else
+                                  '이 앱·소스 리비전·이미지에 연결된 세션 리허설 기록이 없습니다.')})
 
     changes = job.get('changes') if isinstance(job.get('changes'), list) else []
     changed_paths = sorted({item['path'] for item in changes

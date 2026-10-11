@@ -21,6 +21,7 @@ from pathlib import Path
 
 from assets import ASSET_ROOT
 from adapters.aws.role_boundary import managed_role_boundary
+from adapters.aws.image_identity import verify_runtime_image
 from application.analysis import redact
 from application.client_urls import check_browser_client_urls
 from application.deployment_core import source_digest, validate_environment
@@ -539,6 +540,12 @@ class AwsExpressAdapter:
         if (not isinstance(task_definition, str) or not task_definition.startswith(expected_task_prefix)
                 or not re.fullmatch(r'[A-Za-z0-9_-]+:\d+', task_definition.removeprefix(expected_task_prefix))):
             raise AwsConfigurationError('배포된 ECS 태스크 정의 ARN을 확인할 수 없습니다.')
+        identity = None
+        if self.image_digest and (self.rehearsal_result or self.promoted_image):
+            identity = verify_runtime_image(
+                self.aws, account=account, region=self.settings.region, service=service,
+                task_definition=task_definition, image=self.image, manifest_digest=self.image_digest,
+                local_image_id=(self.rehearsal_result or self.promoted_image)['image_id'])
         return {'url': url, 'health_url': url + plan.health_path, 'service': service,
                 'service_arn': self.service_arn, 'image': self.image, 'target': 'aws-ecs-express',
                 'region': self.settings.region, 'account': account, 'public': True,
@@ -547,6 +554,7 @@ class AwsExpressAdapter:
                 **({'rehearsal': self.rehearsal_result} if self.rehearsal_result else {}),
                 **({'promotion': self.promoted_image} if self.promoted_image else {}),
                 **({'image_digest': self.image_digest} if self.image_digest else {}),
+                **({'image_identity': identity} if identity else {}),
                 **({'database': database} if database is not None else {}),
                 **({'migration': migration_result} if migration_result is not None else {}),
                 'task_definition_arn': task_definition,
