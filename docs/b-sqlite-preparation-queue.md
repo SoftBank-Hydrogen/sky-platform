@@ -40,7 +40,7 @@ sky-service worker --mode preparation-outbox
 sky-service worker --mode prepare-sqlite
 ```
 
-두 check-config는 AWS·DB·GitHub 호출 없이 설정을 검사한다. 소비 워커는 유효한 Fargate `ECS_AGENT_URI`와 ECS task protection을 요구한다. 기존 DB 비밀 읽기 권한, 준비 큐의 publish/receive/delete/visibility 권한, 원본 S3 읽기·준비 artifact 쓰기 권한이 필요하다. 이 워커에는 GitHub App·OpenAI·앱 DB 비밀번호·Docker가 필요하지 않다. 이 단계는 앱 코드의 AI 변환을 실행하지 않는다. `tug-postgres-v1`은 원본 digest가 일치하는 게임에 고정된 PostgreSQL 변환을 적용한다.
+두 check-config는 AWS·DB·GitHub 호출 없이 설정을 검사한다. 소비 워커는 유효한 Fargate `ECS_AGENT_URI`와 ECS task protection을 요구한다. 기존 DB 비밀 읽기 권한, 준비 큐의 publish/receive/delete/visibility 권한, 원본 S3 읽기·준비 artifact 쓰기 권한이 필요하다. 이 워커에는 GitHub App·OpenAI·앱 DB 비밀번호·Docker가 필요하지 않다. 이 단계는 앱 코드의 AI 변환을 실행하지 않는다. `tug-postgres-v1`은 원본 digest가 일치하는 게임에 고정된 PostgreSQL 변환을 적용한다. `tug-postgres-v1`은 원본 digest가 일치하는 게임에 고정된 PostgreSQL 변환을 적용한다.
 
 ## 처리·복구
 
@@ -56,4 +56,3 @@ sky-service worker --mode prepare-sqlite
 ## 다음 작업
 
 검증한 TUG의 PostgreSQL 변환·async 호출·게임 프로토콜은 구현 및 임시 DB 검증을 완료했다. 팀 할당 작업 결과의 실제 조회·ECS 설정 반영, 변환된 소스의 새 preview·승인 생성, 승인된 SQL 이전 실행이 남아 있다. 기존 SQLite preview의 배포 차단은 유지한다. 현재 작업 결과 artifact만으로 기존 승인을 재사용해 빌드·배포할 수 없다.
-
