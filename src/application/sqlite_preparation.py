@@ -25,8 +25,14 @@ def _database_path(project, raw):
             or relative.as_posix() != raw or "\\" in raw):
         raise ValueError("Invalid reviewed SQLite path")
     path = project.joinpath(*relative.parts)
-    if any(item.is_symlink() for item in (path, *path.parents)):
-        raise ValueError("SQLite path contains a symbolic link")
+    # Check the owned project and its descendants, not OS aliases above it
+    # (for example macOS /var -> /private/var for TemporaryDirectory).
+    current = project
+    for part in (None, *relative.parts):
+        if part is not None:
+            current = current / part
+        if current.is_symlink():
+            raise ValueError("SQLite path contains a symbolic link")
     return path
 
 
