@@ -94,6 +94,9 @@ def main(argv):
         action="store_true",
         help="Opt in to upload/preview/approval admission; no deployment consumer",
     )
+    api.add_argument(
+        "--enable-sqlite-preparation", action="store_true", help="Opt in to isolated SQLite preparation jobs"
+    )
     api.add_argument("--origin", help="Canonical HTTPS browser origin for preparation requests")
     worker = modes.add_parser(
         "worker", help="Outbox publisher or remote build/deployment worker", allow_abbrev=False
@@ -101,7 +104,7 @@ def main(argv):
     worker.add_argument(
         "--mode",
         dest="worker_mode",
-        choices=("outbox", "build"),
+        choices=("outbox", "build", "preparation-outbox", "prepare-sqlite"),
         required=True,
         help="Select outbox publisher or build consumer; ECS deployment requires --deploy-built-image",
     )
@@ -147,6 +150,8 @@ def main(argv):
             )
         return
     if args.mode == "api":
+        if args.enable_sqlite_preparation and not args.enable_preparation:
+            parser.error("--enable-sqlite-preparation requires --enable-preparation")
         if args.origin and not args.enable_preparation:
             parser.error("--origin requires --enable-preparation")
         if args.enable_preparation:
@@ -199,6 +204,19 @@ def main(argv):
         parser.error("--interval must be between 1 and 300 seconds")
     if args.deploy_built_image and args.worker_mode != "build":
         parser.error("--deploy-built-image requires --mode build")
+    if args.worker_mode in {"preparation-outbox", "prepare-sqlite"}:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        from interfaces.b_sqlite_runtime import run_sqlite_worker
+
+        try:
+            run_sqlite_worker(args)
+        except (OSError, ValueError, TypeError, KeyError, BotoCoreError, ClientError):
+            parser.exit(
+                1,
+                "SQLite preparation unavailable; check isolated queue, workspace, schemas and credentials.\n",
+            )
+        return
     if args.worker_mode == "build":
         from botocore.exceptions import BotoCoreError, ClientError
 
