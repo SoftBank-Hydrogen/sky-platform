@@ -84,6 +84,7 @@ def test_projections_and_detached_history(setup):
     assert "private" not in str(detail["diagnosis"])
     assert detail["last_health"] == {"healthy": False}
     assert detail["monitor_error"] is None
+    assert detail["runtime_proposal"] is None
     detail["health_history"].clear()
     assert service.history(principal(), "job1") == [{"healthy": False}]
     summary = service.summaries(principal()).items[0]
@@ -98,7 +99,9 @@ def test_projections_and_detached_history(setup):
         "result",
         "last_health",
         "monitor_error",
+        "runtime_proposal",
     }
+    assert summary["runtime_proposal"] is None
     assert service.releases(principal(), "job1").items[0]["target"] == "local-docker"
     assert service.releases(principal(), "absent").items == ()
 

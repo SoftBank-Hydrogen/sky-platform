@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from application.diagnosis import deployment_diagnosis
 from domain.access import Action, Principal, ResourceOwner, owner_from_record, permitted
+from engine.runtime_proposals import runtime_proposal
 from ports.deployment_reads import DeploymentReads, ReadCursor
 
 
@@ -52,6 +53,7 @@ class DeploymentReadService:
                 "health_history": health,
                 "last_health": health[-1] if health else None,
                 "monitor_error": job.get("monitor_error"),
+                "runtime_proposal": runtime_proposal(job, health),
             }
         )
 
@@ -75,6 +77,7 @@ class DeploymentReadService:
                     "result": job.get("result"),
                     "last_health": snapshot.health[-1] if snapshot.health else None,
                     "monitor_error": job.get("monitor_error"),
+                    "runtime_proposal": runtime_proposal(job, snapshot.health),
                 }
             )
         return DeploymentPage(tuple(deepcopy(items)), page.next_cursor)

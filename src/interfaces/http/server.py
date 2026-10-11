@@ -32,6 +32,7 @@ from adapters.aws.static_site import AwsStaticSiteAdapter
 from adapters.aws.network import ServiceNetworkRequest, discover_default_network
 from application.certificate import deployment_certificate
 from application.diagnosis import deployment_diagnosis
+from engine.runtime_proposals import runtime_proposal
 from application.github_deployments import GitHubDeploymentsMixin
 from adapters.gcp.cloud_run import CloudRunAdapter, CloudRunSettings
 from adapters.gcp.postgres import CloudSqlRequest
@@ -146,7 +147,8 @@ class App(GitHubDeploymentsMixin, StateRecoveryMixin, MonitoringMixin, StaticDep
                      "analyzer": (job.get("plan") or {}).get("analyzer", job.get("mode", "static")),
                      "result": job.get("result"),
                      "last_health": (self.health_history.get(job['id']) or [None])[-1],
-                     "monitor_error": self.monitor_errors.get(job['id'])}
+                     "monitor_error": self.monitor_errors.get(job['id']),
+                     "runtime_proposal": runtime_proposal(job, self.health_history.get(job['id'], []))}
                     for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
                     if principal is None or record_access(principal, Action.READ, job) is AccessResult.GRANTED]
 
@@ -1772,7 +1774,8 @@ def handler_for(app: App):
                     response = ({**job, 'diagnosis': deployment_diagnosis(job),
                                  'health_history': app.health_history.get(job_id, []),
                                  'last_health': (app.health_history.get(job_id) or [None])[-1],
-                                 'monitor_error': app.monitor_errors.get(job_id)}
+                                 'monitor_error': app.monitor_errors.get(job_id),
+                                 'runtime_proposal': runtime_proposal(job, app.health_history.get(job_id, []))}
                                 if job else {"error": "Not found"})
                     self.json_response(200 if job else 404, response)
                 return
